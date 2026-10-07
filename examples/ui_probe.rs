@@ -52,7 +52,7 @@ fn main() -> anyhow::Result<()> {
     let a: Vec<_> = std::env::args().skip(1).collect();
     anyhow::ensure!(
         a.len() >= 5,
-        "Usage: ui_probe OUTPUT X Y WIDTH HEIGHT [EVDEV_KEY ...]"
+        "Usage: ui_probe OUTPUT X Y WIDTH HEIGHT [--hover | EVDEV_KEY ...]"
     );
     let c = Connection::connect_to_env()?;
     let (g, mut q) = registry_queue_init::<State>(&c)?;
@@ -82,6 +82,11 @@ fn main() -> anyhow::Result<()> {
     pointer.frame();
     q.roundtrip(&mut s)?;
     std::thread::sleep(Duration::from_millis(150));
+    if a.get(5).is_some_and(|arg| arg == "--hover") {
+        pointer.destroy();
+        c.flush()?;
+        return Ok(());
+    }
     pointer.button(2, 0x110, wl_pointer::ButtonState::Pressed);
     pointer.frame();
     q.roundtrip(&mut s)?;

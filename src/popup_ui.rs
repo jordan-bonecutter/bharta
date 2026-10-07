@@ -29,6 +29,7 @@ impl App {
             return Ok(());
         }
         self.close_panel();
+        self.close_preview();
         // Sway routes popup keyboard events through the layer's focus policy.
         // Acquire focus only while a popup is open, restoring normal focus on close.
         if let Some(layer) = &self.layer {
@@ -468,6 +469,13 @@ impl PopupHandler for App {
         popup: &Popup,
         _: PopupConfigure,
     ) {
+        if let Some(p) = self.workspace_preview.as_mut()
+            && p.popup == *popup
+        {
+            p.ready = true;
+            self.draw_preview();
+            return;
+        }
         if let Some(p) = self.panel.as_mut()
             && p.popup == *popup
         {
@@ -476,6 +484,13 @@ impl PopupHandler for App {
         }
     }
     fn done(&mut self, _: &Connection, _: &QueueHandle<Self>, popup: &Popup) {
+        if self
+            .workspace_preview
+            .as_ref()
+            .is_some_and(|p| p.popup == *popup)
+        {
+            self.close_preview();
+        }
         if self.panel.as_ref().is_some_and(|p| p.popup == *popup) {
             self.close_panel();
         }

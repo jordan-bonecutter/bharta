@@ -1,4 +1,5 @@
 mod artwork;
+mod capture;
 mod icons;
 mod iwd;
 mod launcher;
@@ -10,6 +11,7 @@ mod popup_ui;
 mod render;
 mod status;
 mod supervisor;
+mod workspace_preview;
 
 use anyhow::{Context, Result, bail};
 use render::{Action, Hit, Renderer};
@@ -153,7 +155,11 @@ fn main() -> Result<()> {
     let (updates, requests) = std::sync::mpsc::channel();
     let mut event_loop: EventLoop<App> = EventLoop::try_new()?;
     let (ui_sender, ui_receiver) = channel::channel();
+    let (preview_sender, preview_receiver) = channel::channel();
     let mut app = App {
+        preview_requests: workspace_preview::watch(preview_sender),
+        preview_target: None,
+        workspace_preview: None,
         playback_requests: None,
         loop_handle: event_loop.handle(),
         compositor,
@@ -221,6 +227,14 @@ fn main() -> Result<()> {
             }
         })
         .map_err(|e| anyhow::anyhow!("UI result source: {e}"))?;
+    event_loop
+        .handle()
+        .insert_source(preview_receiver, |event, _, app| {
+            if let channel::Event::Msg(snapshot) = event {
+                app.preview_result(snapshot);
+            }
+        })
+        .map_err(|e| anyhow::anyhow!("Preview event source: {e}"))?;
     let (sender, receiver) = channel::channel();
     event_loop
         .handle()
@@ -337,7 +351,13 @@ fn main() -> Result<()> {
             .as_ref()
             .map(|p| p.dismissal.next_frame(std::time::Instant::now()))
             .unwrap_or(Duration::from_millis(250));
+        let wait = if app.preview_target.is_some() {
+            wait.min(Duration::from_millis(40))
+        } else {
+            wait
+        };
         event_loop.dispatch(wait, &mut app)?;
+        app.tick_preview(&qh);
         app.animate_popup();
         conn.flush()?;
         if app.smoke && std::time::Instant::now() > deadline {
@@ -350,6 +370,9 @@ fn main() -> Result<()> {
     Ok(())
 }
 struct App {
+    preview_requests: std::sync::mpsc::Sender<Option<String>>,
+    preview_target: Option<(String, i32, std::time::Instant)>,
+    workspace_preview: Option<workspace_preview::Preview>,
     playback_requests: Option<std::sync::mpsc::Sender<media::Request>>,
     loop_handle: LoopHandle<'static, App>,
     compositor: CompositorState,
@@ -431,6 +454,13 @@ impl CompositorHandler for App {
         surface: &wl_surface::WlSurface,
         factor: i32,
     ) {
+        if let Some(p) = self.workspace_preview.as_mut()
+            && p.popup.wl_surface() == surface
+        {
+            p.scale = factor.max(1) as u32;
+            self.draw_preview();
+            return;
+        }
         if let Some(p) = self.panel.as_mut()
             && p.popup.wl_surface() == surface
         {
@@ -595,10 +625,12 @@ impl PointerHandler for App {
             match event.kind {
                 PointerEventKind::Enter { .. } | PointerEventKind::Motion { .. } => {
                     self.hover = Some(event.position.0 as f32);
+                    self.hover_workspace(event.position.0 as f32);
                     self.draw();
                 }
                 PointerEventKind::Leave { .. } => {
                     self.hover = None;
+                    self.close_preview();
                     self.draw();
                 }
                 PointerEventKind::Press {
@@ -615,6 +647,7 @@ impl PointerHandler for App {
                             event.position.0 as i32
                         };
                         let action = hit.action.clone();
+                        self.close_preview();
                         match action {
                             Action::Workspace(name) => {
                                 let _ = self.updates.send(status::Update::Focus(name));

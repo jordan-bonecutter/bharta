@@ -45,6 +45,13 @@ by building or running this project. Ctrl-C stops a foreground instance.
   Workspace buttons stay anchored on the left regardless of the app name.
 - Workspace buttons, hover state, active workspace, and urgent indicators.
   Click to switch through Sway IPC. Workspace and window events refresh the bar immediately. Workspaces are filtered when using `--output`.
+- Hover a workspace for 220 ms to open a live miniature of its window layout.
+  Previews use Sway 1.12 individual-window capture, including hidden workspaces,
+  and refresh about four times per second while hovered. They never switch
+  workspaces or take keyboard focus. Selected tabs, fullscreen and floating
+  windows are respected; wallpaper and compositor decorations are not captured.
+  Apps may throttle their own updates while hidden. Unavailable captures show
+  window placeholders. Image data stays in memory; capture stops on pointer leave.
 - Battery percentage and charging state from Linux sysfs.
 - Current song and artist from playing MPRIS players. Paused song text hides
   as soon as the player signals the change, leaving a fixed-position music button.

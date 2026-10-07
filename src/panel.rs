@@ -583,7 +583,7 @@ fn wrap(renderer: &Renderer, text: &str, width: f32) -> Vec<String> {
     }
     lines
 }
-fn rounded(pix: &mut Pixmap, rect: [f32; 4], r: f32, color: Color, scale: f32) {
+pub(crate) fn rounded(pix: &mut Pixmap, rect: [f32; 4], r: f32, color: Color, scale: f32) {
     let [x, y, w, h] = rect;
     let mut p = PathBuilder::new();
     p.move_to(x + r, y);
