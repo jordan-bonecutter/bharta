@@ -1,0 +1,31 @@
+[package]
+name = "bharta"
+version = "0.1.0"
+edition = "2024"
+description = "A quiet, macOS-inspired native Wayland status bar for Sway"
+license = "MIT"
+
+[dependencies]
+libc = "0.2"
+anyhow = "1"
+zbus = "4.4"
+ab_glyph = "0.2"
+chrono = "0.4"
+serde_json = "1"
+smithay-client-toolkit = { version = "0.20", default-features = false, features = ["calloop", "xkbcommon"] }
+tiny-skia = "0.11"
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+ureq = { version = "2", features = ["tls"] }
+url = "2"
+
+[profile.release]
+lto = "thin"
+strip = true
+
+[dev-dependencies]
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+wayland-protocols-misc = { version = "0.3", features = ["client"] }
+xkbcommon = "0.8"
+tempfile = "3"
