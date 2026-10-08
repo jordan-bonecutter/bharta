@@ -303,7 +303,12 @@ impl Shell {
                 m.hover_opened.set(true);
                 m.pop.set_autohide(false);
             }
-            self.window.set_keyboard_mode(KeyboardMode::None);
+            // Apps is a type-to-search surface, including when opened by hover.
+            self.window.set_keyboard_mode(if kind == "apps" {
+                KeyboardMode::Exclusive
+            } else {
+                KeyboardMode::None
+            });
             self.window.queue_draw();
         }
     }

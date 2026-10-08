@@ -120,10 +120,13 @@ fn main() -> anyhow::Result<()> {
         c.flush()?;
         return Ok(());
     }
-    pointer.button(timestamp(), 0x110, wl_pointer::ButtonState::Pressed);
-    pointer.frame();
-    q.roundtrip(&mut s)?;
-    std::thread::sleep(Duration::from_millis(150));
+    let keys_only = a.get(5).is_some_and(|arg| arg == "--keys-only");
+    if !keys_only {
+        pointer.button(timestamp(), 0x110, wl_pointer::ButtonState::Pressed);
+        pointer.frame();
+        q.roundtrip(&mut s)?;
+        std::thread::sleep(Duration::from_millis(150));
+    }
     let dragging = a.get(5).is_some_and(|arg| arg == "--drag");
     if dragging {
         anyhow::ensure!(a.len() == 8, "--drag needs END_X END_Y");
@@ -145,9 +148,11 @@ fn main() -> anyhow::Result<()> {
         // Allow assertions against the server while the button is still held.
         std::thread::sleep(Duration::from_millis(500));
     }
-    pointer.button(timestamp(), 0x110, wl_pointer::ButtonState::Released);
-    pointer.frame();
-    q.roundtrip(&mut s)?;
+    if !keys_only {
+        pointer.button(timestamp(), 0x110, wl_pointer::ButtonState::Released);
+        pointer.frame();
+        q.roundtrip(&mut s)?;
+    }
     if a.get(5).is_some_and(|arg| arg == "--click-hold") {
         std::thread::sleep(Duration::from_millis(
             a.get(6).map(|v| v.parse()).transpose()?.unwrap_or(2000),
@@ -175,7 +180,7 @@ fn main() -> anyhow::Result<()> {
         if a[5] == "--keyboard-hold" {
             std::thread::sleep(Duration::from_millis(a[6].parse()?));
         } else {
-            for key in &a[5..] {
+            for key in &a[if keys_only { 6 } else { 5 }..] {
                 let (code, hold) = key.split_once('@').unwrap_or((key, "0"));
                 keyboard.key(timestamp(), code.parse()?, 1);
                 q.roundtrip(&mut s)?;

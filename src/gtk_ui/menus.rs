@@ -91,6 +91,9 @@ impl Shell {
             }
         });
         list.select_row(list.row_at_index(0).as_ref());
+        search.connect_map(|search| {
+            search.grab_focus();
+        });
         search.grab_focus();
     }
     pub(super) fn network_menu(

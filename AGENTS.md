@@ -37,6 +37,7 @@ All menus open on a short hover; leaving the bar and popup starts a 500ms delay
 followed by a brief fade. Keep Wi-Fi names and actions left-aligned. Only one
 popup may be open across all outputs at a time. Hovering another button must
 switch directly to its menu, including workspace previews and clicked menus.
+Apps focuses its search field on opening, including hover, so typing works immediately.
 
 Commit completed changes as requested by the user. No confirmation is needed
 for ordinary code edits.

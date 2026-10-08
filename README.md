@@ -34,8 +34,8 @@ selects a font file using Fontconfig.
 
 ## Controls
 
-All menus open on hover (220ms) or click, without taking keyboard focus merely
-from hovering. Only one popup is shown across all outputs at a time. Leaving both the bar and popup starts a half-second close delay.
+All menus open on hover (220ms) or click. Apps focuses its search field immediately;
+other menus do not take keyboard focus merely from hovering. Only one popup is shown across all outputs at a time. Leaving both the bar and popup starts a half-second close delay.
 
 - Click workspaces to switch; hover for a miniature window layout. Active,
   urgent, and audible workspaces have distinct accents. Individual-window live
@@ -53,7 +53,8 @@ from hovering. Only one popup is shown across all outputs at a time. Leaving bot
 - **Apps** filters installed desktop entries. Use the keyboard or click a row
   to launch. GTK supplies text editing, selection, key repeat, and clipboard use.
 - Hover or click the music icon or track text for a menu showing artwork, title, artist, and supported playback controls.
-  MPRIS events update playback immediately, with recovery polling. Artwork loads
+  Small animated bars indicate playback and settle when paused; they are decorative,
+  not an audio spectrum measurement. MPRIS events update playback immediately, with recovery polling. Artwork loads
   on a bounded background worker. Paused tracks keep the music button visible.
 - The session menu offers lock and a two-click logout confirmation. Lock uses
   `~/.local/bin/lock-session`, falling back to `swaylock`.

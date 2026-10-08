@@ -128,7 +128,9 @@ elif 'list' in a:print('[]')
         assert Image.open(DEST / 'dismissed.png').getpixel((1250,80))[:3] == (0,0,0), 'Popup did not dismiss'
         outside.wait()
         apps=probe(72,14,'--hover',2500);time.sleep(1);shot('launcher');apps.wait()
-        escape=probe(160,90,1);escape.wait();time.sleep(.5);shot('escape')
+        typed=probe(72,14,'--keys-only',44,44,44,44);typed.wait();shot('autofocus-search')
+        assert Image.open(DEST / 'autofocus-search.png').convert('RGB').crop((0,200,500,900)).getbbox() is None, 'Typing without clicking search did not filter Apps'
+        escape=probe(72,14,'--keys-only',1);escape.wait();time.sleep(.5);shot('escape')
         assert Image.open(DEST / 'escape.png').convert('RGB').crop((0,28,1600,900)).getbbox() is None, 'Escape did not close launcher'
         fixture=start([str(ROOT / 'target/release/examples/headless_window')],'windows.log');time.sleep(2);shot('fixture')
         preview=probe(120,14,'--hover',2500);time.sleep(1);shot('workspace');preview.wait()
@@ -147,8 +149,13 @@ elif 'list' in a:print('[]')
         leave=probe(600,600,'--hover',1000);leave.wait()
         music=probe(1260,14,'--click-hold',6000);time.sleep(1)
         shot('playing');audio_before=state.read_text()
+        time.sleep(.25);shot('playing-animation')
+        motion=ImageChops.difference(Image.open(DEST / 'playing.png').convert('RGB'),Image.open(DEST / 'playing-animation.png').convert('RGB')).crop((0,28,1600,600)).getbbox()
+        assert motion and motion[2]-motion[0]<=45 and motion[3]-motion[1]<=20, f'Music bars did not animate in place: {motion}'
         player.stdin.write(b'pause\n');player.stdin.flush();time.sleep(1.2)
         shot('paused')
+        time.sleep(.25);shot('paused-still')
+        assert ImageChops.difference(Image.open(DEST / 'paused.png').convert('RGB'),Image.open(DEST / 'paused-still.png').convert('RGB')).crop((0,28,1600,600)).getbbox() is None, 'Music bars kept moving while paused'
         playing=Image.open(DEST / 'playing.png').convert('RGB');paused=Image.open(DEST / 'paused.png').convert('RGB')
         assert ImageChops.difference(playing.crop((1245,0,1390,28)),paused.crop((1245,0,1390,28))).getbbox() is None, 'Playback moved bar controls'
         assert playing.getpixel((1250,100)) != (0,0,0), 'Music popup missing'
