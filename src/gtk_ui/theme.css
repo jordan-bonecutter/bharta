@@ -4,7 +4,7 @@ window.bharta { background: transparent; font-family: "SF Pro Text", "Cantarell"
 .bar button { color: @fg; min-height: 24px; min-width: 20px; padding: 0 8px; margin: 1px 0; border: none; border-radius: 2px; background: transparent; box-shadow: none; }
 .bar button:hover, .bar button:checked { background: @hover; }
 .bar button:focus-visible { outline: 1px solid @accent; outline-offset: -1px; }
-.bar button.workspace { padding: 0 16px; min-height: 20px; margin: 3px 0; }
+.bar button.workspace { padding: 0 16px; min-height: 20px; margin: 3px 0; transition: background-color 140ms ease-in-out; }
 .bar button.workspace.active { background: @selected; color: @fg; }
 .bar button.workspace.urgent { color: @urgent; }
 .bar button.workspace.audible { box-shadow: inset 0 -3px @green; }

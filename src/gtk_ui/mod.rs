@@ -803,7 +803,7 @@ impl Shell {
                         animation.set(progress);
                         let eased = progress * progress * (3.0 - 2.0 * progress);
                         sound.set_opacity(eased);
-                        sound.set_pixel_size((13.0 * (0.6 + 0.4 * eased)).round() as i32);
+                        sound.set_pixel_size((13.0 * (0.92 + 0.08 * eased)).round() as i32);
                     }
                     glib::ControlFlow::Continue
                 });
