@@ -1,0 +1,22 @@
+name: Linux builds
+on:
+  push:
+  pull_request:
+jobs:
+  clean-build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        container: ['ubuntu:22.04', 'ubuntu:24.04', 'fedora:43']
+    container: ${{ matrix.container }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build from a bare distro image
+        shell: bash
+        run: ./build.sh
+      - name: Verify bundled library resolution and executable startup
+        shell: bash
+        run: |
+          if ldd target/release/bharta | grep 'not found'; then exit 1; fi
+          target/release/bharta --help

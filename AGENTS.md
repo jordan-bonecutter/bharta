@@ -1,5 +1,16 @@
 # Working on bharta
 
+## Build portability
+
+`./build.sh` is the fresh-clone build entry point. It reports native prerequisites,
+installs them together on supported distro families, provisions a recent Rust
+compiler when needed, and builds missing GTK4 layer-shell privately from a pinned,
+checksum-verified source release. Do not add undocumented native dependencies.
+Preserve GTK4 4.6 compatibility and Rust 1.92 minimum unless an actual feature
+requires a deliberate baseline change. The clean-image CI builds Ubuntu 22.04,
+Ubuntu 24.04, and Fedora. Validate build-helper changes in disposable containers;
+never install test dependencies into the user's desktop just to simulate a distro.
+
 ## UI testing
 
 Use the isolated headless Sway harness for UI tests:

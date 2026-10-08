@@ -190,7 +190,9 @@ while True:
         playing_image=Image.open(DEST / 'playing.png').convert('RGB')
         def eq_heights(center):
             candidates=[]
-            for left,right in ((1328,1386),(1390,1448)):
+            # Anchor to the source row, not the screen: clock/date and battery
+            # text move the popup horizontally across machines and days.
+            for left,right in ((control_right-84,control_right-30),):
                 columns=[]
                 for x in range(left,right):
                     ys=[y for y in range(center-10,center+11)

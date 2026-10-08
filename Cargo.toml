@@ -2,11 +2,12 @@
 name = "bharta"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.92"
 description = "A quiet, macOS-inspired native Wayland status bar for Sway"
 license = "MIT"
 
 [dependencies]
-gtk = { package = "gtk4", version = "0.11", features = ["v4_8"] }
+gtk = { package = "gtk4", version = "0.11", features = ["v4_6"] }
 gtk4-layer-shell = "0.8"
 libc = "0.2"
 anyhow = "1"

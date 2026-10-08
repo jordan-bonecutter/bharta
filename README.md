@@ -4,17 +4,56 @@ A compact, macOS-inspired GTK4 status bar for Sway, written in Rust. GTK supplie
 widgets, text shaping, accessibility, clipboard handling, and scaling;
 `gtk4-layer-shell` anchors the bar to each display.
 
-## Run
+## Build and run
 
-Requires a current Rust toolchain, Sway, GTK4 (4.8+), gtk4-layer-shell, Fontconfig,
-and libxkbcommon. On Arch, the additional UI dependencies are `gtk4` and
-`gtk4-layer-shell`. Install these on each machine before building or copying the
-binary. Audio controls require `pactl` and PulseAudio or PipeWire-Pulse. Wi-Fi uses
-iwd over D-Bus or NetworkManager through `nmcli`; launching apps uses `gio launch`.
+From a fresh clone, run:
 
 ```sh
-cargo build --release
+./build.sh
 ./target/release/bharta --dark --all-outputs
+```
+
+The build command checks the complete dependency set up front. On Ubuntu/Debian,
+Fedora, Arch, openSUSE, Alpine, and Void, it installs missing development packages
+in one package-manager invocation (using `sudo` when needed). It provisions Rust
+1.92 if the existing compiler is too old. GTK4 layer-shell is built from a pinned,
+checksum-verified upstream release into `.build/native` when the distro does not
+provide it; there is no system library installation, PPA, or AUR requirement.
+Docs, Vala, and introspection generators are disabled for that private library,
+because the Rust bar does not need them. If Rust was installed by the helper,
+`source ~/.cargo/env` enables manual Cargo commands in your current shell.
+
+```sh
+./build.sh --check       # report prerequisites without installing/downloading
+./build.sh --no-install  # build with existing system packages; provision private deps
+nix-shell --run './build.sh --no-install'  # NixOS / Nix package manager
+```
+
+Native builds require Bash, GTK4 4.6+, Rust 1.92+, a C compiler, pkg-config, Fontconfig,
+libxkbcommon, and Wayland development files. Ubuntu 22.04 and 24.04 are covered by
+clean-image build CI, alongside Fedora. Older systems with GTK below 4.6 need a
+newer build environment; this script does not replace a distro's GTK libraries.
+Other distros receive the complete prerequisite list rather than a sequence of
+Cargo build failures. Nix needs a current nixpkgs channel providing Rust 1.92+.
+
+The result keeps the original `target/release/bharta` path, so existing Sway startup
+commands still work. When the private layer-shell fallback is used, its library
+is copied to `target/release/lib`, and the executable finds it through a relative
+runpath. Keep that directory beside the executable when moving it. GTK and the
+other native libraries must still be installed on the destination; this is a
+native build, not a universal standalone binary. `.build` contains reusable
+private build dependencies and can be deleted to start fresh.
+
+If dependencies are already installed, `cargo build --release --locked` also
+works with a sufficiently recent Rust toolchain and system GTK4 layer-shell 1.0+.
+Use the helper when the system does not package that library.
+
+At runtime, Sway provides the compositor. Audio controls and meters require
+`pactl`/`parec` (usually `pulseaudio-utils`, or `libpulse` on Arch) and PulseAudio
+or PipeWire-Pulse. Wi-Fi uses iwd over D-Bus or NetworkManager through `nmcli`;
+launching apps uses `gio launch`.
+
+```sh
 ./target/release/bharta --output DP-1
 ./target/release/bharta --font /path/to/font.ttf
 ```
