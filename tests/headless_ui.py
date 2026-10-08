@@ -176,7 +176,18 @@ elif 'list' in a:print('[]')
         assert switched.crop((0,28,500,900)).getbbox() is None, 'Old workspace preview stayed visible'
         # Promote the hovered menu to clicked, then toggle it closed. Remaining
         # over the same button must not immediately reopen it.
-        promote=probe(1345,14,'--click-hold',700);promote.wait()
+        background=switched.getpixel((1250,80))
+        promote=probe(1345,14,'--click-hold',1000)
+        deadline=time.monotonic()+.8
+        frame=0
+        while time.monotonic()<deadline:
+            name=f'click-stable-{frame}'
+            shot(name)
+            assert Image.open(DEST / (name+'.png')).convert('RGB').getpixel((1250,80)) == background, 'Click blinked or restarted the popup fade'
+            frame+=1
+            time.sleep(.02)
+        assert frame>=6, 'Too few frames to check click stability'
+        promote.wait()
         toggle=probe(1345,14,'--click-hold',1000);time.sleep(.85);shot('toggle-closed');toggle.wait()
         assert Image.open(DEST / 'toggle-closed.png').convert('RGB').crop((0,28,1600,900)).getbbox() is None, 'Hover reopened a menu toggled closed'
         # A second real bar on another private output must dismiss the first.

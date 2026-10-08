@@ -326,16 +326,26 @@ impl Shell {
         self.window.set_keyboard_mode(KeyboardMode::None);
         self.window.queue_draw();
     }
+    fn promote_menu(self: &Rc<Self>, id: u64) -> bool {
+        let promoted = self
+            .menu
+            .borrow()
+            .as_ref()
+            .is_some_and(|m| m.id == id && m.hover_opened.replace(false));
+        if !promoted {
+            return false;
+        }
+        // Keep the existing content, opacity and animation clock. Changing a
+        // mapped popover's autohide mode also remaps its Wayland surface, so
+        // only enable keyboard focus here; retain hover dismissal and Escape.
+        self.window.set_keyboard_mode(KeyboardMode::Exclusive);
+        self.window.queue_draw();
+        true
+    }
     fn open(self: &Rc<Self>, button: &gtk::Button, kind: &str) {
         if self.menu.borrow().as_ref().is_some_and(|m| m.kind == kind) {
-            let hovered = self
-                .menu
-                .borrow()
-                .as_ref()
-                .is_some_and(|m| m.hover_opened.replace(false));
-            if hovered {
-                self.finish_close();
-                self.open(button, kind);
+            let id = self.menu.borrow().as_ref().map(|m| m.id).unwrap();
+            if self.promote_menu(id) {
                 return;
             }
             self.close();
@@ -399,26 +409,7 @@ impl Shell {
             if event.event_type() == gdk::EventType::ButtonRelease
                 && let Some(s) = weak.upgrade()
             {
-                let pop = s
-                    .menu
-                    .borrow()
-                    .as_ref()
-                    .filter(|m| m.id == id && m.hover_opened.replace(false))
-                    .map(|m| m.pop.clone());
-                if let Some(pop) = pop {
-                    s.window.set_keyboard_mode(KeyboardMode::Exclusive);
-                    s.window.add_tick_callback(move |_, _| {
-                        let pop = pop.clone();
-                        glib::idle_add_local_once(move || {
-                            if pop.parent().is_some() {
-                                pop.set_autohide(true);
-                                pop.popup();
-                            }
-                        });
-                        glib::ControlFlow::Break
-                    });
-                    s.window.queue_draw();
-                }
+                s.promote_menu(id);
             }
             glib::Propagation::Proceed
         });
