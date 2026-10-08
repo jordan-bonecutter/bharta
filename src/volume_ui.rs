@@ -338,18 +338,6 @@ pub fn render(p: &mut Panel, r: &Renderer) -> Pixmap {
             fg,
         );
     }
-    r.text_at(
-        &mut pix,
-        if p.busy {
-            "Applying…"
-        } else {
-            "Drag levels to adjust · scroll for more"
-        },
-        24.,
-        478.,
-        s,
-        fg,
-    );
     pix
 }
 #[cfg(test)]
