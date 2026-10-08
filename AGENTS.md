@@ -32,7 +32,8 @@ GTK is the widget/interaction framework, not a request for GNOME/Adwaita styling
 Avoid orange accents, large pill buttons, bulky headings, and instructional text
 on obvious controls. Prefer borderless popups; avoid nested frames. Native slider
 dragging must work continuously. Preserve the fixed music icon position on pause
-and bound workspace previews independently of captured image dimensions.
+and bound workspace previews independently of captured image dimensions. Music
+equalizer bars must come from the live output monitor, never fabricated animation.
 All menus open on a short hover; leaving the bar and popup starts a 500ms delay
 followed by a brief fade. Keep Wi-Fi names and actions left-aligned. Only one
 popup may be open across all outputs at a time. Hovering another button must

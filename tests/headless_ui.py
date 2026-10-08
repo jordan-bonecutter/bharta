@@ -43,6 +43,20 @@ elif a and a[0]=='set-sink-volume':p.write_text(json.dumps([int(n) for n in a[2:
 elif 'list' in a:print('[]')
 ''')
     fake.chmod(0o755)
+    fake_capture = runtime / 'parec'
+    fake_capture.write_text('''#!/usr/bin/env python3
+import math,struct,sys
+phase=0.0
+rate=24000
+while True:
+ values=[]
+ for _ in range(1024):
+  values.append(int(10000*math.sin(phase)))
+  phase += 2*math.pi*750/rate
+  if phase > 2*math.pi: phase -= 2*math.pi
+ sys.stdout.buffer.write(struct.pack('<1024h',*values));sys.stdout.buffer.flush()
+''')
+    fake_capture.chmod(0o755)
     env['PATH'] = str(runtime) + os.pathsep + env['PATH']
     env['BHARTA_TEST_AUDIO'] = str(state)
     config = runtime / 'config'
@@ -149,13 +163,22 @@ elif 'list' in a:print('[]')
         leave=probe(600,600,'--hover',1000);leave.wait()
         music=probe(1260,14,'--click-hold',6000);time.sleep(1)
         shot('playing');audio_before=state.read_text()
-        time.sleep(.25);shot('playing-animation')
-        motion=ImageChops.difference(Image.open(DEST / 'playing.png').convert('RGB'),Image.open(DEST / 'playing-animation.png').convert('RGB')).crop((0,28,1600,600)).getbbox()
-        assert motion and motion[2]-motion[0]<=45 and motion[3]-motion[1]<=20, f'Music bars did not animate in place: {motion}'
+        # Fake parec emits a steady 750 Hz tone. Its matching 500-1000 Hz
+        # bar should rise while all other frequency bands stay near zero.
+        playing_image=Image.open(DEST / 'playing.png').convert('RGB')
+        bar_columns=[1366,1372,1378,1384,1390,1396,1402]
+        bar_heights=[]
+        for x in bar_columns:
+            ys=[y for xx in range(x-1,x+2) for y in range(244,260)
+                if min(playing_image.getpixel((xx,y)))>120]
+            bar_heights.append(max(ys)-min(ys) if ys else 0)
+        assert bar_heights[3]>=10 and max(bar_heights[:3]+bar_heights[4:])<=3, f'750 Hz tone did not map to its band: {bar_heights}'
         player.stdin.write(b'pause\n');player.stdin.flush();time.sleep(1.2)
         shot('paused')
-        time.sleep(.25);shot('paused-still')
-        assert ImageChops.difference(Image.open(DEST / 'paused.png').convert('RGB'),Image.open(DEST / 'paused-still.png').convert('RGB')).crop((0,28,1600,600)).getbbox() is None, 'Music bars kept moving while paused'
+        paused_image=Image.open(DEST / 'paused.png').convert('RGB')
+        ys=[y for xx in range(1365,1405) for y in range(244,260)
+            if min(paused_image.getpixel((xx,y)))>120]
+        assert max(ys)-min(ys)<=3, f'Frequency bars remained active after pausing: {max(ys)-min(ys)}'
         playing=Image.open(DEST / 'playing.png').convert('RGB');paused=Image.open(DEST / 'paused.png').convert('RGB')
         assert ImageChops.difference(playing.crop((1245,0,1390,28)),paused.crop((1245,0,1390,28))).getbbox() is None, 'Playback moved bar controls'
         assert playing.getpixel((1250,100)) != (0,0,0), 'Music popup missing'

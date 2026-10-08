@@ -1,4 +1,5 @@
 mod artwork;
+mod audio_meter;
 mod capture;
 mod gtk_ui;
 mod icons;
