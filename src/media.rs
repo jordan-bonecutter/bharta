@@ -45,7 +45,7 @@ pub enum Request {
         control: Control,
     },
 }
-type UiSender = smithay_client_toolkit::reexports::calloop::channel::Sender<Update>;
+type UiSender = std::sync::mpsc::Sender<Update>;
 pub fn watch(sender: UiSender) -> std::sync::mpsc::Sender<Request> {
     let wifi = sender.clone();
     std::thread::spawn(move || {
@@ -513,7 +513,7 @@ mod event_tests {
             .unwrap()
             .build()
             .unwrap();
-        let (tx, rx) = smithay_client_toolkit::reexports::calloop::channel::channel();
+        let (tx, rx) = std::sync::mpsc::channel();
         let _requests = spawn_playback(tx, Some(address.into()));
         let wait_for = |expected: Option<bool>| {
             let start = Instant::now();

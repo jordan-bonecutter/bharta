@@ -10,12 +10,11 @@ use std::{
 pub struct Artwork {
     pub url: String,
     pub pixels: tiny_skia::Pixmap,
+    #[allow(dead_code)] // Retained for consumers of the artwork backend.
     pub tint: [u8; 3],
 }
 const MAX_BYTES: u64 = 8 * 1024 * 1024;
-pub fn worker(
-    sender: smithay_client_toolkit::reexports::calloop::channel::Sender<crate::media::Update>,
-) -> mpsc::Sender<String> {
+pub fn worker(sender: std::sync::mpsc::Sender<crate::media::Update>) -> mpsc::Sender<String> {
     let (tx, rx) = mpsc::channel::<String>();
     std::thread::spawn(move || {
         let mut cache: VecDeque<Arc<Artwork>> = VecDeque::new();

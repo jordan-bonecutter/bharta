@@ -1,5 +1,5 @@
-//! Manual UI check: output, x, y, width, height, then optional evdev key codes.
-//! Moves/clicks a real desktop pointer; never run as part of unattended tests.
+//! Headless UI input: output, x, y, width, height, then optional evdev key codes.
+//! Only run on the isolated harness compositor; never on the desktop session.
 use std::{collections::HashMap, io::Write, os::fd::AsFd, time::Duration};
 use wayland_client::{
     Connection, Dispatch, Proxy, QueueHandle, delegate_noop,
@@ -48,11 +48,26 @@ delegate_noop!(State: ignore ZwlrVirtualPointerManagerV1);
 delegate_noop!(State: ignore ZwlrVirtualPointerV1);
 delegate_noop!(State: ignore ZwpVirtualKeyboardManagerV1);
 delegate_noop!(State: ignore ZwpVirtualKeyboardV1);
+fn timestamp() -> u32 {
+    let mut time = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // Wayland input timestamps use the compositor's monotonic clock.
+    unsafe {
+        libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut time);
+    }
+    (time.tv_sec as u64 * 1000 + time.tv_nsec as u64 / 1_000_000) as u32
+}
 fn main() -> anyhow::Result<()> {
     let a: Vec<_> = std::env::args().skip(1).collect();
     anyhow::ensure!(
         a.len() >= 5,
         "Usage: ui_probe OUTPUT X Y WIDTH HEIGHT [--hover [HOLD_MS] | --drag END_X END_Y | EVDEV_KEY ...]"
+    );
+    anyhow::ensure!(
+        std::env::var("BHARTA_HEADLESS").as_deref() == Ok("1") && a[0].starts_with("HEADLESS-"),
+        "ui_probe requires the isolated headless harness"
     );
     let c = Connection::connect_to_env()?;
     let (g, mut q) = registry_queue_init::<State>(&c)?;
@@ -73,7 +88,7 @@ fn main() -> anyhow::Result<()> {
     let manager: ZwlrVirtualPointerManagerV1 = g.bind(&h, 2..=2, ())?;
     let pointer = manager.create_virtual_pointer_with_output(Some(&seat), Some(output), &h, ());
     pointer.motion_absolute(
-        1,
+        timestamp(),
         a[1].parse()?,
         a[2].parse()?,
         a[3].parse()?,
@@ -86,13 +101,26 @@ fn main() -> anyhow::Result<()> {
         // Keep the virtual pointer alive for hover assertions. Destroying it
         // can restore the physical pointer position and generate a leave.
         if let Some(hold) = a.get(6) {
-            std::thread::sleep(Duration::from_millis(hold.parse()?));
+            let until = std::time::Instant::now() + Duration::from_millis(hold.parse()?);
+            while std::time::Instant::now() < until {
+                // Keep pointer focus current after a popup releases its grab.
+                pointer.motion_absolute(
+                    timestamp(),
+                    a[1].parse()?,
+                    a[2].parse()?,
+                    a[3].parse()?,
+                    a[4].parse()?,
+                );
+                pointer.frame();
+                c.flush()?;
+                std::thread::sleep(Duration::from_millis(30));
+            }
         }
         pointer.destroy();
         c.flush()?;
         return Ok(());
     }
-    pointer.button(2, 0x110, wl_pointer::ButtonState::Pressed);
+    pointer.button(timestamp(), 0x110, wl_pointer::ButtonState::Pressed);
     pointer.frame();
     q.roundtrip(&mut s)?;
     std::thread::sleep(Duration::from_millis(150));
@@ -104,7 +132,7 @@ fn main() -> anyhow::Result<()> {
         for step in 1..=24 {
             let t = step as f64 / 24.;
             pointer.motion_absolute(
-                10 + step,
+                timestamp(),
                 (x + (end_x - x) * t) as u32,
                 (y + (end_y - y) * t) as u32,
                 a[3].parse()?,
@@ -117,10 +145,14 @@ fn main() -> anyhow::Result<()> {
         // Allow assertions against the server while the button is still held.
         std::thread::sleep(Duration::from_millis(500));
     }
-    pointer.button(40, 0x110, wl_pointer::ButtonState::Released);
+    pointer.button(timestamp(), 0x110, wl_pointer::ButtonState::Released);
     pointer.frame();
     q.roundtrip(&mut s)?;
-    if a.len() > 5 && !dragging {
+    if a.get(5).is_some_and(|arg| arg == "--click-hold") {
+        std::thread::sleep(Duration::from_millis(
+            a.get(6).map(|v| v.parse()).transpose()?.unwrap_or(2000),
+        ));
+    } else if a.len() > 5 && !dragging {
         std::thread::sleep(Duration::from_millis(500));
         let km = xkbcommon::xkb::Keymap::new_from_names(
             &xkbcommon::xkb::Context::new(0),
@@ -139,13 +171,18 @@ fn main() -> anyhow::Result<()> {
         let keyboard = manager.create_virtual_keyboard(&seat, &h, ());
         keyboard.keymap(1, file.as_fd(), text.len() as u32);
         q.roundtrip(&mut s)?;
-        for key in &a[5..] {
-            let (code, hold) = key.split_once('@').unwrap_or((key, "0"));
-            keyboard.key(10, code.parse()?, 1);
-            q.roundtrip(&mut s)?;
-            std::thread::sleep(Duration::from_millis(hold.parse()?));
-            keyboard.key(11, code.parse()?, 0);
-            q.roundtrip(&mut s)?;
+        std::thread::sleep(Duration::from_millis(200));
+        if a[5] == "--keyboard-hold" {
+            std::thread::sleep(Duration::from_millis(a[6].parse()?));
+        } else {
+            for key in &a[5..] {
+                let (code, hold) = key.split_once('@').unwrap_or((key, "0"));
+                keyboard.key(timestamp(), code.parse()?, 1);
+                q.roundtrip(&mut s)?;
+                std::thread::sleep(Duration::from_millis(hold.parse::<u64>()?.max(50)));
+                keyboard.key(timestamp(), code.parse()?, 0);
+                q.roundtrip(&mut s)?;
+            }
         }
         std::thread::sleep(Duration::from_millis(300));
         keyboard.destroy();

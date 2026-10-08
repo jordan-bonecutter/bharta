@@ -63,6 +63,8 @@ pub fn ipc(kind: u32, payload: &str) -> Result<Value> {
 pub enum Update {
     Refresh,
     Focus(String),
+    AnnouncePopup(u128),
+    PopupOpened(u128),
 }
 
 // A separate blocking subscription wakes the sampler on compositor changes.
@@ -86,15 +88,21 @@ pub fn watch(sender: std::sync::mpsc::Sender<Update>) {
 }
 
 fn listen(socket: &mut UnixStream, sender: &std::sync::mpsc::Sender<Update>) -> Result<()> {
-    request(socket, 2, r#"["workspace","window"]"#)?;
+    request(socket, 2, r#"["workspace","window","tick"]"#)?;
     if response(socket)?["success"] != true {
         bail!("Sway subscription rejected");
     }
     socket.set_read_timeout(None)?;
     sender.send(Update::Refresh)?;
     loop {
-        response(socket)?;
-        if sender.send(Update::Refresh).is_err() {
+        let event = response(socket)?;
+        let update = event["payload"]
+            .as_str()
+            .and_then(|p| p.strip_prefix("bharta-popup:"))
+            .and_then(|p| p.parse().ok())
+            .map(Update::PopupOpened)
+            .unwrap_or(Update::Refresh);
+        if sender.send(update).is_err() {
             return Ok(());
         }
     }
@@ -235,7 +243,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             response(&mut server).unwrap(),
-            serde_json::json!(["workspace", "window"])
+            serde_json::json!(["workspace", "window", "tick"])
         );
         request(&mut server, 2, r#"{"success":true}"#).unwrap();
         assert!(matches!(
@@ -246,6 +254,16 @@ mod tests {
         assert!(matches!(
             rx.recv_timeout(Duration::from_millis(500)),
             Ok(Update::Refresh)
+        ));
+        request(
+            &mut server,
+            0x80000007,
+            r#"{"first":false,"payload":"bharta-popup:12345"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_millis(500)),
+            Ok(Update::PopupOpened(12345))
         ));
         drop(server);
         assert!(thread.join().unwrap().is_err());

@@ -1,29 +1,18 @@
-use crate::{App, capture::Capture, render::Action, status};
+use crate::{capture::Capture, status};
 use anyhow::{Context, Result};
 use serde_json::Value;
-use smithay_client_toolkit::{
-    compositor::Region,
-    reexports::calloop::channel,
-    shell::xdg::{XdgPositioner, popup::Popup},
-};
 use std::{
     sync::mpsc,
     time::{Duration, Instant},
 };
-use tiny_skia::{Color, Paint, Pixmap, Rect, Transform};
-use wayland_client::{QueueHandle, protocol::wl_shm};
-use wayland_protocols::xdg::shell::client::xdg_positioner::{
-    Anchor, ConstraintAdjustment, Gravity,
-};
+use tiny_skia::Pixmap;
 
-const WIDTH: u32 = 380;
-const HEIGHT: u32 = 266;
 #[derive(Clone, Copy, Debug)]
 pub struct Geometry {
-    x: f32,
-    y: f32,
-    w: f32,
-    h: f32,
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
 }
 impl Geometry {
     fn read(v: &Value) -> Self {
@@ -37,22 +26,15 @@ impl Geometry {
 }
 pub struct Window {
     id: Option<String>,
-    title: String,
-    rect: Geometry,
-    pixels: Option<Pixmap>,
+    pub title: String,
+    pub rect: Geometry,
+    pub pixels: Option<Pixmap>,
 }
 pub struct Snapshot {
     pub name: String,
-    rect: Geometry,
-    windows: Vec<Window>,
-    message: String,
-}
-pub struct Preview {
-    pub popup: Popup,
-    pub name: String,
-    pub ready: bool,
-    pub scale: u32,
-    snapshot: Option<Snapshot>,
+    pub rect: Geometry,
+    pub windows: Vec<Window>,
+    pub message: String,
 }
 fn workspace<'a>(v: &'a Value, name: &str) -> Option<&'a Value> {
     if v["type"] == "workspace" && v["name"] == name {
@@ -125,7 +107,7 @@ fn snapshot(name: &str) -> Result<Snapshot> {
         message: String::new(),
     })
 }
-pub fn watch(sender: channel::Sender<Snapshot>) -> mpsc::Sender<Option<String>> {
+pub fn watch(sender: mpsc::Sender<Snapshot>) -> mpsc::Sender<Option<String>> {
     let (tx, rx) = mpsc::channel::<Option<String>>();
     std::thread::spawn(move || {
         let mut capture = None;
@@ -202,257 +184,6 @@ pub fn watch(sender: channel::Sender<Snapshot>) -> mpsc::Sender<Option<String>> 
         }
     });
     tx
-}
-impl App {
-    pub(crate) fn hover_workspace(&mut self, x: f32) {
-        let target = self
-            .hits
-            .iter()
-            .find(|h| x >= h.start && x < h.end)
-            .and_then(|h| {
-                if let Action::Workspace(name) = &h.action {
-                    Some((name.clone(), ((h.start + h.end) / 2.) as i32))
-                } else {
-                    None
-                }
-            });
-        // Keep an open preview while traversing the bar; another workspace
-        // replaces it, leaving the bar or opening a menu dismisses it.
-        if target.is_none() && self.workspace_preview.is_some() {
-            return;
-        }
-        if target.as_ref().map(|t| &t.0) == self.preview_target.as_ref().map(|t| &t.0) {
-            return;
-        }
-        self.close_preview();
-        if self.panel.is_none() {
-            self.preview_target = target.map(|(n, x)| (n, x, Instant::now()));
-        }
-    }
-    pub(crate) fn close_preview(&mut self) {
-        self.preview_target = None;
-        self.workspace_preview = None;
-        let _ = self.preview_requests.send(None);
-    }
-    pub(crate) fn tick_preview(&mut self, qh: &QueueHandle<Self>) {
-        let Some((name, x, since)) = &self.preview_target else {
-            return;
-        };
-        if self.workspace_preview.is_some()
-            || self.panel.is_some()
-            || since.elapsed() < Duration::from_millis(220)
-        {
-            return;
-        }
-        let (name, x) = (name.clone(), *x);
-        let result = (|| -> Result<()> {
-            let position = XdgPositioner::new(&self.xdg)?;
-            position.set_size(WIDTH as i32, HEIGHT as i32);
-            position.set_anchor_rect(x, 28, 1, 1);
-            position.set_anchor(Anchor::Bottom);
-            position.set_gravity(Gravity::Bottom);
-            position.set_constraint_adjustment(
-                ConstraintAdjustment::SlideX | ConstraintAdjustment::SlideY,
-            );
-            let popup = Popup::from_surface(
-                None,
-                &position,
-                qh,
-                self.compositor.create_surface(qh),
-                &self.xdg,
-            )?;
-            self.layer
-                .as_ref()
-                .context("Missing bar")?
-                .get_popup(popup.xdg_popup());
-            // A tooltip is input-transparent and never grabs the seat or keyboard.
-            let region = Region::new(&self.compositor)?;
-            popup
-                .wl_surface()
-                .set_input_region(Some(region.wl_region()));
-            popup.wl_surface().commit();
-            self.workspace_preview = Some(Preview {
-                popup,
-                name: name.clone(),
-                ready: false,
-                scale: self.scale,
-                snapshot: None,
-            });
-            self.preview_requests.send(Some(name))?;
-            Ok(())
-        })();
-        if let Err(e) = result {
-            eprintln!("Workspace preview: {e}");
-            self.close_preview();
-        }
-    }
-    pub(crate) fn preview_result(&mut self, snapshot: Snapshot) {
-        if let Some(p) = &mut self.workspace_preview
-            && p.name == snapshot.name
-        {
-            p.snapshot = Some(snapshot);
-            self.draw_preview();
-        }
-    }
-    pub(crate) fn draw_preview(&mut self) {
-        let Some(p) = &self.workspace_preview else {
-            return;
-        };
-        if !p.ready {
-            return;
-        }
-        let pix = render(&self.renderer, &p.name, p.snapshot.as_ref(), p.scale);
-        let (w, h) = (pix.width() as i32, pix.height() as i32);
-        let result = (|| -> Result<()> {
-            let (buffer, canvas) =
-                self.pool
-                    .create_buffer(w, h, w * 4, wl_shm::Format::Argb8888)?;
-            for (src, dst) in pix
-                .data()
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .zip(canvas.as_chunks_mut::<4>().0.iter_mut())
-            {
-                dst.copy_from_slice(
-                    &u32::from_be_bytes([src[3], src[0], src[1], src[2]]).to_ne_bytes(),
-                );
-            }
-            p.popup
-                .xdg_surface()
-                .set_window_geometry(0, 0, WIDTH as i32, HEIGHT as i32);
-            p.popup.wl_surface().set_buffer_scale(p.scale as i32);
-            p.popup.wl_surface().damage_buffer(0, 0, w, h);
-            buffer.attach_to(p.popup.wl_surface())?;
-            p.popup.wl_surface().commit();
-            Ok(())
-        })();
-        if let Err(e) = result {
-            eprintln!("Workspace preview drawing: {e}");
-            self.close_preview();
-        }
-    }
-}
-fn fill(pix: &mut Pixmap, r: [f32; 4], color: Color, scale: f32) {
-    if let Some(rect) = Rect::from_xywh(r[0], r[1], r[2], r[3]) {
-        let mut paint = Paint::default();
-        paint.set_color(color);
-        pix.fill_rect(rect, &paint, Transform::from_scale(scale, scale), None);
-    }
-}
-fn render(
-    renderer: &crate::render::Renderer,
-    name: &str,
-    shot: Option<&Snapshot>,
-    scale: u32,
-) -> Pixmap {
-    let mut pix = Pixmap::new(WIDTH * scale, HEIGHT * scale).unwrap();
-    let scale = scale as f32;
-    let (bg, fg, muted) = if renderer.dark {
-        (
-            Color::from_rgba8(36, 30, 25, 255),
-            Color::from_rgba8(255, 241, 218, 255),
-            Color::from_rgba8(185, 165, 142, 255),
-        )
-    } else {
-        (
-            Color::from_rgba8(249, 244, 235, 255),
-            Color::from_rgba8(52, 40, 29, 255),
-            Color::from_rgba8(112, 91, 68, 255),
-        )
-    };
-    crate::panel::rounded(
-        &mut pix,
-        [4., 5., 372., 256.],
-        12.,
-        Color::from_rgba8(0, 0, 0, 65),
-        scale,
-    );
-    crate::panel::rounded(&mut pix, [6., 3., 368., 254.], 11., bg, scale);
-    let title: String = format!("Workspace {name}")
-        .chars()
-        .filter(|c| !c.is_control())
-        .take(34)
-        .collect();
-    renderer.text_at(&mut pix, &title, 18., 10., scale, fg);
-    let Some(shot) = shot else {
-        renderer.text_at(&mut pix, "Loading preview…", 18., 100., scale, muted);
-        return pix;
-    };
-    let ratio = (344. / shot.rect.w).min(184. / shot.rect.h);
-    let ox = 18. + (344. - shot.rect.w * ratio) / 2.;
-    let oy = 44. + (184. - shot.rect.h * ratio) / 2.;
-    fill(
-        &mut pix,
-        [ox, oy, shot.rect.w * ratio, shot.rect.h * ratio],
-        Color::from_rgba8(24, 20, 17, 255),
-        scale,
-    );
-    // Clip floating windows to workspace bounds and keep chrome outside the image.
-    let mut mask_pix = Pixmap::new(pix.width(), pix.height()).unwrap();
-    fill(
-        &mut mask_pix,
-        [ox, oy, shot.rect.w * ratio, shot.rect.h * ratio],
-        Color::WHITE,
-        scale,
-    );
-    let mask = tiny_skia::Mask::from_pixmap(mask_pix.as_ref(), tiny_skia::MaskType::Alpha);
-    for window in &shot.windows {
-        let x = ox + (window.rect.x - shot.rect.x) * ratio;
-        let y = oy + (window.rect.y - shot.rect.y) * ratio;
-        let (w, h) = (window.rect.w * ratio, window.rect.h * ratio);
-        let mut tile = Pixmap::new(pix.width(), pix.height()).unwrap();
-        fill(
-            &mut tile,
-            [x, y, w, h],
-            Color::from_rgba8(112, 84, 62, 255),
-            scale,
-        );
-        if let Some(image) = &window.pixels {
-            let iw = (w - 2.).max(1.);
-            let ih = (h - 2.).max(1.);
-            tile.draw_pixmap(
-                0,
-                0,
-                image.as_ref(),
-                &tiny_skia::PixmapPaint {
-                    quality: tiny_skia::FilterQuality::Bilinear,
-                    ..Default::default()
-                },
-                Transform::from_scale(
-                    iw * scale / image.width() as f32,
-                    ih * scale / image.height() as f32,
-                )
-                .post_translate((x + 1.) * scale, (y + 1.) * scale),
-                None,
-            );
-        } else {
-            let title: String = window
-                .title
-                .chars()
-                .filter(|c| !c.is_control())
-                .take((w / 8.).max(0.) as usize)
-                .collect();
-            renderer.text_at(&mut tile, &title, x + 3., y + 2., scale, fg);
-        }
-        pix.draw_pixmap(
-            0,
-            0,
-            tile.as_ref(),
-            &tiny_skia::PixmapPaint::default(),
-            Transform::identity(),
-            Some(&mask),
-        );
-    }
-    let footer = if !shot.message.is_empty() {
-        shot.message.as_str()
-    } else if shot.windows.is_empty() {
-        "Empty workspace"
-    } else {
-        "Live preview · click workspace to switch"
-    };
-    renderer.text_at(&mut pix, footer, 18., 228., scale, muted);
-    pix
 }
 #[cfg(test)]
 mod tests {

@@ -1,5 +1,5 @@
 use std::time::{Duration, Instant};
-const GRACE: Duration = Duration::from_secs(2);
+const GRACE: Duration = Duration::from_millis(500);
 const FADE: Duration = Duration::from_millis(140);
 #[derive(Default)]
 pub struct Dismissal {
@@ -51,18 +51,6 @@ impl Dismissal {
             .unwrap_or(0.0)
             .clamp(0.0, 1.0)
     }
-    pub fn next_frame(&self, now: Instant) -> Duration {
-        if self.pinned {
-            return Duration::from_millis(250);
-        }
-        match self.outside {
-            Some(at) if now >= at + GRACE => Duration::from_millis(16),
-            Some(at) => (at + GRACE)
-                .saturating_duration_since(now)
-                .min(Duration::from_millis(250)),
-            None => Duration::from_millis(250),
-        }
-    }
 }
 #[cfg(test)]
 mod tests {
@@ -74,8 +62,8 @@ mod tests {
         d.set_pinned(true, now);
         assert_eq!(d.progress(now + Duration::from_secs(60)), 0.0);
         d.set_pinned(false, now + Duration::from_secs(60));
-        assert_eq!(d.progress(now + Duration::from_secs(61)), 0.0);
-        assert_eq!(d.progress(now + Duration::from_millis(62140)), 1.0);
+        assert_eq!(d.progress(now + Duration::from_millis(60500)), 0.0);
+        assert_eq!(d.progress(now + Duration::from_millis(60640)), 1.0);
     }
     #[test]
     fn bar_and_popup_share_one_hover_region() {
@@ -88,15 +76,15 @@ mod tests {
         assert_eq!(d.progress(now + Duration::from_secs(60)), 0.0);
         d.pointer_inside(false, now + Duration::from_secs(60));
         d.pointer_inside(false, now + Duration::from_secs(61));
-        assert_eq!(d.progress(now + Duration::from_millis(62140)), 1.0);
+        assert_eq!(d.progress(now + Duration::from_millis(60640)), 1.0);
     }
     #[test]
-    fn waits_two_seconds_then_fades() {
+    fn waits_half_a_second_then_fades() {
         let now = Instant::now();
         let d = Dismissal::opened(now);
-        assert_eq!(d.progress(now + Duration::from_millis(1999)), 0.0);
-        assert!((d.progress(now + Duration::from_millis(2070)) - 0.5).abs() < 0.001);
-        assert_eq!(d.progress(now + Duration::from_millis(2140)), 1.0);
+        assert_eq!(d.progress(now + Duration::from_millis(499)), 0.0);
+        assert!((d.progress(now + Duration::from_millis(570)) - 0.5).abs() < 0.001);
+        assert_eq!(d.progress(now + Duration::from_millis(640)), 1.0);
     }
     #[test]
     fn reentry_cancels_and_keyboard_activity_restarts_grace_period() {
@@ -105,9 +93,9 @@ mod tests {
         d.enter();
         assert_eq!(d.progress(now + Duration::from_secs(10)), 0.0);
         d.leave(now + Duration::from_secs(10));
-        d.activity(now + Duration::from_millis(11900));
-        assert_eq!(d.progress(now + Duration::from_secs(12)), 0.0);
-        assert_eq!(d.progress(now + Duration::from_millis(14040)), 1.0);
+        d.activity(now + Duration::from_millis(10400));
+        assert_eq!(d.progress(now + Duration::from_millis(10800)), 0.0);
+        assert_eq!(d.progress(now + Duration::from_millis(11040)), 1.0);
         d.enter();
         assert_eq!(d.progress(now + Duration::from_secs(20)), 0.0);
     }

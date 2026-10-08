@@ -1,5 +1,6 @@
 use tiny_skia::{Color, Paint, PathBuilder, Pixmap, Rect, Stroke, Transform};
 #[derive(Clone, Copy)]
+#[allow(dead_code)] // Also used by the headless sample renderer.
 pub enum Icon {
     Charging,
     Volume(bool),

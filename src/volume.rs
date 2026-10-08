@@ -259,9 +259,7 @@ fn apply(control: Control) -> Result<()> {
     }
     Ok(())
 }
-pub fn watch(
-    sender: smithay_client_toolkit::reexports::calloop::channel::Sender<Update>,
-) -> mpsc::Sender<Request> {
+pub fn watch(sender: std::sync::mpsc::Sender<Update>) -> mpsc::Sender<Request> {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         let mut request = Request::Refresh;

@@ -6,6 +6,8 @@ description = "A quiet, macOS-inspired native Wayland status bar for Sway"
 license = "MIT"
 
 [dependencies]
+gtk = { package = "gtk4", version = "0.11", features = ["v4_8"] }
+gtk4-layer-shell = "0.8"
 libc = "0.2"
 anyhow = "1"
 zbus = "4.4"
