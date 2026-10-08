@@ -574,8 +574,18 @@ impl Shell {
                 media::Update::Playback(_) | media::Update::Artwork(_)
             );
             match event {
-                media::Update::Playback(track) => self.extras.borrow_mut().track = track,
-                media::Update::Artwork(art) => self.extras.borrow_mut().artwork = Some(art),
+                media::Update::Playback(tracks) => {
+                    let mut extras = self.extras.borrow_mut();
+                    extras.track = tracks.first().cloned();
+                    extras.tracks = tracks;
+                    let urls: Vec<_> = extras.tracks.iter().map(|t| t.art_url.clone()).collect();
+                    extras.artworks.retain(|url, _| urls.contains(url));
+                }
+                media::Update::Artwork(art) => {
+                    let mut extras = self.extras.borrow_mut();
+                    extras.artworks.insert(art.url.clone(), art.clone());
+                    extras.artwork = Some(art);
+                }
                 media::Update::Audio(sources) => self.extras.borrow_mut().audio_sources = sources,
                 media::Update::Wifi(result) => {
                     if let Ok(snapshot) = result {
@@ -728,6 +738,9 @@ impl Shell {
                 .unwrap_or(m.dismissal.progress(now) as f64);
             let appear = (now.duration_since(m.opened).as_secs_f64() / 0.12).clamp(0.0, 1.0);
             m.pop.set_opacity(appear.min(1.0 - fade));
+            if appear < 1.0 || fade > 0.0 {
+                m.pop.queue_draw();
+            }
             close = fade >= 1.0;
         }
         if let Some(pop) = release_grab {
@@ -853,6 +866,7 @@ mod audio_label_tests {
     #[test]
     fn one_audio_source_keeps_its_name_and_multiple_use_a_count() {
         let firefox = volume::Stream {
+            icon: "firefox".into(),
             index: 1,
             application: "Firefox".into(),
             name: "Firefox · YouTube".into(),

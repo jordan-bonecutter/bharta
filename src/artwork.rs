@@ -14,34 +14,36 @@ pub struct Artwork {
     pub tint: [u8; 3],
 }
 const MAX_BYTES: u64 = 8 * 1024 * 1024;
-pub fn worker(sender: std::sync::mpsc::Sender<crate::media::Update>) -> mpsc::Sender<String> {
-    let (tx, rx) = mpsc::channel::<String>();
+pub fn worker(sender: std::sync::mpsc::Sender<crate::media::Update>) -> mpsc::Sender<Vec<String>> {
+    let (tx, rx) = mpsc::channel::<Vec<String>>();
     std::thread::spawn(move || {
         let mut cache: VecDeque<Arc<Artwork>> = VecDeque::new();
-        let mut last = String::new();
-        while let Ok(mut url) = rx.recv() {
+        let mut last = Vec::new();
+        while let Ok(mut urls) = rx.recv() {
             while let Ok(newer) = rx.try_recv() {
-                url = newer;
+                urls = newer;
             }
-            if url == last {
+            if urls == last {
                 continue;
             }
-            last = url.clone();
-            if url.is_empty() {
-                continue;
-            }
-            let art = cache.iter().find(|a| a.url == url).cloned().or_else(|| {
-                let art = Arc::new(load(&url).ok()?);
-                cache.push_back(art.clone());
-                if cache.len() > 8 {
-                    cache.pop_front();
+            last = urls.clone();
+            for url in urls {
+                if url.is_empty() {
+                    continue;
                 }
-                Some(art)
-            });
-            if let Some(art) = art
-                && sender.send(crate::media::Update::Artwork(art)).is_err()
-            {
-                break;
+                let art = cache.iter().find(|a| a.url == url).cloned().or_else(|| {
+                    let art = Arc::new(load(&url).ok()?);
+                    cache.push_back(art.clone());
+                    if cache.len() > 8 {
+                        cache.pop_front();
+                    }
+                    Some(art)
+                });
+                if let Some(art) = art
+                    && sender.send(crate::media::Update::Artwork(art)).is_err()
+                {
+                    break;
+                }
             }
         }
     });

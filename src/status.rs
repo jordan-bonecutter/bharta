@@ -195,7 +195,7 @@ impl Status {
     }
     pub fn update_audio(&mut self) {
         let audible = crate::media::audible_workspaces(
-            &self.extras.audio_sources,
+            &crate::media::source_titles(&self.extras.audio_sources, &self.extras.tracks),
             &self.window_pids,
             &self.window_details,
         );

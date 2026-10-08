@@ -44,6 +44,7 @@ impl Output {
 pub struct Stream {
     pub index: u32,
     pub application: String,
+    pub icon: String,
     pub name: String,
     pub percent: u32,
     pub muted: bool,
@@ -183,18 +184,23 @@ fn parse_streams(value: &Value) -> Vec<Stream> {
         .filter_map(|v| {
             let index = u32::try_from(v["index"].as_u64()?).ok()?;
             let properties = &v["properties"];
-            let app = properties["application.name"]
+            let app = crate::media::application_name(properties);
+            let media = properties["media.title"]
                 .as_str()
-                .or_else(|| properties["application.process.binary"].as_str());
-            let media = properties["media.name"].as_str();
-            let application = app.unwrap_or("Audio stream").to_string();
-            let name = match (app, media) {
-                (Some(app), Some(media)) if !media.is_empty() && media != app => {
-                    format!("{app} · {media}")
-                }
-                (Some(app), _) => app.to_string(),
-                (_, Some(media)) if !media.is_empty() => media.to_string(),
-                _ => "Audio stream".to_string(),
+                .or_else(|| properties["media.name"].as_str())
+                .filter(|m| {
+                    let m = m.trim().to_ascii_lowercase();
+                    !m.is_empty()
+                        && !m.starts_with("alsa ")
+                        && !matches!(
+                            m.as_str(),
+                            "audiostream" | "audio stream" | "playback" | "music"
+                        )
+                });
+            let application = app.to_string();
+            let name = match media {
+                Some(media) if media != app => format!("{app} · {media}"),
+                _ => app.to_string(),
             };
             let percent = v["volume"]
                 .as_object()
@@ -208,6 +214,10 @@ fn parse_streams(value: &Value) -> Vec<Stream> {
                 .min(150) as u32;
             Some(Stream {
                 index,
+                icon: properties["application.icon_name"]
+                    .as_str()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| app.to_lowercase().replace(' ', "")),
                 application,
                 name,
                 percent,
@@ -423,6 +433,15 @@ mod tests {
         assert!(!streams[0].corked && !streams[0].muted);
         assert_eq!(streams[1].name, "Music");
         assert!(streams[1].corked && streams[1].muted);
+        let raw = parse_streams(&serde_json::json!([
+            {"index":9,"properties":{"application.name":"ALSA plug-in [fruisic]", "media.name":"ALSA Playback", "application.icon_name":"fruisic"}},
+            {"index":10,"properties":{"application.name":"Firefox", "media.name":"AudioStream"}}
+        ]));
+        assert!(
+            raw.iter()
+                .any(|s| s.name == "fruisic" && s.icon == "fruisic")
+        );
+        assert!(raw.iter().any(|s| s.name == "Firefox"));
     }
     #[test]
     fn silent_and_disconnected_outputs() {

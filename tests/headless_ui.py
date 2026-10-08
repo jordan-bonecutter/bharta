@@ -71,6 +71,10 @@ while True:
     env['PATH'] = str(runtime) + os.pathsep + env['PATH']
     env['BHARTA_TEST_AUDIO'] = str(state)
     env['BHARTA_TEST_WINDOW_PID'] = str(runtime / 'fixture.pid')
+    for app, color in [('FIREFOX', (220, 105, 40)), ('SPOTIFY', (40, 180, 90))]:
+        art = runtime / (app.lower() + '.png')
+        Image.new('RGB', (32, 32), color).save(art)
+        env['BHARTA_TEST_' + app + '_ART'] = art.as_uri()
     config = runtime / 'config'
     config.write_text('output HEADLESS-1 mode 1600x900\nseat seat0 fallback true\n')
     def start(args, log):
@@ -179,7 +183,7 @@ while True:
         hover_music=probe(1260,14,'--hover',1600);time.sleep(.8);shot('music-hover');hover_music.wait()
         assert Image.open(DEST / 'music-hover.png').convert('RGB').getpixel((1250,100)) != (0,0,0), 'Music hover failed'
         leave=probe(600,600,'--hover',1000);leave.wait()
-        music=probe(1260,14,'--click-hold',6000);time.sleep(1)
+        music=probe(1260,14,'--click-hold',6000);time.sleep(1.4)
         shot('playing');audio_before=state.read_text()
         # Fake parec gives each sink input a distinct tone. Each mini-EQ must
         # show only the frequency band for its own source.
@@ -201,15 +205,31 @@ while True:
                 candidates.append([max(height for _,height in bar)
                                    for bar in bars if len(bar)<=3])
             return next((candidate for candidate in candidates if len(candidate)==7),candidates[0])
-        firefox_eq=eq_heights(313)
-        spotify_eq=eq_heights(393)
+        def image_bounds(color):
+            pixels=[(x,y) for y in range(290,550) for x in range(1050,1300)
+                    if playing_image.getpixel((x,y))==color]
+            assert pixels, f'Source artwork missing: {color}'
+            xs,ys=zip(*pixels)
+            return min(xs),min(ys),max(xs),max(ys)
+        firefox_art=image_bounds((220,105,40))
+        spotify_art=image_bounds((40,180,90))
+        assert firefox_art[0]==spotify_art[0] and firefox_art[2]==spotify_art[2], 'Source images do not align'
+        assert firefox_art[2]-firefox_art[0]<=28 and firefox_art[3]-firefox_art[1]<=28, 'Artwork made source row oversized'
+        firefox_center=(firefox_art[1]+firefox_art[3])//2
+        spotify_center=(spotify_art[1]+spotify_art[3])//2
+        control_right=firefox_art[0]+312
+        def playback_controls(center):
+            return playing_image.crop((control_right-84,center+28,control_right,center+50))
+        assert ImageChops.difference(playback_controls(firefox_center),playback_controls(spotify_center)).getbbox() is None, 'Long source summary moved playback controls'
+        firefox_eq=eq_heights(firefox_center)
+        spotify_eq=eq_heights(spotify_center)
         assert len(firefox_eq)==7 and firefox_eq[3]>=10 and max(firefox_eq[:3]+firefox_eq[4:])<=5, f'Firefox EQ did not isolate 750 Hz: {firefox_eq}'
         assert len(spotify_eq)==7 and spotify_eq[4]>=10 and max(spotify_eq[:4]+spotify_eq[5:])<=5, f'Spotify EQ did not isolate 1600 Hz: {spotify_eq}'
         player.stdin.write(b'pause\n');player.stdin.flush();time.sleep(1.2)
         shot('paused')
         paused_image=Image.open(DEST / 'paused.png').convert('RGB')
         playing_image=paused_image
-        paused_firefox_eq,paused_spotify_eq=eq_heights(313),eq_heights(393)
+        paused_firefox_eq,paused_spotify_eq=eq_heights(firefox_center),eq_heights(spotify_center)
         assert paused_firefox_eq[3]>=10 and max(paused_firefox_eq[:3]+paused_firefox_eq[4:])<=5, 'Firefox meter stopped when unrelated MPRIS playback paused'
         assert paused_spotify_eq[4]>=10 and max(paused_spotify_eq[:4]+paused_spotify_eq[5:])<=5, 'Spotify meter stopped when unrelated MPRIS playback paused'
         playing=Image.open(DEST / 'playing.png').convert('RGB');paused=Image.open(DEST / 'paused.png').convert('RGB')

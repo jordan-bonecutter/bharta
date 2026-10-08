@@ -40,12 +40,14 @@ pub struct Extras {
     pub wifi_signal: Option<u8>,
     pub wifi_enabled: Option<bool>,
     pub track: Option<Track>,
+    pub tracks: Vec<Track>,
+    pub artworks: HashMap<String, std::sync::Arc<crate::artwork::Artwork>>,
     pub audio_sources: Vec<AudioProcess>,
 }
 pub enum Update {
     Artwork(std::sync::Arc<crate::artwork::Artwork>),
     Wifi(Result<crate::network::Snapshot, String>),
-    Playback(Option<Track>),
+    Playback(Vec<Track>),
     Audio(Vec<AudioProcess>),
     ControlFinished(u64, Result<(), String>),
 }
@@ -131,15 +133,12 @@ fn spawn_playback(sender: UiSender, address: Option<String>) -> std::sync::mpsc:
             } else {
                 None
             };
-            let track = connection.ok().and_then(|c| track_on(&c));
-            let art_url = track
-                .as_ref()
-                .map(|t| t.art_url.clone())
-                .unwrap_or_default();
-            if sender.send(Update::Playback(track)).is_err() {
+            let tracks = connection.ok().map(|c| tracks_on(&c)).unwrap_or_default();
+            let art_urls = tracks.iter().map(|t| t.art_url.clone()).collect();
+            if sender.send(Update::Playback(tracks)).is_err() {
                 break;
             }
-            let _ = artwork.send(art_url);
+            let _ = artwork.send(art_urls);
             if let Some((id, result)) = finished
                 && sender.send(Update::ControlFinished(id, result)).is_err()
             {
@@ -221,14 +220,21 @@ pub fn track() -> Option<Track> {
     track_on(&Connection::session().ok()?)
 }
 fn track_on(c: &Connection) -> Option<Track> {
+    tracks_on(c).into_iter().next()
+}
+fn tracks_on(c: &Connection) -> Vec<Track> {
     let bus = Proxy::new(
         c,
         "org.freedesktop.DBus",
         "/org/freedesktop/DBus",
         "org.freedesktop.DBus",
-    )
-    .ok()?;
-    let mut names: Vec<String> = bus.call("ListNames", &()).ok()?;
+    );
+    let Ok(bus) = bus else {
+        return vec![];
+    };
+    let Ok(mut names) = bus.call::<_, _, Vec<String>>("ListNames", &()) else {
+        return vec![];
+    };
     names.sort();
     let mut tracks = vec![];
     for name in names.into_iter().filter(|n| {
@@ -285,7 +291,7 @@ fn track_on(c: &Connection) -> Option<Track> {
         });
     }
     tracks.sort_by_key(|t| !t.playing);
-    tracks.into_iter().next()
+    tracks
 }
 #[derive(Clone, Copy)]
 pub enum Control {
@@ -332,14 +338,10 @@ fn parse_audio(value: &Value) -> Vec<AudioProcess> {
                 .or_else(|| u32::try_from(properties["application.process.id"].as_u64()?).ok())?;
             Some(AudioProcess {
                 pid,
-                application: properties["application.name"]
+                application: application_name(properties).into(),
+                media: properties["media.title"]
                     .as_str()
-                    .or_else(|| properties["application.process.binary"].as_str())
-                    .unwrap_or("")
-                    .into(),
-                media: properties["media.name"]
-                    .as_str()
-                    .or_else(|| properties["media.title"].as_str())
+                    .or_else(|| properties["media.name"].as_str())
                     .filter(|name| !name.is_empty())
                     .map(str::to_owned),
             })
@@ -448,6 +450,53 @@ pub fn audible_workspaces(
             .lines()
             .find_map(|l| l.strip_prefix("PPid:").and_then(|p| p.trim().parse().ok()))
     })
+}
+pub fn application_name(properties: &Value) -> &str {
+    let name = properties["application.name"].as_str().unwrap_or("");
+    if name.to_ascii_lowercase().starts_with("alsa ") {
+        return properties["application.process.binary"]
+            .as_str()
+            .or_else(|| name.split_once('[').and_then(|(_, n)| n.strip_suffix(']')))
+            .unwrap_or("Audio");
+    }
+    if name.is_empty() {
+        properties["application.process.binary"]
+            .as_str()
+            .unwrap_or("Audio")
+    } else {
+        name
+    }
+}
+pub fn player_matches(application: &str, player: &str) -> bool {
+    let app = normalize(application);
+    let app = app
+        .strip_prefix("mozilla")
+        .or_else(|| app.strip_prefix("google"))
+        .unwrap_or(&app);
+    !app.is_empty() && normalize(player).contains(app)
+}
+pub fn source_titles(sources: &[AudioProcess], tracks: &[Track]) -> Vec<AudioProcess> {
+    sources
+        .iter()
+        .cloned()
+        .map(|mut source| {
+            if source.media.as_deref().is_none_or(|m| {
+                matches!(
+                    normalize(m).as_str(),
+                    "" | "audiostream" | "alsaplayback" | "playback"
+                )
+            }) {
+                let candidates: Vec<_> = tracks
+                    .iter()
+                    .filter(|t| t.playing && player_matches(&source.application, &t.player))
+                    .collect();
+                if let [track] = candidates.as_slice() {
+                    source.media = Some(track.title.clone());
+                }
+            }
+            source
+        })
+        .collect()
 }
 fn normalize(value: &str) -> String {
     value
@@ -583,6 +632,27 @@ mod tests {
             media: None,
         };
         assert!(resolve_audio_workspaces(&[ambiguous], &map, &details, |_| None).is_empty());
+        let generic = AudioProcess {
+            pid: 42,
+            application: "Firefox".into(),
+            media: Some("AudioStream".into()),
+        };
+        let track = Track {
+            player: "org.mpris.MediaPlayer2.firefox.instance123".into(),
+            title: "YouTube".into(),
+            art_url: String::new(),
+            artist: String::new(),
+            playing: true,
+            can_previous: false,
+            can_next: false,
+            can_toggle: true,
+        };
+        assert_eq!(
+            resolve_audio_workspaces(&source_titles(&[generic], &[track]), &map, &details, |_| {
+                None
+            }),
+            HashSet::from(["3".into()])
+        );
     }
 }
 
@@ -668,8 +738,8 @@ mod event_tests {
         let wait_for = |expected: Option<bool>| {
             let start = Instant::now();
             while start.elapsed() < Duration::from_millis(800) {
-                if let Ok(Update::Playback(track)) = rx.try_recv()
-                    && track.map(|t| t.playing) == expected
+                if let Ok(Update::Playback(tracks)) = rx.try_recv()
+                    && tracks.first().map(|t| t.playing) == expected
                 {
                     return;
                 }

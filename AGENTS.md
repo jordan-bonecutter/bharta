@@ -37,6 +37,9 @@ dimensions. Per-app equalizer bars must monitor their own audio stream, never
 the mixed output or fabricated animation; stop stream capture when the drawer closes.
 For headless meter tests, give each fake `parec --monitor-stream=ID` a distinct
 tone and verify it appears only in that source row's matching frequency band.
+Use two MPRIS fixtures with distinct artwork to verify all source images load.
+Keep image, meter, mute, and playback control columns aligned across source rows;
+ellipsize long summaries and omit generic ALSA/AudioStream backend names.
 All menus open on a short hover; leaving the bar and popup starts a 500ms delay
 followed by a brief fade. Keep Wi-Fi names and actions left-aligned. Only one
 popup may be open across all outputs at a time. Hovering another button must

@@ -8,8 +8,10 @@ struct StreamControl {
     previous: gtk::Button,
     toggle: gtk::Button,
     next: gtk::Button,
-    cover: gtk::Picture,
+    cover: gtk::Image,
     art_url: String,
+    fallback: gtk::gdk::Paintable,
+    summary: gtk::Label,
     levels: Arc<Mutex<[f64; 7]>>,
     meter: gtk::DrawingArea,
     meter_active: Rc<Cell<bool>>,
@@ -69,22 +71,6 @@ impl Sound {
         });
         (area, active)
     }
-    fn normalized(value: &str) -> String {
-        value
-            .chars()
-            .filter(|c| c.is_ascii_alphanumeric())
-            .flat_map(char::to_lowercase)
-            .collect()
-    }
-    fn stream_matches_player(application: &str, player: &str) -> bool {
-        let player = Self::normalized(player);
-        let application = Self::normalized(application);
-        let application = application
-            .strip_prefix("google")
-            .or_else(|| application.strip_prefix("mozilla"))
-            .unwrap_or(&application);
-        !application.is_empty() && player.contains(application)
-    }
     fn media_button(
         shell: &std::rc::Weak<Shell>,
         application: &str,
@@ -92,13 +78,19 @@ impl Sound {
         control: media::Control,
     ) -> gtk::Button {
         let button = icon_button(icon, "Playback");
-        button.set_visible(false);
+        button.set_opacity(0.0);
+        button.set_can_target(false);
         let weak = shell.clone();
         let application = application.to_string();
         button.connect_clicked(move |_| {
             if let Some(shell) = weak.upgrade()
-                && let Some(track) = shell.extras.borrow().track.as_ref()
-                && Self::stream_matches_player(&application, &track.player)
+                && let Some(track) = shell
+                    .extras
+                    .borrow()
+                    .tracks
+                    .iter()
+                    .find(|t| media::player_matches(&application, &t.player))
+                && media::player_matches(&application, &track.player)
             {
                 let _ = shell.services.media.send(media::Request::Control {
                     panel_id: shell.serial.get(),
@@ -263,14 +255,28 @@ impl Sound {
                 }
                 for stream in &state.streams {
                     let header = row(8);
-                    let cover = gtk::Picture::new();
+                    let cover = gtk::Image::new();
                     cover.set_size_request(28, 28);
-                    cover.set_can_shrink(true);
-                    cover.set_visible(false);
+                    cover.set_pixel_size(28);
+                    let theme = gtk::IconTheme::for_display(&gtk::prelude::WidgetExt::display(
+                        &shell.window,
+                    ));
+                    let fallback = theme
+                        .lookup_icon(
+                            &stream.icon,
+                            &["multimedia-player-symbolic"],
+                            28,
+                            1,
+                            gtk::TextDirection::None,
+                            gtk::IconLookupFlags::empty(),
+                        )
+                        .upcast::<gdk::Paintable>();
+                    cover.set_paintable(Some(&fallback));
                     header.append(&cover);
                     let name = label(&stream.name);
                     name.set_hexpand(true);
-                    name.set_max_width_chars(34);
+                    name.set_width_chars(1);
+                    name.set_max_width_chars(22);
                     header.append(&name);
                     let meter_levels = Arc::new(Mutex::new([0.0; 7]));
                     let (meter, meter_active) = Self::meter(meter_levels.clone());
@@ -302,9 +308,12 @@ impl Sound {
                         "media-skip-forward-symbolic",
                         media::Control::Next,
                     );
+                    let playback = row(0);
                     for button in [&previous, &toggle, &next] {
-                        header.append(button);
+                        button.set_size_request(24, 24);
+                        playback.append(button);
                     }
+                    mute.set_size_request(24, 24);
                     let weak = self.shell.clone();
                     let index = stream.index;
                     mute.connect_clicked(move |_| {
@@ -313,10 +322,12 @@ impl Sound {
                         }
                     });
                     self.streams.append(&header);
+                    let volume_row = row(8);
                     let scale = if stream.corked {
                         let paused = label("Paused");
                         paused.add_css_class("dim-label");
-                        self.streams.append(&paused);
+                        paused.set_hexpand(true);
+                        volume_row.append(&paused);
                         None
                     } else {
                         let scale = Self::scale(
@@ -328,9 +339,11 @@ impl Sound {
                         );
                         scale.set_range(0.0, 150.0);
                         scale.set_value(stream.percent as f64);
-                        self.streams.append(&scale);
+                        volume_row.append(&scale);
                         Some(scale)
                     };
+                    volume_row.append(&playback);
+                    self.streams.append(&volume_row);
                     self.stream_controls.borrow_mut().push(StreamControl {
                         index: stream.index,
                         scale,
@@ -340,6 +353,8 @@ impl Sound {
                         next,
                         cover,
                         art_url: String::new(),
+                        fallback,
+                        summary: name,
                         levels: meter_levels,
                         meter,
                         meter_active,
@@ -384,36 +399,48 @@ impl Sound {
                         *levels = [0.0; 7];
                     }
                 }
-                let track = extras.track.as_ref().filter(|track| {
-                    Self::stream_matches_player(&stream.application, &track.player)
-                });
+                let track = extras
+                    .tracks
+                    .iter()
+                    .find(|track| media::player_matches(&stream.application, &track.player));
                 if let Some(track) = track {
-                    control.previous.set_visible(true);
-                    control.next.set_visible(true);
+                    control.summary.set_text(&track.title);
+                    control.summary.set_tooltip_text(Some(&format!(
+                        "{} · {}",
+                        stream.application, track.title
+                    )));
+                    for button in [&control.previous, &control.toggle, &control.next] {
+                        button.set_opacity(1.0);
+                        button.set_can_target(true);
+                    }
                     control.previous.set_sensitive(track.can_previous);
                     control.next.set_sensitive(track.can_next);
-                    control.toggle.set_visible(true);
+
                     control.toggle.set_icon_name(if track.playing {
                         "media-playback-pause-symbolic"
                     } else {
                         "media-playback-start-symbolic"
                     });
                     control.toggle.set_sensitive(track.can_toggle);
-                    if let Some(art) = extras
-                        .artwork
-                        .as_ref()
-                        .filter(|art| art.url == track.art_url)
+                    if control.art_url != track.art_url {
+                        control.cover.set_paintable(Some(&control.fallback));
+                        control.art_url.clear();
+                    }
+                    if let Some(art) = extras.artworks.get(&track.art_url)
                         && control.art_url != art.url
                     {
                         control.cover.set_paintable(Some(&texture(&art.pixels)));
-                        control.cover.set_visible(true);
                         control.art_url = art.url.clone();
                     }
                 } else {
-                    control.previous.set_visible(false);
-                    control.toggle.set_visible(false);
-                    control.next.set_visible(false);
-                    control.cover.set_visible(false);
+                    control.summary.set_text(&stream.name);
+                    control.summary.set_tooltip_text(Some(&stream.name));
+                    for button in [&control.previous, &control.toggle, &control.next] {
+                        button.set_opacity(0.0);
+                        button.set_can_target(false);
+                        button.set_sensitive(false);
+                    }
+                    control.cover.set_paintable(Some(&control.fallback));
                     control.art_url.clear();
                 }
                 control.meter.queue_draw();
