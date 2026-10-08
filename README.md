@@ -60,7 +60,8 @@ by building or running this project. Ctrl-C stops a foreground instance.
   the panel to reach additional outputs or channels. Requires `pactl` and PulseAudio
   or PipeWire-Pulse. Audio commands run on a worker and external changes refresh
   within two seconds.
-- Battery percentage and charging state from Linux sysfs.
+- Battery percentage and charging state from Linux sysfs, with a green vector
+  lightning bolt while charging (no icon-font dependency).
 - Current song and artist from playing MPRIS players. Paused song text hides
   as soon as the player signals the change, leaving a fixed-position music button.
   Playback uses D-Bus events, with a five-second recovery poll.

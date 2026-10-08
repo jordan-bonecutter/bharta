@@ -165,7 +165,7 @@ impl Renderer {
         };
         let shown_battery = if width < 480 { None } else { status.battery };
         let battery = shown_battery
-            .map(|(n, c)| format!("{}{}%", if c { "+" } else { "" }, n))
+            .map(|(n, _)| format!("{n}%"))
             .unwrap_or_default();
         let right = format!(
             "{}   {}{}",
@@ -254,14 +254,26 @@ impl Renderer {
                 None,
             );
             rect(&mut pix, bx + 23.0, 12.0, 2.0, 4.0, muted);
-            rect(
-                &mut pix,
-                bx + 2.0,
-                11.0,
-                17.0 * level as f32 / 100.0,
-                6.0,
-                color,
-            );
+            if charging {
+                crate::icons::draw(
+                    &mut pix,
+                    crate::icons::Icon::Charging,
+                    bx + 4.5,
+                    6.0,
+                    16.0,
+                    s,
+                    color,
+                );
+            } else {
+                rect(
+                    &mut pix,
+                    bx + 2.0,
+                    11.0,
+                    17.0 * level as f32 / 100.0,
+                    6.0,
+                    color,
+                );
+            }
         }
         crate::icons::draw(
             &mut pix,
@@ -418,6 +430,34 @@ impl Renderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn charging_changes_the_icon_without_moving_bar_controls() {
+        for dark in [true, false] {
+            let renderer = Renderer::new(None, dark).unwrap();
+            let mut status = Status::demo();
+            for scale in [1, 2] {
+                status.battery = Some((35, false));
+                let (battery, before) = renderer
+                    .draw(1440, scale, &status, "9:41 AM", None)
+                    .unwrap();
+                status.battery = Some((35, true));
+                let (charging, after) = renderer
+                    .draw(1440, scale, &status, "9:41 AM", None)
+                    .unwrap();
+                assert_ne!(battery.data(), charging.data());
+                assert_eq!(
+                    before
+                        .iter()
+                        .map(|h| (h.start, h.end, &h.action))
+                        .collect::<Vec<_>>(),
+                    after
+                        .iter()
+                        .map(|h| (h.start, h.end, &h.action))
+                        .collect::<Vec<_>>()
+                );
+            }
+        }
+    }
     #[test]
     fn paused_track_hides_metadata_but_keeps_music_control() {
         let renderer = Renderer::new(None, true).unwrap();

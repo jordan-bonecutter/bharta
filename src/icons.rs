@@ -1,6 +1,7 @@
 use tiny_skia::{Color, Paint, PathBuilder, Pixmap, Rect, Stroke, Transform};
 #[derive(Clone, Copy)]
 pub enum Icon {
+    Charging,
     Volume(bool),
     Music,
     Play,
@@ -37,6 +38,18 @@ pub fn draw(pix: &mut Pixmap, icon: Icon, x: f32, y: f32, size: f32, scale: f32,
         fill(pix, p);
     };
     match icon {
+        Icon::Charging => {
+            let mut p = PathBuilder::new();
+            p.move_to(14., 1.);
+            p.line_to(5., 14.);
+            p.line_to(11., 14.);
+            p.line_to(9., 23.);
+            p.line_to(20., 9.);
+            p.line_to(13., 9.);
+            p.close();
+            fill(pix, p);
+        }
+
         Icon::Volume(muted) => {
             let mut p = PathBuilder::new();
             p.move_to(3., 9.);
