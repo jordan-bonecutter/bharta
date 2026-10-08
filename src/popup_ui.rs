@@ -65,6 +65,7 @@ impl App {
         }
         panel.track = self.status.extras.track.clone();
         panel.artwork = self.status.extras.artwork.clone();
+        panel.update_dismissal(self.hover.is_some());
         self.panel = Some(panel);
         match kind {
             Kind::Network => self.network_job(Job::Scan(false)),
@@ -157,7 +158,7 @@ impl App {
         let Some(panel) = &mut self.panel else {
             return;
         };
-        panel.update_dismissal();
+        panel.update_dismissal(self.hover.is_some());
         let progress = panel.dismissal.progress(std::time::Instant::now());
         if progress >= 1.0 {
             self.close_panel();
@@ -172,7 +173,7 @@ impl App {
         if !p.ready {
             return;
         }
-        p.update_dismissal();
+        p.update_dismissal(self.hover.is_some());
         let mut pix = p.render(&self.renderer);
         let fade = p.dismissal.progress(std::time::Instant::now());
         if fade > 0.0 {

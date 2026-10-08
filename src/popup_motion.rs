@@ -19,6 +19,13 @@ impl Dismissal {
         }
         self.pinned = pinned;
     }
+    pub fn pointer_inside(&mut self, inside: bool, now: Instant) {
+        if inside {
+            self.enter();
+        } else {
+            self.leave(now);
+        }
+    }
     pub fn enter(&mut self) {
         self.outside = None;
     }
@@ -68,6 +75,19 @@ mod tests {
         assert_eq!(d.progress(now + Duration::from_secs(60)), 0.0);
         d.set_pinned(false, now + Duration::from_secs(60));
         assert_eq!(d.progress(now + Duration::from_secs(61)), 0.0);
+        assert_eq!(d.progress(now + Duration::from_millis(62140)), 1.0);
+    }
+    #[test]
+    fn bar_and_popup_share_one_hover_region() {
+        let now = Instant::now();
+        let mut d = Dismissal::opened(now);
+        d.pointer_inside(true, now); // Open while pointer is on the bar.
+        assert_eq!(d.progress(now + Duration::from_secs(30)), 0.0);
+        d.leave(now + Duration::from_secs(30)); // Surface handoff.
+        d.pointer_inside(true, now + Duration::from_secs(30));
+        assert_eq!(d.progress(now + Duration::from_secs(60)), 0.0);
+        d.pointer_inside(false, now + Duration::from_secs(60));
+        d.pointer_inside(false, now + Duration::from_secs(61));
         assert_eq!(d.progress(now + Duration::from_millis(62140)), 1.0);
     }
     #[test]

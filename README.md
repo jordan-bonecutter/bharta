@@ -87,7 +87,10 @@ by building or running this project. Ctrl-C stops a foreground instance.
 - The four-square mark opens the session menu, including launcher, lock, and logout.
   Lock uses `~/.local/bin/lock-session` when executable, falling back to `swaylock`.
   Logging out requires clicking a second confirmation button inside the menu.
-- Floating panels dismiss after two seconds outside, with a 140 ms fade and 1% shrink.
+- Floating panels stay open while the cursor is over the bar or the panel.
+  They dismiss after two seconds outside both, with a 140 ms fade and 1% shrink.
+  Workspace previews also stay open while traversing the bar until the pointer
+  leaves it, another workspace is hovered, or a menu opens.
   Reentering cancels dismissal. Password entry, typed launcher searches, pending
   actions, and logout confirmation stay open until dismissed or completed.
 - Local date and time, integer HiDPI scaling, and one-second system status updates.

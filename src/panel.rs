@@ -81,7 +81,9 @@ pub struct Panel {
     pub selection: usize,
 }
 impl Panel {
-    pub fn update_dismissal(&mut self) {
+    pub fn update_dismissal(&mut self, on_bar: bool) {
+        self.dismissal
+            .pointer_inside(on_bar || self.hover.is_some(), std::time::Instant::now());
         let pinned = self.selected.is_some()
             || self.busy
             || self.confirm

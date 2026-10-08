@@ -216,6 +216,11 @@ impl App {
                     None
                 }
             });
+        // Keep an open preview while traversing the bar; another workspace
+        // replaces it, leaving the bar or opening a menu dismisses it.
+        if target.is_none() && self.workspace_preview.is_some() {
+            return;
+        }
         if target.as_ref().map(|t| &t.0) == self.preview_target.as_ref().map(|t| &t.0) {
             return;
         }
