@@ -7,7 +7,8 @@ window.bharta { background: transparent; font-family: "SF Pro Text", "Cantarell"
 .bar button.workspace { padding: 0 16px; min-height: 20px; margin: 3px 0; }
 .bar button.workspace.active { background: @selected; color: @fg; }
 .bar button.workspace.urgent { color: @urgent; }
-.bar button.workspace.audible { box-shadow: inset 0 -2px @accent; }
+.bar button.workspace.audible { box-shadow: inset 0 -3px @green; }
+.bar button.workspace image.workspace-sound { color: @green; -gtk-icon-size: 13px; }
 .bar image { -gtk-icon-size: 16px; }
 .bar .app-title { color: @fg; }
 .bar .charging { color: @green; }

@@ -40,10 +40,19 @@ impl Output {
             .unwrap_or(0)
     }
 }
+#[derive(Clone, Debug)]
+pub struct Stream {
+    pub index: u32,
+    pub name: String,
+    pub percent: u32,
+    pub muted: bool,
+    pub corked: bool,
+}
 #[derive(Clone, Debug, Default)]
 pub struct Snapshot {
     pub default: String,
     pub outputs: Vec<Output>,
+    pub streams: Vec<Stream>,
 }
 impl Snapshot {
     pub fn active(&self) -> Option<&Output> {
@@ -60,6 +69,8 @@ pub enum Control {
     Mute(String),
     Output(String),
     Port(String, String),
+    StreamVolume(u32, u8),
+    StreamMute(u32),
 }
 pub enum Request {
     Refresh,
@@ -157,16 +168,73 @@ fn parse(value: &Value, default: String) -> Result<Snapshot> {
                 .into(),
         });
     }
-    Ok(Snapshot { default, outputs })
+    Ok(Snapshot {
+        default,
+        outputs,
+        streams: vec![],
+    })
+}
+fn parse_streams(value: &Value) -> Vec<Stream> {
+    let mut streams: Vec<_> = value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|v| {
+            let index = u32::try_from(v["index"].as_u64()?).ok()?;
+            let properties = &v["properties"];
+            let app = properties["application.name"]
+                .as_str()
+                .or_else(|| properties["application.process.binary"].as_str());
+            let media = properties["media.name"].as_str();
+            let name = match (app, media) {
+                (Some(app), Some(media)) if !media.is_empty() && media != app => {
+                    format!("{app} · {media}")
+                }
+                (Some(app), _) => app.to_string(),
+                (_, Some(media)) if !media.is_empty() => media.to_string(),
+                _ => "Audio stream".to_string(),
+            };
+            let percent = v["volume"]
+                .as_object()
+                .into_iter()
+                .flat_map(|channels| channels.values())
+                .filter_map(|channel| channel["value"].as_u64())
+                .max()
+                .unwrap_or(0)
+                .saturating_mul(100)
+                .div_ceil(65536)
+                .min(150) as u32;
+            Some(Stream {
+                index,
+                name,
+                percent,
+                muted: v["mute"].as_bool().unwrap_or(false),
+                corked: v["corked"].as_bool().unwrap_or(false),
+            })
+        })
+        .collect();
+    streams.sort_by(|a, b| {
+        a.corked
+            .cmp(&b.corked)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+            .then_with(|| a.index.cmp(&b.index))
+    });
+    streams
 }
 pub fn read() -> Result<Snapshot> {
     let default = String::from_utf8(run(&["get-default-sink"])?)?
         .trim()
         .to_owned();
-    parse(
+    let mut snapshot = parse(
         &serde_json::from_slice(&run(&["--format=json", "list", "sinks"])?)?,
         default,
-    )
+    )?;
+    snapshot.streams = parse_streams(&serde_json::from_slice(&run(&[
+        "--format=json",
+        "list",
+        "sink-inputs",
+    ])?)?);
+    Ok(snapshot)
 }
 fn volume_values(output: &Output, channel: Option<&str>, percent: u8) -> Result<Vec<u32>> {
     ensure!(!output.channels.is_empty(), "Output has no volume channels");
@@ -213,11 +281,41 @@ pub fn preview(snapshot: &mut Snapshot, control: &Control) {
 }
 fn apply(control: Control) -> Result<()> {
     let current = read()?;
+    match control {
+        Control::StreamVolume(index, percent) => {
+            ensure!(percent <= 150, "Stream volume must be at most 150 percent");
+            ensure!(
+                current.streams.iter().any(|stream| stream.index == index),
+                "Audio stream ended"
+            );
+            run(&[
+                "set-sink-input-volume",
+                &index.to_string(),
+                &format!("{percent}%"),
+            ])?;
+            return Ok(());
+        }
+        Control::StreamMute(index) => {
+            let stream = current
+                .streams
+                .iter()
+                .find(|stream| stream.index == index)
+                .context("Audio stream ended")?;
+            run(&[
+                "set-sink-input-mute",
+                &index.to_string(),
+                if stream.muted { "0" } else { "1" },
+            ])?;
+            return Ok(());
+        }
+        _ => {}
+    }
     let name = match &control {
         Control::Volume { output, .. }
         | Control::Mute(output)
         | Control::Output(output)
         | Control::Port(output, _) => output,
+        Control::StreamVolume(_, _) | Control::StreamMute(_) => unreachable!(),
     };
     let output = current
         .outputs
@@ -256,6 +354,7 @@ fn apply(control: Control) -> Result<()> {
                 }
             }
         }
+        Control::StreamVolume(_, _) | Control::StreamMute(_) => unreachable!(),
     }
     Ok(())
 }
@@ -309,6 +408,18 @@ mod tests {
         assert!(volumes(o, None, 101).is_err());
         assert!(!o.ports[0].available);
         assert_eq!(o.active_port, "speaker");
+    }
+    #[test]
+    fn parses_distinct_app_stream_names_and_states() {
+        let streams = parse_streams(&serde_json::json!([
+            {"index":7,"corked":false,"mute":false,"volume":{"left":{"value":32768}},"properties":{"application.name":"Firefox","media.name":"YouTube"}},
+            {"index":8,"corked":true,"mute":true,"volume":{"left":{"value":65536}},"properties":{"application.name":"Music"}}
+        ]));
+        assert_eq!(streams[0].name, "Firefox · YouTube");
+        assert_eq!(streams[0].percent, 50);
+        assert!(!streams[0].corked && !streams[0].muted);
+        assert_eq!(streams[1].name, "Music");
+        assert!(streams[1].corked && streams[1].muted);
     }
     #[test]
     fn silent_and_disconnected_outputs() {

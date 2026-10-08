@@ -43,8 +43,10 @@ other menus do not take keyboard focus merely from hovering. Only one popup is s
   1.9, shows window positions and titles. Hidden tabs and fullscreen windows are
   respected. Capture runs only while a preview is open and stays in memory.
 - **Sound** has a native draggable volume scale, mute, output and port selection,
-  and an expandable channel section. Master volume preserves channel balance;
-  changing output moves current playback. Commands run on a worker, slider
+  individual app stream volume and mute controls, and an expandable channel section.
+  Browser streams include their media title where available. Master volume
+  preserves channel balance; changing output moves current playback. Commands
+  run on a worker, slider
   updates are coalesced, and external audio changes refresh within two seconds.
 - Hover or click **Wi-Fi** for a radio switch, scan, connection/disconnection, and a native
   password entry with clipboard paste and a reveal button. Leave the password

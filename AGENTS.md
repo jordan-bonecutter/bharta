@@ -39,6 +39,9 @@ followed by a brief fade. Keep Wi-Fi names and actions left-aligned. Only one
 popup may be open across all outputs at a time. Hovering another button must
 switch directly to its menu, including workspace previews and clicked menus.
 Apps focuses its search field on opening, including hover, so typing works immediately.
+Workspace audio activity should be visibly marked with a speaker icon and accent.
+The Sound drawer should show individual PulseAudio-compatible app streams with
+per-stream volume and mute controls, using app/media names when available.
 
 Commit completed changes as requested by the user. No confirmation is needed
 for ordinary code edits.

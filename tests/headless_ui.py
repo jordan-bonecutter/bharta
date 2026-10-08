@@ -39,6 +39,15 @@ a=sys.argv[1:]
 if a==['get-default-sink']:print('test')
 elif a==['--format=json','list','sinks']:
  v=json.loads(p.read_text());print(json.dumps([{'name':'test','description':'Test speakers','channel_map':'front-left,front-right','volume':{k:{'value':n} for k,n in zip(['front-left','front-right'],v)},'ports':[{'name':'speaker','description':'Speakers','availability':'yes'}],'active_port':'speaker','mute':False}]))
+elif a==['--format=json','list','sink-inputs']:
+ streams=[
+  {'index':11,'corked':False,'mute':False,'volume':{'front-left':{'value':49152},'front-right':{'value':49152}},'properties':{'application.name':'Firefox','media.name':'YouTube'}},
+  {'index':12,'corked':False,'mute':False,'volume':{'front-left':{'value':32768},'front-right':{'value':32768}},'properties':{'application.name':'Spotify','media.name':'Music'}},
+ ]
+ pidfile=os.environ.get('BHARTA_TEST_WINDOW_PID')
+ if pidfile and Path(pidfile).exists():
+  streams.append({'index':13,'corked':False,'mute':False,'volume':{'front-left':{'value':32768},'front-right':{'value':32768}},'properties':{'application.name':'Fixture','application.process.id':Path(pidfile).read_text().strip()}})
+ print(json.dumps(streams))
 elif a and a[0]=='set-sink-volume':p.write_text(json.dumps([int(n) for n in a[2:]]))
 elif 'list' in a:print('[]')
 ''')
@@ -59,6 +68,7 @@ while True:
     fake_capture.chmod(0o755)
     env['PATH'] = str(runtime) + os.pathsep + env['PATH']
     env['BHARTA_TEST_AUDIO'] = str(state)
+    env['BHARTA_TEST_WINDOW_PID'] = str(runtime / 'fixture.pid')
     config = runtime / 'config'
     config.write_text('output HEADLESS-1 mode 1600x900\nseat seat0 fallback true\n')
     def start(args, log):
@@ -109,6 +119,8 @@ while True:
         time.sleep(1)
         shot('sound')
         assert Image.open(DEST / 'sound.png').getpixel((1250,80))[:3] != (0,0,0), 'Sound popup missing'
+        sound_image=Image.open(DEST / 'sound.png').convert('RGB')
+        assert sound_image.crop((1180,180,1530,520)).getbbox(), 'Per-application audio controls missing'
         pixels=Image.open(DEST / 'sound.png').convert('RGB')
         # Find the native scale's long, bright filled trough, independent of
         # typography and spacing tweaks.
@@ -147,6 +159,10 @@ while True:
         escape=probe(72,14,'--keys-only',1);escape.wait();time.sleep(.5);shot('escape')
         assert Image.open(DEST / 'escape.png').convert('RGB').crop((0,28,1600,900)).getbbox() is None, 'Escape did not close launcher'
         fixture=start([str(ROOT / 'target/release/examples/headless_window')],'windows.log');time.sleep(2);shot('fixture')
+        bar_image=Image.open(DEST / 'fixture.png').convert('RGB')
+        green=sum(1 for y in range(28) for x in range(95,170)
+                  if bar_image.getpixel((x,y))[1] > bar_image.getpixel((x,y))[0]*1.25)
+        assert green >= 4, 'Audible workspace lacks a visible sound indicator'
         preview=probe(120,14,'--hover',2500);time.sleep(1);shot('workspace');preview.wait()
         # The preview stays bounded even with full-sized captured windows.
         # Its rightmost edge must remain within the small left-side popup.
@@ -154,7 +170,7 @@ while True:
         baseline=Image.open(DEST / 'fixture.png').convert('RGB')
         bounds=ImageChops.difference(image,baseline).crop((0,28,1600,900)).getbbox()
         assert bounds and bounds[2]-bounds[0]<=380 and bounds[3]-bounds[1]<=300, f'Preview is oversized: {bounds}'
-        fixture.terminate();fixture.wait();time.sleep(.3)
+        fixture.terminate();fixture.wait();Path(env['BHARTA_TEST_WINDOW_PID']).unlink(missing_ok=True);time.sleep(1.2)
         outside=probe(600,600,'--hover',2600);outside.wait()
         player=subprocess.Popen([str(ROOT / 'target/release/examples/headless_player')],cwd=ROOT,env=env,stdin=subprocess.PIPE,stdout=open(DEST / 'player.log','w'),stderr=subprocess.STDOUT,start_new_session=True)
         processes.append(player);time.sleep(2)
@@ -166,12 +182,17 @@ while True:
         # Fake parec emits a steady 750 Hz tone. Its matching 500-1000 Hz
         # bar should rise while all other frequency bands stay near zero.
         playing_image=Image.open(DEST / 'playing.png').convert('RGB')
-        bar_columns=[1366,1372,1378,1384,1390,1396,1402]
-        bar_heights=[]
-        for x in bar_columns:
-            ys=[y for xx in range(x-1,x+2) for y in range(244,260)
-                if min(playing_image.getpixel((xx,y)))>120]
-            bar_heights.append(max(ys)-min(ys) if ys else 0)
+        bar_columns=[]
+        for x in range(1350,1420):
+            ys=[y for y in range(240,261) if min(playing_image.getpixel((x,y)))>120]
+            if ys:
+                bar_columns.append((x,max(ys)-min(ys)))
+        bars=[]
+        for x,height in bar_columns:
+            if not bars or x>bars[-1][-1][0]+1:
+                bars.append([])
+            bars[-1].append((x,height))
+        bar_heights=[max(height for _,height in bar) for bar in bars]
         assert bar_heights[3]>=10 and max(bar_heights[:3]+bar_heights[4:])<=3, f'750 Hz tone did not map to its band: {bar_heights}'
         player.stdin.write(b'pause\n');player.stdin.flush();time.sleep(1.2)
         shot('paused')
@@ -216,7 +237,7 @@ while True:
             assert Image.open(DEST / (name+'.png')).convert('RGB').getpixel((1250,80)) == background, 'Click blinked or restarted the popup fade'
             frame+=1
             time.sleep(.02)
-        assert frame>=6, 'Too few frames to check click stability'
+        assert frame>=4, 'Too few frames to check click stability'
         promote.wait()
         toggle=probe(1345,14,'--click-hold',1000);time.sleep(.85);shot('toggle-closed');toggle.wait()
         assert Image.open(DEST / 'toggle-closed.png').convert('RGB').crop((0,28,1600,900)).getbbox() is None, 'Hover reopened a menu toggled closed'

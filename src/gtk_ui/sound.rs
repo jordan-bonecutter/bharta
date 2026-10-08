@@ -5,6 +5,9 @@ pub struct Sound {
     master: gtk::Scale,
     subtitle: gtk::Label,
     outputs: gtk::Box,
+    streams: gtk::Box,
+    stream_signature: RefCell<String>,
+    stream_controls: RefCell<Vec<(u32, Option<gtk::Scale>, gtk::Button)>>,
     channels: gtk::Box,
     updating: Rc<Cell<bool>>,
     dragging: Rc<Cell<bool>>,
@@ -38,13 +41,16 @@ impl Sound {
         });
         let updating = Rc::new(Cell::new(false));
         let dragging = pinned;
-        let master = Self::scale(shell, None, &updating, &dragging);
+        let master = Self::scale(shell, None, None, &updating, &dragging);
         root.append(&master);
         let subtitle = label("");
         root.append(&subtitle);
         root.append(&section("OUTPUT"));
         let outputs = column(4);
         root.append(&scroll(&outputs, 220));
+        root.append(&section("APPLICATIONS"));
+        let streams = column(7);
+        root.append(&scroll(&streams, 260));
         let channels = column(8);
         let expand = gtk::Expander::new(Some("Channels"));
         expand.set_child(Some(&channels));
@@ -57,6 +63,9 @@ impl Sound {
             master,
             subtitle,
             outputs,
+            streams,
+            stream_signature: RefCell::new("unloaded".into()),
+            stream_controls: RefCell::new(vec![]),
             channels,
             updating,
             dragging,
@@ -68,6 +77,7 @@ impl Sound {
     fn scale(
         shell: &Rc<Shell>,
         channel: Option<String>,
+        stream: Option<u32>,
         updating: &Rc<Cell<bool>>,
         dragging: &Rc<Cell<bool>>,
     ) -> gtk::Scale {
@@ -91,11 +101,18 @@ impl Sound {
                     .and_then(|v| v.active())
                     .map(|o| o.name.clone());
                 if let Some(output) = name {
-                    s.control(volume::Control::Volume {
-                        output,
-                        channel: channel.clone(),
-                        percent: scale.value().round() as u8,
-                    });
+                    if let Some(index) = stream {
+                        s.control(volume::Control::StreamVolume(
+                            index,
+                            scale.value().round() as u8,
+                        ));
+                    } else {
+                        s.control(volume::Control::Volume {
+                            output,
+                            channel: channel.clone(),
+                            percent: scale.value().round() as u8,
+                        });
+                    }
                 }
             }
         });
@@ -133,6 +150,86 @@ impl Sound {
                 if let Some(c) = o.channels.iter().find(|c| c.name == *name) {
                     scale.set_value(c.percent() as f64);
                 }
+            }
+        }
+        let stream_signature = state
+            .streams
+            .iter()
+            .map(|s| format!("{}:{}:{}", s.index, s.name, s.corked))
+            .collect::<Vec<_>>()
+            .join("|");
+        if *self.stream_signature.borrow() != stream_signature {
+            self.stream_signature.replace(stream_signature);
+            clear(&self.streams);
+            self.stream_controls.borrow_mut().clear();
+            if let Some(shell) = self.shell.upgrade() {
+                if state.streams.is_empty() {
+                    let empty = label("No app audio");
+                    empty.add_css_class("dim-label");
+                    self.streams.append(&empty);
+                }
+                for stream in &state.streams {
+                    let header = row(8);
+                    let name = label(&stream.name);
+                    name.set_hexpand(true);
+                    name.set_max_width_chars(34);
+                    header.append(&name);
+                    let mute = icon_button(
+                        if stream.muted {
+                            "audio-volume-muted-symbolic"
+                        } else {
+                            "audio-volume-high-symbolic"
+                        },
+                        "Toggle app volume",
+                    );
+                    header.append(&mute);
+                    let weak = self.shell.clone();
+                    let index = stream.index;
+                    mute.connect_clicked(move |_| {
+                        if let Some(shell) = weak.upgrade() {
+                            shell.control(volume::Control::StreamMute(index));
+                        }
+                    });
+                    self.streams.append(&header);
+                    let scale = if stream.corked {
+                        let paused = label("Paused");
+                        paused.add_css_class("dim-label");
+                        self.streams.append(&paused);
+                        None
+                    } else {
+                        let scale = Self::scale(
+                            &shell,
+                            None,
+                            Some(stream.index),
+                            &self.updating,
+                            &self.dragging,
+                        );
+                        scale.set_range(0.0, 150.0);
+                        scale.set_value(stream.percent as f64);
+                        self.streams.append(&scale);
+                        Some(scale)
+                    };
+                    self.stream_controls
+                        .borrow_mut()
+                        .push((stream.index, scale, mute));
+                }
+            }
+        }
+        for (index, scale, mute) in self.stream_controls.borrow().iter() {
+            if let Some(stream) = state.streams.iter().find(|s| s.index == *index) {
+                if let Some(scale) = scale {
+                    scale.set_value(stream.percent as f64);
+                }
+                mute.set_icon_name(if stream.muted {
+                    "audio-volume-muted-symbolic"
+                } else {
+                    "audio-volume-high-symbolic"
+                });
+                mute.set_tooltip_text(Some(if stream.muted {
+                    "Unmute app"
+                } else {
+                    "Mute app"
+                }));
             }
         }
         let signature = format!(
@@ -220,6 +317,7 @@ impl Sound {
                             let scale = Self::scale(
                                 &shell,
                                 Some(c.name.clone()),
+                                None,
                                 &self.updating,
                                 &self.dragging,
                             );

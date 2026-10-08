@@ -7,6 +7,9 @@ fn main() {
         .flags(gtk::gio::ApplicationFlags::NON_UNIQUE)
         .build();
     app.connect_activate(|app| {
+        if let Ok(path) = std::env::var("BHARTA_TEST_WINDOW_PID") {
+            let _ = std::fs::write(path, std::process::id().to_string());
+        }
         for title in [
             "Preview fixture — wide window",
             "Preview fixture — second window",

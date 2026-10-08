@@ -490,21 +490,26 @@ impl Shell {
         }
         if self.audio_busy.replace(true) {
             let mut queue = self.pending.borrow_mut();
-            if let (
-                Some(volume::Control::Volume {
-                    output: a,
-                    channel: ac,
-                    ..
-                }),
-                volume::Control::Volume {
-                    output: b,
-                    channel: bc,
-                    ..
-                },
-            ) = (queue.back(), &control)
-                && a == b
-                && ac == bc
-            {
+            let replace_last = match (queue.back(), &control) {
+                (
+                    Some(volume::Control::Volume {
+                        output: a,
+                        channel: ac,
+                        ..
+                    }),
+                    volume::Control::Volume {
+                        output: b,
+                        channel: bc,
+                        ..
+                    },
+                ) => a == b && ac == bc,
+                (
+                    Some(volume::Control::StreamVolume(a, _)),
+                    volume::Control::StreamVolume(b, _),
+                ) => a == b,
+                _ => false,
+            };
+            if replace_last {
                 queue.pop_back();
             }
             queue.push_back(control);
@@ -744,7 +749,15 @@ impl Shell {
         if *self.names.borrow() != names {
             clear(&self.workspaces);
             for w in &state.workspaces {
-                let b = gtk::Button::with_label(&w.name);
+                let b = gtk::Button::new();
+                let contents = row(5);
+                let name = gtk::Label::new(Some(&w.name));
+                contents.append(&name);
+                let sound = gtk::Image::from_icon_name("audio-volume-high-symbolic");
+                sound.add_css_class("workspace-sound");
+                sound.set_visible(w.audible);
+                contents.append(&sound);
+                b.set_child(Some(&contents));
                 b.add_css_class("workspace");
                 let s = Rc::downgrade(self);
                 let name = w.name.clone();
@@ -772,6 +785,11 @@ impl Shell {
                     } else {
                         c.remove_css_class(class)
                     }
+                }
+                if let Some(contents) = c.first_child().and_downcast::<gtk::Box>()
+                    && let Some(icon) = contents.last_child().and_downcast::<gtk::Image>()
+                {
+                    icon.set_visible(w.audible);
                 }
                 child = c.next_sibling();
             }
