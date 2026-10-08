@@ -227,9 +227,9 @@ fn parse_streams(value: &Value) -> Vec<Stream> {
         })
         .collect();
     streams.sort_by(|a, b| {
-        a.corked
-            .cmp(&b.corked)
-            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+        a.application
+            .to_lowercase()
+            .cmp(&b.application.to_lowercase())
             .then_with(|| a.index.cmp(&b.index))
     });
     streams
@@ -442,6 +442,21 @@ mod tests {
                 .any(|s| s.name == "fruisic" && s.icon == "fruisic")
         );
         assert!(raw.iter().any(|s| s.name == "Firefox"));
+    }
+    #[test]
+    fn source_order_survives_pause_and_metadata_changes() {
+        let mut inputs = serde_json::json!([
+            {"index":3,"corked":false,"properties":{"application.name":"Spotify", "media.name":"A song"}},
+            {"index":2,"corked":true,"properties":{"application.name":"Firefox", "media.name":"Z video"}},
+            {"index":1,"corked":false,"properties":{"application.name":"Firefox", "media.name":"A video"}}
+        ]);
+        let order = |v: &Value| parse_streams(v).iter().map(|s| s.index).collect::<Vec<_>>();
+        assert_eq!(order(&inputs), vec![1, 2, 3]);
+        inputs[0]["corked"] = true.into();
+        inputs[1]["corked"] = false.into();
+        inputs[1]["properties"]["media.name"] = "A different video".into();
+        inputs[2]["properties"]["media.name"] = "Z different video".into();
+        assert_eq!(order(&inputs), vec![1, 2, 3]);
     }
     #[test]
     fn silent_and_disconnected_outputs() {

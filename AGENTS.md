@@ -40,12 +40,16 @@ tone and verify it appears only in that source row's matching frequency band.
 Use two MPRIS fixtures with distinct artwork to verify all source images load.
 Keep image, meter, mute, and playback control columns aligned across source rows;
 ellipsize long summaries and omit generic ALSA/AudioStream backend names.
+Keep source order independent of playback state and track titles. Paused sources
+retain their slider and row height; metadata changes must not rebuild all rows.
 All menus open on a short hover; leaving the bar and popup starts a 500ms delay
 followed by a brief fade. Keep Wi-Fi names and actions left-aligned. Only one
 popup may be open across all outputs at a time. Hovering another button must
 switch directly to its menu, including workspace previews and clicked menus.
 Apps focuses its search field on opening, including hover, so typing works immediately.
 Workspace audio activity should be visibly marked with a speaker icon and accent.
+Fade and scale the speaker within its reserved slot; playback must not resize
+the workspace button or shift the surrounding controls.
 The Sound drawer should show individual PulseAudio-compatible app streams with
 per-stream volume and mute controls, using app/media names when available.
 

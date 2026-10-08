@@ -706,20 +706,15 @@ impl Shell {
             let over_bar = surface.is_some() && surface == self.window.surface();
             let over_popup = surface.is_some() && surface == m.pop.surface();
             let another_button = over_bar
-                && self
-                    .window
-                    .pick(x, y, gtk::PickFlags::DEFAULT)
-                    .is_some_and(|mut w| {
-                        loop {
-                            if w.is::<gtk::Button>() {
-                                return Some(w) != m.pop.parent();
-                            }
-                            let Some(parent) = w.parent() else {
-                                return false;
-                            };
-                            w = parent;
-                        }
-                    });
+                && self.hover_targets.borrow().iter().any(|(weak, kind)| {
+                    kind != &m.kind
+                        && weak.upgrade().is_some_and(|button| {
+                            button.is_visible()
+                                && button.compute_bounds(&self.window).is_some_and(|r| {
+                                    r.contains_point(&gtk::graphene::Point::new(x as f32, y as f32))
+                                })
+                        })
+                });
             // Release modal pointer grabs when switching bar controls, or when
             // a pinned editor is left behind on another output. Keyboard focus
             // stays with the editor until the next menu takes over.
@@ -772,12 +767,46 @@ impl Shell {
                 contents.append(&name);
                 let sound = gtk::Image::from_icon_name("audio-volume-high-symbolic");
                 sound.add_css_class("workspace-sound");
+                sound.set_size_request(13, 13);
+                sound.set_pixel_size(13);
                 // Keep the indicator's slot in the workspace button even
                 // when silent, so becoming audible cannot resize the number.
                 sound.set_opacity(if w.audible { 1.0 } else { 0.0 });
                 contents.append(&sound);
                 b.set_child(Some(&contents));
                 b.add_css_class("workspace");
+                let weak_button = b.downgrade();
+                let animation = Cell::new(if w.audible { 1.0_f64 } else { 0.0 });
+                let previous_frame = Cell::new(None);
+                sound.add_tick_callback(move |sound, clock| {
+                    let Some(button) = weak_button.upgrade() else {
+                        return glib::ControlFlow::Break;
+                    };
+                    let now = clock.frame_time();
+                    let elapsed = previous_frame
+                        .replace(Some(now))
+                        .map(|last| (now - last) as f64 / 1_000_000.0)
+                        .unwrap_or(0.0);
+                    let target = if button.has_css_class("audible") {
+                        1.0
+                    } else {
+                        0.0
+                    };
+                    let progress = animation.get();
+                    if progress != target {
+                        let step = elapsed.min(0.05) / 0.18;
+                        let progress = if target > progress {
+                            (progress + step).min(target)
+                        } else {
+                            (progress - step).max(target)
+                        };
+                        animation.set(progress);
+                        let eased = progress * progress * (3.0 - 2.0 * progress);
+                        sound.set_opacity(eased);
+                        sound.set_pixel_size((13.0 * (0.6 + 0.4 * eased)).round() as i32);
+                    }
+                    glib::ControlFlow::Continue
+                });
                 let s = Rc::downgrade(self);
                 let name = w.name.clone();
                 b.connect_clicked(move |_| {
@@ -804,11 +833,6 @@ impl Shell {
                     } else {
                         c.remove_css_class(class)
                     }
-                }
-                if let Some(contents) = c.first_child().and_downcast::<gtk::Box>()
-                    && let Some(icon) = contents.last_child().and_downcast::<gtk::Image>()
-                {
-                    icon.set_opacity(if w.audible { 1.0 } else { 0.0 });
                 }
                 child = c.next_sibling();
             }

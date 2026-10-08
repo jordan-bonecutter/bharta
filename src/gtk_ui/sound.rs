@@ -3,7 +3,7 @@ use crate::audio_meter;
 use std::sync::{Arc, Mutex};
 struct StreamControl {
     index: u32,
-    scale: Option<gtk::Scale>,
+    scale: gtk::Scale,
     mute: gtk::Button,
     previous: gtk::Button,
     toggle: gtk::Button,
@@ -127,15 +127,15 @@ impl Sound {
         let updating = Rc::new(Cell::new(false));
         let dragging = pinned;
         let master = Self::scale(shell, None, None, &updating, &dragging);
-        root.append(&master);
         let subtitle = label("");
-        root.append(&subtitle);
-        root.append(&section("OUTPUT"));
         let outputs = column(4);
-        root.append(&scroll(&outputs, 220));
         root.append(&section("APPLICATIONS"));
         let streams = column(7);
         root.append(&scroll(&streams, 260));
+        root.append(&section("OUTPUT"));
+        root.append(&master);
+        root.append(&subtitle);
+        root.append(&scroll(&outputs, 220));
         let channels = column(8);
         let expand = gtk::Expander::new(Some("Channels"));
         expand.set_child(Some(&channels));
@@ -240,7 +240,7 @@ impl Sound {
         let stream_signature = state
             .streams
             .iter()
-            .map(|s| format!("{}:{}:{}", s.index, s.name, s.corked))
+            .map(|s| format!("{}:{}:{}", s.index, s.application, s.icon))
             .collect::<Vec<_>>()
             .join("|");
         if *self.stream_signature.borrow() != stream_signature {
@@ -323,25 +323,16 @@ impl Sound {
                     });
                     self.streams.append(&header);
                     let volume_row = row(8);
-                    let scale = if stream.corked {
-                        let paused = label("Paused");
-                        paused.add_css_class("dim-label");
-                        paused.set_hexpand(true);
-                        volume_row.append(&paused);
-                        None
-                    } else {
-                        let scale = Self::scale(
-                            &shell,
-                            None,
-                            Some(stream.index),
-                            &self.updating,
-                            &self.dragging,
-                        );
-                        scale.set_range(0.0, 150.0);
-                        scale.set_value(stream.percent as f64);
-                        volume_row.append(&scale);
-                        Some(scale)
-                    };
+                    let scale = Self::scale(
+                        &shell,
+                        None,
+                        Some(stream.index),
+                        &self.updating,
+                        &self.dragging,
+                    );
+                    scale.set_range(0.0, 150.0);
+                    scale.set_value(stream.percent as f64);
+                    volume_row.append(&scale);
                     volume_row.append(&playback);
                     self.streams.append(&volume_row);
                     self.stream_controls.borrow_mut().push(StreamControl {
@@ -365,9 +356,7 @@ impl Sound {
         }
         for control in self.stream_controls.borrow_mut().iter_mut() {
             if let Some(stream) = state.streams.iter().find(|s| s.index == control.index) {
-                if let Some(scale) = &control.scale {
-                    scale.set_value(stream.percent as f64);
-                }
+                control.scale.set_value(stream.percent as f64);
                 control.mute.set_icon_name(if stream.muted {
                     "audio-volume-muted-symbolic"
                 } else {

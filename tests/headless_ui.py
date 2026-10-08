@@ -131,7 +131,7 @@ while True:
         # Find the native scale's long, bright filled trough, independent of
         # typography and spacing tweaks.
         runs=[]
-        for y in range(65,160):
+        for y in range(65,500):
             begin=None
             for x in range(1100,1550):
                 bright=min(pixels.getpixel((x,y)))>150
@@ -206,7 +206,7 @@ while True:
                                    for bar in bars if len(bar)<=3])
             return next((candidate for candidate in candidates if len(candidate)==7),candidates[0])
         def image_bounds(color):
-            pixels=[(x,y) for y in range(290,550) for x in range(1050,1300)
+            pixels=[(x,y) for y in range(28,550) for x in range(1050,1300)
                     if playing_image.getpixel((x,y))==color]
             assert pixels, f'Source artwork missing: {color}'
             xs,ys=zip(*pixels)
@@ -268,7 +268,11 @@ while True:
         while time.monotonic()<deadline:
             name=f'click-stable-{frame}'
             shot(name)
-            assert Image.open(DEST / (name+'.png')).convert('RGB').getpixel((1250,80)) == background, 'Click blinked or restarted the popup fade'
+            current=Image.open(DEST / (name+'.png')).convert('RGB').getpixel((1250,80))
+            # The switched menu can still be fading in when sampled above.
+            # Promoting it may finish that fade, but must never reduce opacity.
+            assert all(after>=before for after,before in zip(current,background)), 'Click blinked or restarted the popup fade'
+            background=current
             frame+=1
             time.sleep(.02)
         assert frame>=4, 'Too few frames to check click stability'
