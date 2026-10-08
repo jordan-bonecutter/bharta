@@ -78,12 +78,12 @@ fn main() -> Result<()> {
     if options.check_media {
         let mut state = status::Status::read(None);
         state.extras.track = media::track();
-        state.extras.audio_pids = media::audio_pids();
+        state.extras.audio_sources = media::audio_sources();
         state.update_audio();
         println!(
-            "Track available: {}; active audio processes: {}; sounding workspaces: {:?}",
+            "Track available: {}; active audio sources: {}; sounding workspaces: {:?}",
             state.extras.track.is_some(),
-            state.extras.audio_pids.len(),
+            state.extras.audio_sources.len(),
             state
                 .workspaces
                 .iter()

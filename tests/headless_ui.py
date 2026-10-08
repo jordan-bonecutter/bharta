@@ -57,11 +57,13 @@ elif 'list' in a:print('[]')
 import math,struct,sys
 phase=0.0
 rate=24000
+args=sys.argv[1:]
+frequency=750 if '--monitor-stream=11' in args else 1600
 while True:
  values=[]
  for _ in range(1024):
   values.append(int(10000*math.sin(phase)))
-  phase += 2*math.pi*750/rate
+  phase += 2*math.pi*frequency/rate
   if phase > 2*math.pi: phase -= 2*math.pi
  sys.stdout.buffer.write(struct.pack('<1024h',*values));sys.stdout.buffer.flush()
 ''')
@@ -115,7 +117,7 @@ while True:
             raise AssertionError('GTK bar did not map; see bar.log')
         time.sleep(2)
         # All input is scoped to HEADLESS-1 on the private Wayland socket.
-        holder = probe(1345, 14, '--click-hold', 6000)
+        holder = probe(1260, 14, '--click-hold', 6000)
         time.sleep(1)
         shot('sound')
         assert Image.open(DEST / 'sound.png').getpixel((1250,80))[:3] != (0,0,0), 'Sound popup missing'
@@ -179,29 +181,41 @@ while True:
         leave=probe(600,600,'--hover',1000);leave.wait()
         music=probe(1260,14,'--click-hold',6000);time.sleep(1)
         shot('playing');audio_before=state.read_text()
-        # Fake parec emits a steady 750 Hz tone. Its matching 500-1000 Hz
-        # bar should rise while all other frequency bands stay near zero.
+        # Fake parec gives each sink input a distinct tone. Each mini-EQ must
+        # show only the frequency band for its own source.
         playing_image=Image.open(DEST / 'playing.png').convert('RGB')
-        bar_columns=[]
-        for x in range(1350,1420):
-            ys=[y for y in range(240,261) if min(playing_image.getpixel((x,y)))>120]
-            if ys:
-                bar_columns.append((x,max(ys)-min(ys)))
-        bars=[]
-        for x,height in bar_columns:
-            if not bars or x>bars[-1][-1][0]+1:
-                bars.append([])
-            bars[-1].append((x,height))
-        bar_heights=[max(height for _,height in bar) for bar in bars]
-        assert bar_heights[3]>=10 and max(bar_heights[:3]+bar_heights[4:])<=3, f'750 Hz tone did not map to its band: {bar_heights}'
+        def eq_heights(center):
+            candidates=[]
+            for left,right in ((1328,1386),(1390,1448)):
+                columns=[]
+                for x in range(left,right):
+                    ys=[y for y in range(center-10,center+11)
+                        if min(playing_image.getpixel((x,y)))>120]
+                    if ys:
+                        columns.append((x,max(ys)-min(ys)))
+                bars=[]
+                for x,height in columns:
+                    if not bars or x>bars[-1][-1][0]+1:
+                        bars.append([])
+                    bars[-1].append((x,height))
+                candidates.append([max(height for _,height in bar)
+                                   for bar in bars if len(bar)<=3])
+            return next((candidate for candidate in candidates if len(candidate)==7),candidates[0])
+        firefox_eq=eq_heights(313)
+        spotify_eq=eq_heights(393)
+        assert len(firefox_eq)==7 and firefox_eq[3]>=10 and max(firefox_eq[:3]+firefox_eq[4:])<=5, f'Firefox EQ did not isolate 750 Hz: {firefox_eq}'
+        assert len(spotify_eq)==7 and spotify_eq[4]>=10 and max(spotify_eq[:4]+spotify_eq[5:])<=5, f'Spotify EQ did not isolate 1600 Hz: {spotify_eq}'
         player.stdin.write(b'pause\n');player.stdin.flush();time.sleep(1.2)
         shot('paused')
         paused_image=Image.open(DEST / 'paused.png').convert('RGB')
-        ys=[y for xx in range(1365,1405) for y in range(244,260)
-            if min(paused_image.getpixel((xx,y)))>120]
-        assert max(ys)-min(ys)<=3, f'Frequency bars remained active after pausing: {max(ys)-min(ys)}'
+        playing_image=paused_image
+        paused_firefox_eq,paused_spotify_eq=eq_heights(313),eq_heights(393)
+        assert paused_firefox_eq[3]>=10 and max(paused_firefox_eq[:3]+paused_firefox_eq[4:])<=5, 'Firefox meter stopped when unrelated MPRIS playback paused'
+        assert paused_spotify_eq[4]>=10 and max(paused_spotify_eq[:4]+paused_spotify_eq[5:])<=5, 'Spotify meter stopped when unrelated MPRIS playback paused'
         playing=Image.open(DEST / 'playing.png').convert('RGB');paused=Image.open(DEST / 'paused.png').convert('RGB')
-        assert ImageChops.difference(playing.crop((1245,0,1390,28)),paused.crop((1245,0,1390,28))).getbbox() is None, 'Playback moved bar controls'
+        # Exclude the popup's drop shadow at y=27, which varies as its fade
+        # animation advances; compare only the actual bar surface.
+        assert ImageChops.difference(playing.crop((1245,0,1390,26)),paused.crop((1245,0,1390,26))).getbbox() is None, 'Playback moved bar controls'
         assert playing.getpixel((1250,100)) != (0,0,0), 'Music popup missing'
         assert playing.crop((0,28,1600,600)).getbbox()==paused.crop((0,28,1600,600)).getbbox(), 'Playback moved popup'
         assert state.read_text()==audio_before, 'Pause changed volume'
@@ -221,14 +235,14 @@ while True:
         switch_preview=probe(125,14,'--hover',1000);time.sleep(.65);shot('switch-preview');switch_preview.wait()
         assert Image.open(DEST / 'switch-preview.png').convert('RGB').crop((0,320,500,900)).getbbox() is None, 'Clicked Apps did not switch to workspace preview'
         assert Image.open(DEST / 'switch-preview.png').convert('RGB').getpixel((50,50)) != (0,0,0), 'Workspace hover did not open'
-        switch_sound=probe(1345,14,'--hover',1000);time.sleep(.65);shot('switch-sound');switch_sound.wait()
+        switch_sound=probe(1260,14,'--hover',1000);time.sleep(.65);shot('switch-sound');switch_sound.wait()
         switched=Image.open(DEST / 'switch-sound.png').convert('RGB')
         assert switched.getpixel((1250,80)) != (0,0,0), 'Workspace preview did not switch to Sound'
         assert switched.crop((0,28,500,900)).getbbox() is None, 'Old workspace preview stayed visible'
         # Promote the hovered menu to clicked, then toggle it closed. Remaining
         # over the same button must not immediately reopen it.
         background=switched.getpixel((1250,80))
-        promote=probe(1345,14,'--click-hold',1000)
+        promote=probe(1260,14,'--click-hold',1000)
         deadline=time.monotonic()+.8
         frame=0
         while time.monotonic()<deadline:
@@ -239,7 +253,7 @@ while True:
             time.sleep(.02)
         assert frame>=4, 'Too few frames to check click stability'
         promote.wait()
-        toggle=probe(1345,14,'--click-hold',1000);time.sleep(.85);shot('toggle-closed');toggle.wait()
+        toggle=probe(1260,14,'--click-hold',1000);time.sleep(.85);shot('toggle-closed');toggle.wait()
         assert Image.open(DEST / 'toggle-closed.png').convert('RGB').crop((0,28,1600,900)).getbbox() is None, 'Hover reopened a menu toggled closed'
         # A second real bar on another private output must dismiss the first.
         run(['swaymsg','create_output'])
@@ -250,7 +264,7 @@ while True:
         typed=probe(100,82,30);typed.wait();first.wait()
         shot('pinned-search')
         assert Image.open(DEST / 'pinned-search.png').convert('RGB').getpixel((50,100)) != (0,0,0), 'Pinned search missing'
-        other=probe(1345,14,'--hover',2500,output='HEADLESS-2');time.sleep(1)
+        other=probe(1260,14,'--hover',2500,output='HEADLESS-2');time.sleep(1)
         shot('single-popup')
         run(['grim','-o','HEADLESS-2',str(DEST / 'second-popup.png')])
         assert Image.open(DEST / 'second-popup.png').convert('RGB').getpixel((1250,80)) != (0,0,0), 'Second output did not open its popup'

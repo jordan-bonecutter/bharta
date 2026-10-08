@@ -31,9 +31,12 @@ name, understated neutral palette, small monochrome icons, and flat menu rows.
 GTK is the widget/interaction framework, not a request for GNOME/Adwaita styling.
 Avoid orange accents, large pill buttons, bulky headings, and instructional text
 on obvious controls. Prefer borderless popups; avoid nested frames. Native slider
-dragging must work continuously. Preserve the fixed music icon position on pause
-and bound workspace previews independently of captured image dimensions. Music
-equalizer bars must come from the live output monitor, never fabricated animation.
+dragging must work continuously. Preserve the speaker control position across
+play/pause changes and bound workspace previews independently of captured image
+dimensions. Per-app equalizer bars must monitor their own audio stream, never
+the mixed output or fabricated animation; stop stream capture when the drawer closes.
+For headless meter tests, give each fake `parec --monitor-stream=ID` a distinct
+tone and verify it appears only in that source row's matching frequency band.
 All menus open on a short hover; leaving the bar and popup starts a 500ms delay
 followed by a brief fade. Keep Wi-Fi names and actions left-aligned. Only one
 popup may be open across all outputs at a time. Hovering another button must

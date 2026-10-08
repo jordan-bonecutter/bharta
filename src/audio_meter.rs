@@ -22,16 +22,18 @@ pub struct Capture {
     reader: Option<JoinHandle<()>>,
 }
 impl Capture {
-    pub fn start(levels: Arc<Mutex<[f64; 7]>>) -> std::io::Result<Self> {
-        let mut child = Command::new("parec")
-            .args([
-                "--device=@DEFAULT_MONITOR@",
-                "--raw",
-                "--format=s16le",
-                "--rate=24000",
-                "--channels=1",
-                "--latency-msec=50",
-            ])
+    pub fn start(levels: Arc<Mutex<[f64; 7]>>, stream: u32) -> std::io::Result<Self> {
+        let mut command = Command::new("parec");
+        command.args([
+            "--device=@DEFAULT_MONITOR@",
+            "--raw",
+            "--format=s16le",
+            "--rate=24000",
+            "--channels=1",
+            "--latency-msec=50",
+        ]);
+        command.arg(format!("--monitor-stream={stream}"));
+        let mut child = command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -62,6 +64,9 @@ impl Capture {
         if let Some(reader) = self.reader.take() {
             let _ = reader.join();
         }
+    }
+    pub fn is_running(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
     }
 }
 impl Drop for Capture {

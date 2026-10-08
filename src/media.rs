@@ -20,6 +20,18 @@ pub struct Track {
     pub can_next: bool,
     pub can_toggle: bool,
 }
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AudioProcess {
+    pub pid: u32,
+    pub application: String,
+    pub media: Option<String>,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WindowInfo {
+    pub workspace: String,
+    pub title: String,
+    pub application: String,
+}
 #[derive(Clone, Debug, Default)]
 pub struct Extras {
     pub volume: Option<(u32, bool)>,
@@ -28,13 +40,13 @@ pub struct Extras {
     pub wifi_signal: Option<u8>,
     pub wifi_enabled: Option<bool>,
     pub track: Option<Track>,
-    pub audio_pids: Vec<u32>,
+    pub audio_sources: Vec<AudioProcess>,
 }
 pub enum Update {
     Artwork(std::sync::Arc<crate::artwork::Artwork>),
     Wifi(Result<crate::network::Snapshot, String>),
     Playback(Option<Track>),
-    Audio(Vec<u32>),
+    Audio(Vec<AudioProcess>),
     ControlFinished(u64, Result<(), String>),
 }
 pub enum Request {
@@ -64,7 +76,7 @@ pub fn watch(sender: UiSender) -> std::sync::mpsc::Sender<Request> {
     let audio = sender.clone();
     std::thread::spawn(move || {
         loop {
-            if audio.send(Update::Audio(audio_pids())).is_err() {
+            if audio.send(Update::Audio(audio_sources())).is_err() {
                 break;
             }
             std::thread::sleep(Duration::from_secs(1));
@@ -298,8 +310,8 @@ fn control_on(c: &Connection, player: &str, control: Control) -> anyhow::Result<
     )?;
     Ok(())
 }
-fn parse_audio(value: &Value) -> Vec<u32> {
-    let mut pids: Vec<u32> = value
+fn parse_audio(value: &Value) -> Vec<AudioProcess> {
+    let mut processes: Vec<AudioProcess> = value
         .as_array()
         .into_iter()
         .flatten()
@@ -313,16 +325,32 @@ fn parse_audio(value: &Value) -> Vec<u32> {
                 })
         })
         .filter_map(|v| {
-            v["properties"]["application.process.id"]
+            let properties = &v["properties"];
+            let pid = properties["application.process.id"]
                 .as_str()
                 .and_then(|p| p.parse().ok())
+                .or_else(|| u32::try_from(properties["application.process.id"].as_u64()?).ok())?;
+            Some(AudioProcess {
+                pid,
+                application: properties["application.name"]
+                    .as_str()
+                    .or_else(|| properties["application.process.binary"].as_str())
+                    .unwrap_or("")
+                    .into(),
+                media: properties["media.name"]
+                    .as_str()
+                    .or_else(|| properties["media.title"].as_str())
+                    .filter(|name| !name.is_empty())
+                    .map(str::to_owned),
+            })
         })
         .collect();
-    pids.sort();
-    pids.dedup();
-    pids
+    processes
+        .sort_by(|a, b| (a.pid, &a.application, &a.media).cmp(&(b.pid, &b.application, &b.media)));
+    processes.dedup();
+    processes
 }
-pub fn audio_pids() -> Vec<u32> {
+pub fn audio_sources() -> Vec<AudioProcess> {
     let Ok(mut child) = Command::new("pactl")
         .args(["--format=json", "list", "sink-inputs"])
         .stdout(Stdio::piped())
@@ -379,31 +407,110 @@ pub fn window_pids(v: &Value, workspace: Option<&str>, map: &mut HashMap<u32, Ha
         window_pids(child, workspace, map);
     }
 }
-pub fn audible_workspaces(pids: &[u32], map: &HashMap<u32, HashSet<String>>) -> HashSet<String> {
-    resolve_workspaces(pids, map, |pid| {
+pub fn window_details(v: &Value, workspace: Option<&str>, map: &mut HashMap<u32, Vec<WindowInfo>>) {
+    let workspace = if v["type"] == "workspace" {
+        v["name"].as_str()
+    } else {
+        workspace
+    };
+    if let (Some(pid), Some(workspace)) = (v["pid"].as_u64(), workspace) {
+        let properties = &v["window_properties"];
+        let info = WindowInfo {
+            workspace: workspace.into(),
+            title: v["name"].as_str().unwrap_or("").into(),
+            application: v["app_id"]
+                .as_str()
+                .or_else(|| properties["class"].as_str())
+                .unwrap_or("")
+                .into(),
+        };
+        let windows = map.entry(pid as u32).or_default();
+        if !windows.contains(&info) {
+            windows.push(info);
+        }
+    }
+    for child in ["nodes", "floating_nodes"]
+        .iter()
+        .filter_map(|key| v[*key].as_array())
+        .flatten()
+    {
+        window_details(child, workspace, map);
+    }
+}
+pub fn audible_workspaces(
+    sources: &[AudioProcess],
+    map: &HashMap<u32, HashSet<String>>,
+    details: &HashMap<u32, Vec<WindowInfo>>,
+) -> HashSet<String> {
+    resolve_audio_workspaces(sources, map, details, |pid| {
         std::fs::read_to_string(format!("/proc/{pid}/status"))
             .ok()?
             .lines()
             .find_map(|l| l.strip_prefix("PPid:").and_then(|p| p.trim().parse().ok()))
     })
 }
-fn resolve_workspaces(
-    pids: &[u32],
+fn normalize(value: &str) -> String {
+    value
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+fn resolve_audio_workspaces(
+    sources: &[AudioProcess],
     map: &HashMap<u32, HashSet<String>>,
+    details: &HashMap<u32, Vec<WindowInfo>>,
     parent: impl Fn(u32) -> Option<u32>,
 ) -> HashSet<String> {
     let mut audible = HashSet::new();
-    for &pid in pids {
-        let mut pid = pid;
+    for source in sources {
+        let mut pid = source.pid;
         for _ in 0..32 {
-            if let Some(workspaces) = map.get(&pid) {
+            let Some(workspaces) = map.get(&pid) else {
+                match parent(pid) {
+                    Some(p) if p > 1 && p != pid => pid = p,
+                    _ => break,
+                }
+                continue;
+            };
+            if workspaces.len() <= 1 {
                 audible.extend(workspaces.iter().cloned());
                 break;
             }
-            match parent(pid) {
-                Some(p) if p > 1 && p != pid => pid = p,
-                _ => break,
-            }
+            let windows = details.get(&pid).map(Vec::as_slice).unwrap_or_default();
+            let media = source.media.as_deref().map(normalize).unwrap_or_default();
+            let application = normalize(&source.application);
+            let media_matches: HashSet<_> = windows
+                .iter()
+                .filter(|window| {
+                    let title = normalize(&window.title);
+                    !media.is_empty()
+                        && !title.is_empty()
+                        && (title.contains(&media) || media.contains(&title))
+                })
+                .map(|window| window.workspace.clone())
+                .collect();
+            let matches = if !media_matches.is_empty() {
+                media_matches
+            } else {
+                let app_matches: HashSet<_> = windows
+                    .iter()
+                    .filter(|window| {
+                        let app = normalize(&window.application);
+                        !application.is_empty()
+                            && !app.is_empty()
+                            && (app.contains(&application) || application.contains(&app))
+                    })
+                    .map(|window| window.workspace.clone())
+                    .collect();
+                if app_matches.len() == 1 {
+                    app_matches
+                } else {
+                    HashSet::new()
+                }
+            };
+            audible.extend(matches);
+            break;
         }
     }
     audible
@@ -414,7 +521,7 @@ mod tests {
     #[test]
     fn muted_and_paused_streams_do_not_light_workspaces() {
         let mut v = serde_json::json!([{"corked":false,"mute":false,"volume":{"left":{"value":65536}},"properties":{"application.process.id":"123"}}]);
-        assert_eq!(parse_audio(&v), vec![123]);
+        assert_eq!(parse_audio(&v)[0].pid, 123);
         v[0]["corked"] = true.into();
         assert!(parse_audio(&v).is_empty());
         v[0]["corked"] = false.into();
@@ -430,9 +537,52 @@ mod tests {
         let mut map = HashMap::new();
         window_pids(&tree, None, &mut map);
         assert_eq!(
-            resolve_workspaces(&[43], &map, |p| if p == 43 { Some(42) } else { None }),
+            resolve_audio_workspaces(
+                &[AudioProcess {
+                    pid: 43,
+                    application: String::new(),
+                    media: None
+                }],
+                &map,
+                &HashMap::new(),
+                |p| if p == 43 { Some(42) } else { None }
+            ),
             HashSet::from(["4".into()])
         );
+    }
+    #[test]
+    fn same_browser_pid_uses_media_title_to_select_its_workspace() {
+        let map = HashMap::from([(42, HashSet::from(["2".into(), "3".into()]))]);
+        let details = HashMap::from([(
+            42,
+            vec![
+                WindowInfo {
+                    workspace: "2".into(),
+                    title: "Firefox — Mail".into(),
+                    application: "firefox".into(),
+                },
+                WindowInfo {
+                    workspace: "3".into(),
+                    title: "YouTube — Firefox".into(),
+                    application: "firefox".into(),
+                },
+            ],
+        )]);
+        let source = AudioProcess {
+            pid: 42,
+            application: "Firefox".into(),
+            media: Some("YouTube".into()),
+        };
+        assert_eq!(
+            resolve_audio_workspaces(&[source], &map, &details, |_| None),
+            HashSet::from(["3".into()])
+        );
+        let ambiguous = AudioProcess {
+            pid: 42,
+            application: "Firefox".into(),
+            media: None,
+        };
+        assert!(resolve_audio_workspaces(&[ambiguous], &map, &details, |_| None).is_empty());
     }
 }
 

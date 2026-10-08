@@ -18,6 +18,7 @@ pub struct Workspace {
 pub struct Status {
     pub extras: crate::media::Extras,
     pub window_pids: std::collections::HashMap<u32, std::collections::HashSet<String>>,
+    pub window_details: std::collections::HashMap<u32, Vec<crate::media::WindowInfo>>,
     pub app: String,
     pub workspaces: Vec<Workspace>,
     pub battery: Option<(u8, bool)>,
@@ -162,6 +163,7 @@ impl Status {
         }
         if let Ok(v) = ipc(4, "") {
             crate::media::window_pids(&v, None, &mut s.window_pids);
+            crate::media::window_details(&v, None, &mut s.window_details);
             s.app = focused_app(&v).unwrap_or_else(|| "Desktop".into());
         }
         if let Ok(entries) = fs::read_dir("/sys/class/power_supply") {
@@ -192,7 +194,11 @@ impl Status {
         s
     }
     pub fn update_audio(&mut self) {
-        let audible = crate::media::audible_workspaces(&self.extras.audio_pids, &self.window_pids);
+        let audible = crate::media::audible_workspaces(
+            &self.extras.audio_sources,
+            &self.window_pids,
+            &self.window_details,
+        );
         for w in &mut self.workspaces {
             w.audible = audible.contains(&w.name);
         }
@@ -228,6 +234,7 @@ impl Status {
                 ..Default::default()
             },
             window_pids: Default::default(),
+            window_details: Default::default(),
         }
     }
 }

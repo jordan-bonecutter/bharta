@@ -1,6 +1,5 @@
 mod font;
 mod menus;
-mod music;
 mod preview;
 mod services;
 mod sound;
@@ -36,9 +35,7 @@ struct Shell {
     app: gtk::Label,
     music: gtk::Button,
     track_label: gtk::Button,
-    music_view: RefCell<Option<music::Music>>,
     wifi: gtk::Button,
-    audio: gtk::Button,
     battery: gtk::Label,
     battery_icon: gtk::DrawingArea,
     clock: gtk::Label,
@@ -53,6 +50,26 @@ struct Shell {
     audio_busy: Cell<bool>,
     pending: RefCell<std::collections::VecDeque<volume::Control>>,
     extras: RefCell<media::Extras>,
+}
+fn audio_source_label(streams: &[volume::Stream], track: Option<&media::Track>) -> String {
+    let track_name = || {
+        track.map(|track| {
+            format!(
+                "{}{}",
+                track.title,
+                if track.artist.is_empty() {
+                    String::new()
+                } else {
+                    format!(" · {}", track.artist)
+                }
+            )
+        })
+    };
+    match streams {
+        [stream] => track_name().unwrap_or_else(|| stream.name.clone()),
+        [] => track_name().unwrap_or_default(),
+        sources => format!("{} sources", sources.len()),
+    }
 }
 pub fn run(options: Options) -> anyhow::Result<()> {
     let font_family = options.font.as_deref().map(font::register).transpose()?;
@@ -133,10 +150,9 @@ pub fn run(options: Options) -> anyhow::Result<()> {
         let app = label("");
         app.set_max_width_chars(40);
         app.add_css_class("app-title");
-        let music = icon_button("audio-x-generic-symbolic", "Now playing");
+        let music = icon_button("audio-volume-high-symbolic", "Audio sources");
         let track_label = gtk::Button::new();
         let wifi = icon_button("network-wireless-symbolic", "Wi-Fi");
-        let audio = icon_button("audio-volume-high-symbolic", "Sound");
         let battery = label("");
         let battery_icon = gtk::DrawingArea::new();
         battery_icon.set_content_width(26);
@@ -145,7 +161,6 @@ pub fn run(options: Options) -> anyhow::Result<()> {
         right.append(&track_label);
         right.append(&music);
         right.append(&wifi);
-        right.append(&audio);
         right.append(&battery_icon);
         right.append(&battery);
         right.append(&clock);
@@ -161,9 +176,7 @@ pub fn run(options: Options) -> anyhow::Result<()> {
             app,
             music,
             track_label,
-            music_view: RefCell::new(None),
             wifi,
-            audio,
             battery,
             battery_icon,
             clock,
@@ -182,9 +195,8 @@ pub fn run(options: Options) -> anyhow::Result<()> {
         for (button, kind) in [
             (&session, "session"),
             (&apps, "apps"),
-            (&shell.music, "music"),
+            (&shell.music, "sound"),
             (&shell.wifi, "network"),
-            (&shell.audio, "sound"),
         ] {
             let s = Rc::downgrade(&shell);
             button.connect_clicked(move |b| {
@@ -210,14 +222,13 @@ pub fn run(options: Options) -> anyhow::Result<()> {
         shell.window.present();
         shell.add_hover_menu(&session, "session");
         shell.add_hover_menu(&apps, "apps");
-        shell.add_hover_menu(&shell.audio, "sound");
-        shell.add_hover_menu(&shell.music, "music");
-        shell.add_hover_menu(&shell.track_label, "music");
+        shell.add_hover_menu(&shell.music, "sound");
+        shell.add_hover_menu(&shell.track_label, "sound");
         shell.add_hover_menu(&shell.wifi, "network");
         let weak = Rc::downgrade(&shell);
         shell.track_label.connect_clicked(move |_| {
             if let Some(s) = weak.upgrade() {
-                s.open(&s.music, "music");
+                s.open(&s.music, "sound");
             }
         });
         let s = shell.clone();
@@ -293,12 +304,7 @@ impl Shell {
             && !self.hover_activated.replace(true)
             && self.menu.borrow().as_ref().is_none_or(|m| m.kind != kind)
         {
-            let anchor = if kind == "music" {
-                &self.music
-            } else {
-                &button
-            };
-            self.open(anchor, &kind);
+            self.open(&button, &kind);
             if let Some(m) = self.menu.borrow().as_ref() {
                 m.hover_opened.set(true);
                 m.pop.set_autohide(false);
@@ -326,7 +332,6 @@ impl Shell {
             m.pop.unparent();
         }
         self.sound.borrow_mut().take();
-        self.music_view.borrow_mut().take();
         let _ = self.services.preview.send(None);
         self.window.set_keyboard_mode(KeyboardMode::None);
         self.window.queue_draw();
@@ -353,6 +358,9 @@ impl Shell {
             if self.promote_menu(id) {
                 return;
             }
+            // A click explicitly toggled this menu closed. Keep hover from
+            // reopening it until the pointer leaves the trigger.
+            self.hover_activated.set(true);
             self.close();
             return;
         }
@@ -373,7 +381,7 @@ impl Shell {
         let pop = gtk::Popover::new();
         pop.add_css_class("bharta-menu");
         pop.set_has_arrow(false);
-        pop.set_autohide(["apps", "network", "sound", "music", "session"].contains(&kind));
+        pop.set_autohide(["apps", "network", "sound", "session"].contains(&kind));
         pop.set_position(gtk::PositionType::Bottom);
         pop.set_parent(button);
         pop.set_child(Some(&body));
@@ -390,7 +398,7 @@ impl Shell {
             closing: Cell::new(None),
             hover_opened: Cell::new(false),
         }));
-        if ["apps", "network", "sound", "music", "session"].contains(&kind) {
+        if ["apps", "network", "sound", "session"].contains(&kind) {
             self.window.set_keyboard_mode(KeyboardMode::Exclusive);
         }
         let keys = gtk::EventControllerKey::new();
@@ -425,7 +433,7 @@ impl Shell {
                 let view = sound::Sound::new(self, pinned);
                 body.append(&view.root);
                 if let Some(state) = self.audio_state.borrow().as_ref() {
-                    view.update(state);
+                    view.update(state, &self.extras.borrow());
                 }
                 self.sound.replace(Some(view));
                 let _ = self.services.volume.send(volume::Request::Refresh);
@@ -437,12 +445,6 @@ impl Shell {
             "network" => {
                 body.append(&heading("Wi-Fi"));
                 self.services.network(id, services::Job::Scan(false));
-            }
-            "music" => {
-                let view = music::Music::new(self);
-                view.update(&self.extras.borrow());
-                body.append(&view.root);
-                self.music_view.replace(Some(view));
             }
             "session" => self.session_menu(&body, pinned),
             _ => {
@@ -551,20 +553,19 @@ impl Shell {
                 && !self.audio_busy.get()
             {
                 if let Some(view) = self.sound.borrow().as_ref() {
-                    view.update(&state);
+                    view.update(&state, &self.extras.borrow());
                 }
                 if let Some(o) = state.active() {
-                    status_button(
-                        &self.audio,
-                        if o.muted {
-                            "audio-volume-muted-symbolic"
-                        } else {
-                            "audio-volume-high-symbolic"
-                        },
-                        &format!("{}%", o.percent()),
-                    );
+                    self.music.set_icon_name(if o.muted {
+                        "audio-volume-muted-symbolic"
+                    } else {
+                        "audio-volume-high-symbolic"
+                    });
+                    self.music
+                        .set_tooltip_text(Some(&format!("Audio · {}%", o.percent())));
                 }
                 self.audio_state.replace(Some(state));
+                self.update_audio_label();
             }
         }
         while let Ok(event) = self.services.media_events.try_recv() {
@@ -575,7 +576,7 @@ impl Shell {
             match event {
                 media::Update::Playback(track) => self.extras.borrow_mut().track = track,
                 media::Update::Artwork(art) => self.extras.borrow_mut().artwork = Some(art),
-                media::Update::Audio(pids) => self.extras.borrow_mut().audio_pids = pids,
+                media::Update::Audio(sources) => self.extras.borrow_mut().audio_sources = sources,
                 media::Update::Wifi(result) => {
                     if let Ok(snapshot) = result {
                         let active = snapshot.networks.iter().find(|n| n.active);
@@ -607,12 +608,14 @@ impl Shell {
                     }
                 }
             }
-            if let Some(m) = self.menu.borrow().as_ref()
-                && m.kind == "music"
-                && refresh_music
-                && let Some(view) = self.music_view.borrow().as_ref()
-            {
-                view.update(&self.extras.borrow());
+            if refresh_music {
+                self.update_audio_label();
+                if let (Some(view), Some(state)) = (
+                    self.sound.borrow().as_ref(),
+                    self.audio_state.borrow().as_ref(),
+                ) {
+                    view.update(state, &self.extras.borrow());
+                }
             }
         }
         while let Ok(event) = self.services.events.try_recv() {
@@ -739,6 +742,7 @@ impl Shell {
         }
     }
     fn update_status(self: &Rc<Self>, state: &status::Status) {
+        self.update_audio_label();
         self.clock.set_text(
             &chrono::Local::now()
                 .format("%a %b %-d  %-I:%M %p")
@@ -755,7 +759,9 @@ impl Shell {
                 contents.append(&name);
                 let sound = gtk::Image::from_icon_name("audio-volume-high-symbolic");
                 sound.add_css_class("workspace-sound");
-                sound.set_visible(w.audible);
+                // Keep the indicator's slot in the workspace button even
+                // when silent, so becoming audible cannot resize the number.
+                sound.set_opacity(if w.audible { 1.0 } else { 0.0 });
                 contents.append(&sound);
                 b.set_child(Some(&contents));
                 b.add_css_class("workspace");
@@ -789,7 +795,7 @@ impl Shell {
                 if let Some(contents) = c.first_child().and_downcast::<gtk::Box>()
                     && let Some(icon) = contents.last_child().and_downcast::<gtk::Image>()
                 {
-                    icon.set_visible(w.audible);
+                    icon.set_opacity(if w.audible { 1.0 } else { 0.0 });
                 }
                 child = c.next_sibling();
             }
@@ -819,24 +825,62 @@ impl Shell {
                 self.battery.remove_css_class(class);
             }
         }
+    }
+    fn update_audio_label(&self) {
+        let state = self.audio_state.borrow();
         let extras = self.extras.borrow();
-        self.music.set_visible(extras.track.is_some());
+        let streams = state
+            .as_ref()
+            .map(|state| state.streams.as_slice())
+            .unwrap_or_default();
+        let track = extras.track.as_ref();
+        self.music
+            .set_visible(!streams.is_empty() || extras.track.is_some());
         self.track_label
-            .set_visible(extras.track.as_ref().is_some_and(|t| t.playing));
-        if let Some(t) = &extras.track {
-            self.track_label.set_label(&format!(
-                "{}{}",
-                t.title,
-                if t.artist.is_empty() {
-                    String::new()
-                } else {
-                    format!(" · {}", t.artist)
-                }
-            ));
-            if let Some(label) = self.track_label.child().and_downcast::<gtk::Label>() {
-                label.set_ellipsize(gtk::pango::EllipsizeMode::End);
-                label.set_max_width_chars(34);
-            }
+            .set_visible(!streams.is_empty() || track.is_some());
+        let label = audio_source_label(streams, track);
+        self.track_label.set_label(&label);
+        if let Some(label) = self.track_label.child().and_downcast::<gtk::Label>() {
+            label.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            label.set_max_width_chars(34);
         }
+    }
+}
+#[cfg(test)]
+mod audio_label_tests {
+    use super::*;
+
+    #[test]
+    fn one_audio_source_keeps_its_name_and_multiple_use_a_count() {
+        let firefox = volume::Stream {
+            index: 1,
+            application: "Firefox".into(),
+            name: "Firefox · YouTube".into(),
+            percent: 50,
+            muted: false,
+            corked: false,
+        };
+        assert_eq!(
+            audio_source_label(std::slice::from_ref(&firefox), None),
+            "Firefox · YouTube"
+        );
+        assert_eq!(
+            audio_source_label(&[firefox.clone(), firefox.clone()], None),
+            "2 sources"
+        );
+        let track = media::Track {
+            art_url: String::new(),
+            player: "org.mpris.MediaPlayer2.spotify".into(),
+            title: "Track".into(),
+            artist: "Artist".into(),
+            playing: true,
+            can_previous: true,
+            can_next: true,
+            can_toggle: true,
+        };
+        assert_eq!(
+            audio_source_label(std::slice::from_ref(&firefox), Some(&track)),
+            "Track · Artist"
+        );
     }
 }

@@ -42,26 +42,22 @@ other menus do not take keyboard focus merely from hovering. Only one popup is s
   captures require Sway 1.12+ and its capture protocols. Older Sway, including
   1.9, shows window positions and titles. Hidden tabs and fullscreen windows are
   respected. Capture runs only while a preview is open and stays in memory.
-- **Sound** has a native draggable volume scale, mute, output and port selection,
-  individual app stream volume and mute controls, and an expandable channel section.
-  Browser streams include their media title where available. Master volume
-  preserves channel balance; changing output moves current playback. Commands
-  run on a worker, slider
-  updates are coalesced, and external audio changes refresh within two seconds.
+- The speaker button opens one audio drawer with a live stack of app streams,
+  per-app volume and mute, source-specific frequency meters, output and port
+  selection, master mute/volume, and expandable channel controls. Browser rows
+  include their media title where available. A single source keeps its name in
+  the bar; multiple active streams show a source count. The live meters use
+  PulseAudio-compatible per-stream monitoring through `parec`, and run only
+  while the drawer is open. The distro package providing `parec` is usually
+  `pulseaudio-utils`. Master volume preserves channel balance; changing output
+  moves current playback. Commands run on a worker and slider updates are
+  coalesced.
 - Hover or click **Wi-Fi** for a radio switch, scan, connection/disconnection, and a native
   password entry with clipboard paste and a reveal button. Leave the password
   blank to use saved credentials. Enterprise/hidden network provisioning still
   belongs in your system network settings.
 - **Apps** filters installed desktop entries. Use the keyboard or click a row
   to launch. GTK supplies text editing, selection, key repeat, and clipboard use.
-- Hover or click the music icon or track text for a menu showing artwork, title, artist, and supported playback controls.
-  Seven bars show measured frequency bands from the default audio output while
-  music is playing (other sounds on that output contribute too). This uses the
-  PulseAudio monitor interface (`parec`), which
-  also works with PipeWire-Pulse. Install the distro package that provides `parec`
-  (usually `pulseaudio-utils`); the panel remains usable without it. Audio is
-  processed in memory and capture ends when playback pauses or the panel closes. MPRIS events update playback immediately, with recovery polling. Artwork loads
-  on a bounded background worker. Paused tracks keep the music button visible.
 - The session menu offers lock and a two-click logout confirmation. Lock uses
   `~/.local/bin/lock-session`, falling back to `swaylock`.
 - Battery percentage includes a charging indicator. The clock uses local time.
@@ -77,7 +73,7 @@ interaction, so changes do not require updating separate painted hit regions.
 Rebuild after editing these embedded stylesheets.
 
 `src/gtk_ui/mod.rs` owns the layer-shell window and UI state; `sound.rs` contains
-the persistent scales; `music.rs` and `preview.rs` render media and workspace
+the persistent audio controls and per-source meters; `preview.rs` renders workspace
 previews; `menus.rs` contains launcher, network, and session widgets. `services.rs` connects the existing background workers to
 the GTK main context. Sway IPC, audio, Wi-Fi, launcher, capture, and artwork
 backends remain separate from the widget code.

@@ -43,6 +43,7 @@ impl Output {
 #[derive(Clone, Debug)]
 pub struct Stream {
     pub index: u32,
+    pub application: String,
     pub name: String,
     pub percent: u32,
     pub muted: bool,
@@ -186,6 +187,7 @@ fn parse_streams(value: &Value) -> Vec<Stream> {
                 .as_str()
                 .or_else(|| properties["application.process.binary"].as_str());
             let media = properties["media.name"].as_str();
+            let application = app.unwrap_or("Audio stream").to_string();
             let name = match (app, media) {
                 (Some(app), Some(media)) if !media.is_empty() && media != app => {
                     format!("{app} · {media}")
@@ -206,6 +208,7 @@ fn parse_streams(value: &Value) -> Vec<Stream> {
                 .min(150) as u32;
             Some(Stream {
                 index,
+                application,
                 name,
                 percent,
                 muted: v["mute"].as_bool().unwrap_or(false),
