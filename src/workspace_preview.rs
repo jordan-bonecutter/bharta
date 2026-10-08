@@ -36,7 +36,7 @@ impl Geometry {
     }
 }
 pub struct Window {
-    id: String,
+    id: Option<String>,
     title: String,
     rect: Geometry,
     pixels: Option<Pixmap>,
@@ -65,9 +65,15 @@ fn workspace<'a>(v: &'a Value, name: &str) -> Option<&'a Value> {
         .find_map(|c| workspace(c, name))
 }
 fn collect(v: &Value, result: &mut Vec<Window>) {
-    if let Some(id) = v["foreign_toplevel_identifier"].as_str() {
+    // The capture identifier is optional on older Sway versions. Window
+    // discovery must not depend on capture protocol support.
+    if v["foreign_toplevel_identifier"].is_string()
+        || v["app_id"].is_string()
+        || v["window"].is_number()
+        || v["window_properties"].is_object()
+    {
         result.push(Window {
-            id: id.into(),
+            id: v["foreign_toplevel_identifier"].as_str().map(str::to_owned),
             title: v["name"].as_str().unwrap_or("Window").into(),
             rect: Geometry::read(&v["rect"]),
             pixels: None,
@@ -124,6 +130,7 @@ pub fn watch(sender: channel::Sender<Snapshot>) -> mpsc::Sender<Option<String>> 
     std::thread::spawn(move || {
         let mut capture = None;
         let mut target = None;
+        let mut retry_capture = Instant::now();
         loop {
             let request = if target.is_some() {
                 rx.recv_timeout(Duration::from_millis(200))
@@ -156,11 +163,21 @@ pub fn watch(sender: channel::Sender<Snapshot>) -> mpsc::Sender<Option<String>> 
                     message: "Workspace unavailable".into(),
                 },
             };
-            if capture.is_none() && !shot.windows.is_empty() {
+            let capturable = shot.windows.iter().any(|w| w.id.is_some());
+            if !shot.windows.is_empty() && !capturable {
+                shot.message = "Window layout · live capture needs Sway 1.12+".into();
+            }
+            if capture.is_none() && capturable && Instant::now() >= retry_capture {
                 match Capture::new() {
                     Ok(c) => capture = Some(c),
-                    Err(_) => shot.message = "Live capture unavailable".into(),
+                    Err(error) => {
+                        eprintln!("Workspace capture unavailable: {error:#}");
+                        retry_capture = Instant::now() + Duration::from_secs(5);
+                    }
                 }
+            }
+            if capturable && capture.is_none() {
+                shot.message = "Window layout · live capture unavailable".into();
             }
             let mut cancelled = false;
             if let Some(c) = &mut capture {
@@ -170,14 +187,14 @@ pub fn watch(sender: channel::Sender<Snapshot>) -> mpsc::Sender<Option<String>> 
                         cancelled = true;
                         break;
                     }
-                    window.pixels = c.window(&window.id).ok();
+                    window.pixels = window.id.as_deref().and_then(|id| c.window(id).ok());
                 }
             }
             if cancelled {
                 continue;
             }
             if shot.windows.iter().any(|w| w.pixels.is_none()) && shot.message.is_empty() {
-                shot.message = "Some windows could not be captured".into();
+                shot.message = "Window layout · some captures unavailable".into();
             }
             if sender.send(shot).is_err() {
                 break;
@@ -444,10 +461,30 @@ mod tests {
         let mut windows = vec![];
         collect(workspace(&tree, "other").unwrap(), &mut windows);
         assert_eq!(
-            windows.iter().map(|w| w.id.as_str()).collect::<Vec<_>>(),
+            windows
+                .iter()
+                .map(|w| w.id.as_deref().unwrap())
+                .collect::<Vec<_>>(),
             vec!["w2", "w3"]
         );
         assert!(workspace(&tree, "missing").is_none());
+    }
+    #[test]
+    fn older_sway_windows_are_not_mistaken_for_an_empty_workspace() {
+        let tree = json!({"type":"workspace", "nodes":[
+            {"type":"con","app_id":"foot","name":"Terminal","rect":{"width":900,"height":700}},
+            {"type":"con","window":123,"window_properties":{"class":"Firefox"},"name":"Browser"}
+        ], "floating_nodes":[{"type":"floating_con","nodes":[
+            {"type":"con","app_id":"settings","name":"Settings"}
+        ]}]});
+        let mut windows = vec![];
+        collect(&tree, &mut windows);
+        assert_eq!(windows.len(), 3);
+        assert!(windows.iter().all(|w| w.id.is_none()));
+        assert_eq!(windows[0].title, "Terminal");
+        let mut empty = vec![];
+        collect(&json!({"type":"workspace","nodes":[]}), &mut empty);
+        assert!(empty.is_empty());
     }
     #[test]
     fn fullscreen_hides_siblings() {
@@ -455,6 +492,6 @@ mod tests {
         let mut windows = vec![];
         collect(&tree, &mut windows);
         assert_eq!(windows.len(), 1);
-        assert_eq!(windows[0].id, "b");
+        assert_eq!(windows[0].id.as_deref(), Some("b"));
     }
 }

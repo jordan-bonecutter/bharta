@@ -51,7 +51,9 @@ by building or running this project. Ctrl-C stops a foreground instance.
   workspaces or take keyboard focus. Selected tabs, fullscreen and floating
   windows are respected; wallpaper and compositor decorations are not captured.
   Apps may throttle their own updates while hidden. Unavailable captures show
-  window placeholders. Image data stays in memory; capture stops on pointer leave.
+  window placeholders. Older Sway versions without capture identifiers show
+  the window layout and titles instead of incorrectly reporting an empty workspace;
+  live hidden-window images require Sway 1.12+ and its capture protocols. Image data stays in memory; capture stops on pointer leave.
 - Battery percentage and charging state from Linux sysfs.
 - Current song and artist from playing MPRIS players. Paused song text hides
   as soon as the player signals the change, leaving a fixed-position music button.
