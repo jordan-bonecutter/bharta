@@ -9,6 +9,7 @@ pub struct Renderer {
 }
 #[derive(Clone, Debug, PartialEq)]
 pub enum Action {
+    Volume,
     Workspace(String),
     Network,
     Session,
@@ -195,7 +196,26 @@ impl Renderer {
             if width < 600 { 85.0 } else { 160.0 },
         );
         let network_width = 28.0 + self.width(&network_label, 13.0);
-        let net_x = right_x - network_width - if shown_battery.is_some() { 34.0 } else { 0.0 };
+        let volume_x = right_x - if shown_battery.is_some() { 34.0 } else { 0.0 } - 32.0;
+        let net_x = volume_x - network_width - 8.0;
+        crate::icons::draw(
+            &mut pix,
+            crate::icons::Icon::Volume(
+                status
+                    .extras
+                    .volume
+                    .is_some_and(|(level, muted)| muted || level == 0),
+            ),
+            volume_x,
+            5.0,
+            18.0,
+            s,
+            if status.extras.volume.is_some() {
+                fg
+            } else {
+                muted
+            },
+        );
         if hover.is_some_and(|h| h >= net_x - 6.0 && h < net_x + network_width - 4.0) {
             rect(
                 &mut pix,
@@ -384,6 +404,11 @@ impl Renderer {
             start: (net_x - 6.0).max(0.0),
             end: (net_x + network_width - 4.0).min(width as f32),
             action: Action::Network,
+        });
+        hits.push(Hit {
+            start: volume_x - 4.0,
+            end: volume_x + 24.0,
+            action: Action::Volume,
         });
         self.text(&mut pix, &right, right_x, s, fg);
         Ok((pix, hits))

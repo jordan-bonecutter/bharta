@@ -58,6 +58,11 @@ impl App {
         popup.wl_surface().commit();
         self.panel_id += 1;
         let mut panel = Panel::new(popup, kind, self.panel_id, self.scale);
+        if kind == Kind::Volume {
+            panel.volume = self.volume_snapshot.clone();
+            panel.message = self.volume_error.clone();
+            let _ = self.volume_requests.send(volume::Request::Refresh);
+        }
         panel.track = self.status.extras.track.clone();
         panel.artwork = self.status.extras.artwork.clone();
         self.panel = Some(panel);
@@ -249,7 +254,13 @@ impl App {
                 }
             }
             PointerEventKind::Axis { vertical, .. } => {
-                if p.kind == Kind::Launcher {
+                if p.kind == Kind::Volume {
+                    if vertical.absolute > 0.0 {
+                        p.page = p.page.saturating_add(1);
+                    } else if vertical.absolute < 0.0 {
+                        p.page = p.page.saturating_sub(1);
+                    }
+                } else if p.kind == Kind::Launcher {
                     if vertical.absolute > 0.0 {
                         p.selection += 1;
                     } else if vertical.absolute < 0.0 {
@@ -267,6 +278,16 @@ impl App {
             _ => {}
         }
         if let Some(action) = action {
+            let action = match action {
+                PanelAction::VolumeSlider(output, channel) => {
+                    PanelAction::Volume(volume::Control::Volume {
+                        output,
+                        channel,
+                        percent: volume_ui::percent_at(event.position.0 as f32),
+                    })
+                }
+                other => other,
+            };
             self.panel_action(action);
         }
         self.draw_panel();
@@ -276,6 +297,26 @@ impl App {
             return;
         };
         match action {
+            PanelAction::VolumeTab(channels) => {
+                p.volume_channels = channels;
+                p.page = 0;
+            }
+            PanelAction::VolumeSlider(..) => {}
+            PanelAction::Volume(control) => {
+                if p.busy {
+                    return;
+                }
+                p.message.clear();
+                p.busy = true;
+                if self
+                    .volume_requests
+                    .send(volume::Request::Control(p.id, control))
+                    .is_err()
+                {
+                    p.busy = false;
+                    p.message = "Audio service unavailable".into();
+                }
+            }
             PanelAction::Media(control) => {
                 if p.busy {
                     return;

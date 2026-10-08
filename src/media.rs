@@ -22,6 +22,7 @@ pub struct Track {
 }
 #[derive(Clone, Debug, Default)]
 pub struct Extras {
+    pub volume: Option<(u32, bool)>,
     pub artwork: Option<std::sync::Arc<crate::artwork::Artwork>>,
     pub wifi_name: Option<String>,
     pub wifi_signal: Option<u8>,

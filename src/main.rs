@@ -11,6 +11,8 @@ mod popup_ui;
 mod render;
 mod status;
 mod supervisor;
+mod volume;
+mod volume_ui;
 mod workspace_preview;
 
 use anyhow::{Context, Result, bail};
@@ -156,7 +158,11 @@ fn main() -> Result<()> {
     let mut event_loop: EventLoop<App> = EventLoop::try_new()?;
     let (ui_sender, ui_receiver) = channel::channel();
     let (preview_sender, preview_receiver) = channel::channel();
+    let (volume_sender, volume_receiver) = channel::channel();
     let mut app = App {
+        volume_requests: volume::watch(volume_sender),
+        volume_snapshot: None,
+        volume_error: String::new(),
         preview_requests: workspace_preview::watch(preview_sender),
         preview_target: None,
         workspace_preview: None,
@@ -235,6 +241,14 @@ fn main() -> Result<()> {
             }
         })
         .map_err(|e| anyhow::anyhow!("Preview event source: {e}"))?;
+    event_loop
+        .handle()
+        .insert_source(volume_receiver, |event, _, app| {
+            if let channel::Event::Msg(update) = event {
+                app.volume_result(update);
+            }
+        })
+        .map_err(|e| anyhow::anyhow!("Volume event source: {e}"))?;
     let (sender, receiver) = channel::channel();
     event_loop
         .handle()
@@ -370,6 +384,9 @@ fn main() -> Result<()> {
     Ok(())
 }
 struct App {
+    volume_requests: std::sync::mpsc::Sender<volume::Request>,
+    volume_snapshot: Option<volume::Snapshot>,
+    volume_error: String,
     preview_requests: std::sync::mpsc::Sender<Option<String>>,
     preview_target: Option<(String, i32, std::time::Instant)>,
     workspace_preview: Option<workspace_preview::Preview>,
@@ -655,8 +672,10 @@ impl PointerHandler for App {
                             Action::Network
                             | Action::Session
                             | Action::Launcher
-                            | Action::Music => {
+                            | Action::Music
+                            | Action::Volume => {
                                 let kind = match action {
+                                    Action::Volume => panel::Kind::Volume,
                                     Action::Network => panel::Kind::Network,
                                     Action::Session => panel::Kind::Session,
                                     Action::Music => panel::Kind::Music,

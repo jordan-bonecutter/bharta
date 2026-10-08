@@ -16,6 +16,7 @@ pub fn height(kind: Kind) -> u32 {
 }
 #[derive(Clone, Copy, PartialEq)]
 pub enum Kind {
+    Volume,
     Network,
     Session,
     Launcher,
@@ -23,6 +24,9 @@ pub enum Kind {
 }
 #[derive(Clone)]
 pub enum Action {
+    Volume(crate::volume::Control),
+    VolumeSlider(String, Option<String>),
+    VolumeTab(bool),
     Scan,
     Radio,
     Choose(Network),
@@ -52,6 +56,8 @@ impl Row {
     }
 }
 pub struct Panel {
+    pub volume: Option<crate::volume::Snapshot>,
+    pub volume_channels: bool,
     pub popup: Popup,
     pub kind: Kind,
     pub ready: bool,
@@ -85,6 +91,8 @@ impl Panel {
 
     pub fn new(popup: Popup, kind: Kind, id: u64, scale: u32) -> Self {
         Self {
+            volume: None,
+            volume_channels: false,
             popup,
             kind,
             ready: false,
@@ -109,6 +117,9 @@ impl Panel {
         }
     }
     pub fn render(&mut self, renderer: &Renderer) -> Pixmap {
+        if self.kind == Kind::Volume {
+            return crate::volume_ui::render(self, renderer);
+        }
         let scale = self.scale as f32;
         let mut pix = Pixmap::new(WIDTH * self.scale, height(self.kind) * self.scale).unwrap();
         let dark = renderer.dark;

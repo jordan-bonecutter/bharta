@@ -1,6 +1,7 @@
 use tiny_skia::{Color, Paint, PathBuilder, Pixmap, Rect, Stroke, Transform};
 #[derive(Clone, Copy)]
 pub enum Icon {
+    Volume(bool),
     Music,
     Play,
     Pause,
@@ -36,6 +37,40 @@ pub fn draw(pix: &mut Pixmap, icon: Icon, x: f32, y: f32, size: f32, scale: f32,
         fill(pix, p);
     };
     match icon {
+        Icon::Volume(muted) => {
+            let mut p = PathBuilder::new();
+            p.move_to(3., 9.);
+            p.line_to(7., 9.);
+            p.line_to(12., 4.);
+            p.line_to(12., 20.);
+            p.line_to(7., 15.);
+            p.line_to(3., 15.);
+            p.close();
+            fill(pix, p);
+            let mut p = PathBuilder::new();
+            if muted {
+                p.move_to(16., 8.);
+                p.line_to(22., 16.);
+                p.move_to(22., 8.);
+                p.line_to(16., 16.);
+            } else {
+                p.move_to(16., 7.);
+                p.quad_to(21., 12., 16., 17.);
+                p.move_to(19., 3.);
+                p.quad_to(27., 12., 19., 21.);
+            }
+            pix.stroke_path(
+                &p.finish().unwrap(),
+                &paint,
+                &Stroke {
+                    width: 1.8,
+                    ..Default::default()
+                },
+                transform,
+                None,
+            );
+        }
+
         Icon::Play => triangle(pix, [(7.0, 4.0), (20.0, 12.0), (7.0, 20.0)]),
         Icon::Pause => {
             rect(pix, 6.0, 4.0, 4.0, 16.0);

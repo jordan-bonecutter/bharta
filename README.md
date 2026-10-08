@@ -54,6 +54,12 @@ by building or running this project. Ctrl-C stops a foreground instance.
   window placeholders. Older Sway versions without capture identifiers show
   the window layout and titles instead of incorrectly reporting an empty workspace;
   live hidden-window images require Sway 1.12+ and its capture protocols. Image data stays in memory; capture stops on pointer leave.
+- Sound button with master volume, mute, output selection, available speaker/headphone
+  ports, and individual channel levels. Master adjustments preserve channel balance;
+  selecting an output also moves current playback. Click a level to set it; scroll
+  the panel to reach additional outputs or channels. Requires `pactl` and PulseAudio
+  or PipeWire-Pulse. Audio commands run on a worker and external changes refresh
+  within two seconds.
 - Battery percentage and charging state from Linux sysfs.
 - Current song and artist from playing MPRIS players. Paused song text hides
   as soon as the player signals the change, leaving a fixed-position music button.
@@ -90,7 +96,7 @@ by building or running this project. Ctrl-C stops a foreground instance.
   pointer interaction, rather than a continuous animation loop.
 
 This is an initial working bar, not a complete macOS menu-bar implementation.
-There are no per-application menus, volume controls, StatusNotifier tray,
+There are no per-application menus, StatusNotifier tray,
 font fallback/shaping for complex scripts, or automatic output hotplug management
 yet. Enterprise/hidden Wi-Fi provisioning is not implemented in the popup.
 Focused app IDs are displayed as supplied
