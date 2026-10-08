@@ -211,6 +211,7 @@ elif 'list' in a:print('[]')
         run(['grim','-o','HEADLESS-2',str(DEST / 'second-popup.png')])
         assert Image.open(DEST / 'second-popup.png').convert('RGB').getpixel((1250,80)) != (0,0,0), 'Second output did not open its popup'
         assert Image.open(DEST / 'single-popup.png').convert('RGB').crop((0,28,1600,900)).getbbox() is None, 'Other output left a popup open'
+        assert Image.open(DEST / 'single-popup.png').convert('RGB').getpixel((110,8)) == Image.open(DEST / 'bar.png').convert('RGB').getpixel((110,8)), 'Workspace highlight changed when focus moved to the other output'
         other.wait()
         assert second.poll() is None, 'Second bar exited'
         assert bar.poll() is None, 'GTK bar exited' 

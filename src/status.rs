@@ -151,7 +151,9 @@ impl Status {
                 .filter_map(|w| {
                     Some(Workspace {
                         name: w["name"].as_str()?.into(),
-                        focused: w["focused"] == true,
+                        // Each output's displayed workspace stays active when
+                        // keyboard focus moves to another monitor or the bar.
+                        focused: w["focused"] == true || (output.is_some() && w["visible"] == true),
                         urgent: w["urgent"] == true,
                         audible: false,
                     })
