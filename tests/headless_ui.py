@@ -163,6 +163,22 @@ elif 'list' in a:print('[]')
         switched=Image.open(DEST / 'session-hover.png').convert('RGB')
         assert switched.getpixel((50,55)) != (0,0,0), 'Session hover failed'
         assert switched.crop((500,28,1600,900)).getbbox() is None, 'Switching menus left the old popup visible'
+        # Switch directly from a clicked (grabbed) menu to a workspace preview,
+        # then to another menu, without visiting the desktop between controls.
+        leave=probe(600,600,'--hover',900);leave.wait()
+        clicked=probe(72,14,'--click-hold',900);clicked.wait()
+        switch_preview=probe(125,14,'--hover',1000);time.sleep(.65);shot('switch-preview');switch_preview.wait()
+        assert Image.open(DEST / 'switch-preview.png').convert('RGB').crop((0,320,500,900)).getbbox() is None, 'Clicked Apps did not switch to workspace preview'
+        assert Image.open(DEST / 'switch-preview.png').convert('RGB').getpixel((50,50)) != (0,0,0), 'Workspace hover did not open'
+        switch_sound=probe(1345,14,'--hover',1000);time.sleep(.65);shot('switch-sound');switch_sound.wait()
+        switched=Image.open(DEST / 'switch-sound.png').convert('RGB')
+        assert switched.getpixel((1250,80)) != (0,0,0), 'Workspace preview did not switch to Sound'
+        assert switched.crop((0,28,500,900)).getbbox() is None, 'Old workspace preview stayed visible'
+        # Promote the hovered menu to clicked, then toggle it closed. Remaining
+        # over the same button must not immediately reopen it.
+        promote=probe(1345,14,'--click-hold',700);promote.wait()
+        toggle=probe(1345,14,'--click-hold',1000);time.sleep(.85);shot('toggle-closed');toggle.wait()
+        assert Image.open(DEST / 'toggle-closed.png').convert('RGB').crop((0,28,1600,900)).getbbox() is None, 'Hover reopened a menu toggled closed'
         # A second real bar on another private output must dismiss the first.
         run(['swaymsg','create_output'])
         run(['swaymsg','output HEADLESS-2 mode 1600x900 pos 1600 0'])

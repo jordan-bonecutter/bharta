@@ -45,6 +45,9 @@ struct Shell {
     menu: RefCell<Option<Menu>>,
     serial: Cell<u64>,
     remapping: Cell<bool>,
+    hover_targets: RefCell<Vec<(glib::WeakRef<gtk::Button>, String)>>,
+    hover_candidate: RefCell<Option<(String, Instant)>>,
+    hover_activated: Cell<bool>,
     sound: RefCell<Option<sound::Sound>>,
     audio_state: RefCell<Option<volume::Snapshot>>,
     audio_busy: Cell<bool>,
@@ -167,6 +170,9 @@ pub fn run(options: Options) -> anyhow::Result<()> {
             menu: RefCell::new(None),
             serial: Cell::new(0),
             remapping: Cell::new(false),
+            hover_targets: RefCell::new(Vec::new()),
+            hover_candidate: RefCell::new(None),
+            hover_activated: Cell::new(false),
             sound: RefCell::new(None),
             audio_state: RefCell::new(None),
             audio_busy: Cell::new(false),
@@ -228,37 +234,78 @@ pub fn run(options: Options) -> anyhow::Result<()> {
     Ok(())
 }
 impl Shell {
-    fn add_hover_menu(self: &Rc<Self>, button: &gtk::Button, kind: &'static str) {
+    fn add_hover_menu(&self, button: &gtk::Button, kind: &str) {
         button.set_has_tooltip(false);
-        let motion = gtk::EventControllerMotion::new();
-        let weak = Rc::downgrade(self);
-        let button_ref = button.downgrade();
-        motion.connect_enter(move |_, _, _| {
-            let weak = weak.clone();
-            let button = button_ref.clone();
-            glib::timeout_add_local_once(Duration::from_millis(220), move || {
-                if let Some(button) = button.upgrade()
-                    && button.state_flags().contains(gtk::StateFlags::PRELIGHT)
-                    && !button.state_flags().contains(gtk::StateFlags::ACTIVE)
-                    && let Some(s) = weak.upgrade()
-                    && s.menu.borrow().as_ref().is_none_or(|m| m.kind != kind)
-                {
-                    let anchor = match kind {
-                        "music" => &s.music,
-                        "network" => &s.wifi,
-                        _ => &button,
-                    };
-                    s.open(anchor, kind);
-                    if let Some(m) = s.menu.borrow().as_ref() {
-                        m.hover_opened.set(true);
-                        m.pop.set_autohide(false);
-                    }
-                    s.window.set_keyboard_mode(KeyboardMode::None);
-                    s.window.queue_draw();
-                }
-            });
+        self.hover_targets
+            .borrow_mut()
+            .push((button.downgrade(), kind.into()));
+    }
+    fn update_hover(self: &Rc<Self>) {
+        let (surface, x, y) = gdk::Display::default()
+            .and_then(|d| d.default_seat())
+            .and_then(|s| s.pointer())
+            .map(|p| p.surface_at_position())
+            .unwrap_or((None, 0.0, 0.0));
+        // Popover grabs suppress widget enter/PRELIGHT events. Hit-test GTK's
+        // actual button allocations using the parent surface's pointer position.
+        let mut target = None;
+        self.hover_targets.borrow_mut().retain(|(weak, kind)| {
+            let Some(button) = weak.upgrade() else {
+                return false;
+            };
+            if surface.is_some()
+                && surface == self.window.surface()
+                && button.is_visible()
+                && button.is_sensitive()
+                && button.compute_bounds(&self.window).is_some_and(|r| {
+                    r.contains_point(&gtk::graphene::Point::new(x as f32, y as f32))
+                })
+            {
+                target = Some((button, kind.clone()));
+            }
+            true
         });
-        button.add_controller(motion);
+        let Some((button, kind)) = target else {
+            self.hover_candidate.borrow_mut().take();
+            self.hover_activated.set(false);
+            return;
+        };
+        let now = Instant::now();
+        let ready = {
+            let mut candidate = self.hover_candidate.borrow_mut();
+            match candidate.as_ref() {
+                Some((previous, since)) if previous == &kind => {
+                    now.duration_since(*since) >= Duration::from_millis(220)
+                }
+                _ => {
+                    self.hover_activated.set(false);
+                    *candidate = Some((kind.clone(), now));
+                    false
+                }
+            }
+        };
+        // A click owns this visit to the button: do not reopen a menu the
+        // user just toggled closed while their pointer remains stationary.
+        if button.state_flags().contains(gtk::StateFlags::ACTIVE) {
+            self.hover_activated.set(true);
+        }
+        if ready
+            && !self.hover_activated.replace(true)
+            && self.menu.borrow().as_ref().is_none_or(|m| m.kind != kind)
+        {
+            let anchor = if kind == "music" {
+                &self.music
+            } else {
+                &button
+            };
+            self.open(anchor, &kind);
+            if let Some(m) = self.menu.borrow().as_ref() {
+                m.hover_opened.set(true);
+                m.pop.set_autohide(false);
+            }
+            self.window.set_keyboard_mode(KeyboardMode::None);
+            self.window.queue_draw();
+        }
     }
     fn close(&self) {
         if let Some(m) = self.menu.borrow().as_ref() {
@@ -629,6 +676,7 @@ impl Shell {
                 self.preview_menu(&m.body, snapshot);
             }
         }
+        self.update_hover();
         let mut close = false;
         let mut release_grab = None;
         if let Some(m) = self.menu.borrow_mut().as_mut() {
@@ -710,29 +758,7 @@ impl Shell {
                         let _ = s.services.status.send(status::Update::Focus(name.clone()));
                     }
                 });
-                let motion = gtk::EventControllerMotion::new();
-                let s = Rc::downgrade(self);
-                let name = w.name.clone();
-                let button = b.downgrade();
-                motion.connect_enter(move |_, _, _| {
-                    let s = s.clone();
-                    let name = name.clone();
-                    let button = button.clone();
-                    glib::timeout_add_local_once(Duration::from_millis(220), move || {
-                        if let Some(button) = button.upgrade()
-                            && button.state_flags().contains(gtk::StateFlags::PRELIGHT)
-                            && let Some(s) = s.upgrade()
-                            && s.menu.borrow().as_ref().is_none_or(|m| {
-                                !["apps", "network", "sound", "music", "session"]
-                                    .contains(&m.kind.as_str())
-                                    && m.kind != name
-                            })
-                        {
-                            s.open(&button, &name);
-                        }
-                    });
-                });
-                b.add_controller(motion);
+                self.add_hover_menu(&b, &w.name);
                 self.workspaces.append(&b);
             }
             self.names.replace(names);
