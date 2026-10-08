@@ -54,7 +54,9 @@ impl Shell {
         let entries = apps.clone();
         let rows = list.clone();
         let weak = Rc::downgrade(self);
-        search.connect_search_changed(move |search| {
+        // SearchEntry delays search-changed; this in-memory filter should run
+        // on every edit, including paste and deletion, without a debounce.
+        search.connect_changed(move |search| {
             if let Some(s) = weak.upgrade()
                 && let Some(m) = s.menu.borrow().as_ref().filter(|m| m.id == id)
             {
