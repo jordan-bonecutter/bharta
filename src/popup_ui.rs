@@ -75,6 +75,14 @@ impl App {
         Ok(())
     }
     fn close_panel(&mut self) {
+        // Closing immediately after release must not discard the last level.
+        if let Some(p) = &mut self.panel
+            && let Some(control) = p.volume_pending.take()
+        {
+            let _ = self
+                .volume_requests
+                .send(volume::Request::Control(p.id, control));
+        }
         self.panel = None;
         self.keyboard_focus = false;
         if let Some(layer) = &self.layer {
@@ -240,9 +248,15 @@ impl App {
             PointerEventKind::Enter { .. } | PointerEventKind::Motion { .. } => {
                 p.dismissal.enter();
                 p.hover = Some((event.position.0 as f32, event.position.1 as f32));
+                if let Some(drag) = &mut p.volume_drag {
+                    action = drag
+                        .motion(event.position.0 as f32)
+                        .map(PanelAction::Volume);
+                }
             }
             PointerEventKind::Leave { .. } => {
                 p.hover = None;
+                p.volume_drag = None;
                 p.dismissal.leave(std::time::Instant::now());
             }
             PointerEventKind::Press { button: 0x110, .. } => {
@@ -254,6 +268,15 @@ impl App {
                         .map(|r| r.action.clone());
                 }
             }
+            PointerEventKind::Release { button: 0x110, .. } => {
+                if let Some(mut drag) = p.volume_drag.take() {
+                    drag.motion(event.position.0 as f32);
+                    // Always queue the final release position, even if an older
+                    // command is still in flight when the button is released.
+                    action = Some(PanelAction::Volume(drag.control()));
+                }
+            }
+            PointerEventKind::Axis { .. } if p.volume_drag.is_some() => {}
             PointerEventKind::Axis { vertical, .. } => {
                 if p.kind == Kind::Volume {
                     if vertical.absolute > 0.0 {
@@ -281,11 +304,12 @@ impl App {
         if let Some(action) = action {
             let action = match action {
                 PanelAction::VolumeSlider(output, channel) => {
-                    PanelAction::Volume(volume::Control::Volume {
-                        output,
-                        channel,
-                        percent: volume_ui::percent_at(event.position.0 as f32),
-                    })
+                    let drag = volume_ui::Drag::new(output, channel, event.position.0 as f32);
+                    let control = drag.control();
+                    if let Some(p) = &mut self.panel {
+                        p.volume_drag = Some(drag);
+                    }
+                    PanelAction::Volume(control)
                 }
                 other => other,
             };
@@ -304,19 +328,7 @@ impl App {
             }
             PanelAction::VolumeSlider(..) => {}
             PanelAction::Volume(control) => {
-                if p.busy {
-                    return;
-                }
-                p.message.clear();
-                p.busy = true;
-                if self
-                    .volume_requests
-                    .send(volume::Request::Control(p.id, control))
-                    .is_err()
-                {
-                    p.busy = false;
-                    p.message = "Audio service unavailable".into();
-                }
+                self.queue_volume(control);
             }
             PanelAction::Media(control) => {
                 if p.busy {

@@ -8,7 +8,63 @@ use tiny_skia::{Color, Pixmap};
 pub fn percent_at(x: f32) -> u8 {
     (((x - 152.) / 192.).clamp(0., 1.) * 100.).round() as u8
 }
+#[derive(Clone, Debug)]
+pub struct Drag {
+    pub output: String,
+    pub channel: Option<String>,
+    percent: u8,
+}
+impl Drag {
+    pub fn new(output: String, channel: Option<String>, x: f32) -> Self {
+        Self {
+            output,
+            channel,
+            percent: percent_at(x),
+        }
+    }
+    pub fn control(&self) -> volume::Control {
+        volume::Control::Volume {
+            output: self.output.clone(),
+            channel: self.channel.clone(),
+            percent: self.percent,
+        }
+    }
+    pub fn motion(&mut self, x: f32) -> Option<volume::Control> {
+        let percent = percent_at(x);
+        if percent == self.percent {
+            return None;
+        }
+        self.percent = percent;
+        Some(self.control())
+    }
+}
 impl App {
+    pub(crate) fn queue_volume(&mut self, control: volume::Control) {
+        let Some(p) = &mut self.panel else {
+            return;
+        };
+        if let Some(snapshot) = &mut p.volume {
+            volume::preview(snapshot, &control);
+        }
+        p.message.clear();
+        if p.busy {
+            // Exactly one command is in flight and one latest value is pending.
+            // Fast pointer motion cannot build a backlog of stale volume changes.
+            p.volume_pending = Some(control);
+            return;
+        }
+        p.busy = true;
+        if self
+            .volume_requests
+            .send(volume::Request::Control(p.id, control))
+            .is_err()
+        {
+            p.busy = false;
+            p.volume_drag = None;
+            p.volume_pending = None;
+            p.message = "Audio service unavailable".into();
+        }
+    }
     pub(crate) fn volume_result(&mut self, update: volume::Update) {
         match &update.result {
             Ok(snapshot) => {
@@ -21,18 +77,30 @@ impl App {
                 self.status.extras.volume = None;
             }
         }
+        let mut next = None;
         if let Some(p) = &mut self.panel
             && p.kind == Kind::Volume
         {
             if update.completed == Some(p.id) {
                 p.busy = false;
+                if update.result.is_err() {
+                    p.volume_pending = None;
+                    p.volume_drag = None;
+                } else {
+                    next = p.volume_pending.take();
+                }
             }
-            if !p.busy {
+            // Older acknowledgements and polls must not pull the thumb away
+            // from the cursor or overwrite a newer value awaiting submission.
+            if !p.busy && next.is_none() && p.volume_drag.is_none() {
                 p.volume = self.volume_snapshot.clone();
                 p.message = self.volume_error.clone();
-                self.draw_panel();
             }
         }
+        if let Some(control) = next {
+            self.queue_volume(control);
+        }
+        self.draw_panel();
         self.draw();
     }
 }
@@ -275,7 +343,7 @@ pub fn render(p: &mut Panel, r: &Renderer) -> Pixmap {
         if p.busy {
             "Applying…"
         } else {
-            "Click levels to adjust · scroll for more"
+            "Drag levels to adjust · scroll for more"
         },
         24.,
         478.,
@@ -287,6 +355,24 @@ pub fn render(p: &mut Panel, r: &Renderer) -> Pixmap {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn drag_keeps_its_channel_and_clamps_outside_the_track() {
+        let mut drag = Drag::new("speaker".into(), Some("front-left".into()), 248.);
+        assert!(drag.motion(248.).is_none());
+        for (x, expected) in [(-100., 0), (900., 100), (200., 25)] {
+            let volume::Control::Volume {
+                output,
+                channel,
+                percent,
+            } = drag.motion(x).unwrap()
+            else {
+                panic!()
+            };
+            assert_eq!(output, "speaker");
+            assert_eq!(channel.as_deref(), Some("front-left"));
+            assert_eq!(percent, expected);
+        }
+    }
     #[test]
     fn slider_clamps_and_maps_endpoints() {
         assert_eq!(percent_at(140.), 0);

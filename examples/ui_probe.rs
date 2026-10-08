@@ -52,7 +52,7 @@ fn main() -> anyhow::Result<()> {
     let a: Vec<_> = std::env::args().skip(1).collect();
     anyhow::ensure!(
         a.len() >= 5,
-        "Usage: ui_probe OUTPUT X Y WIDTH HEIGHT [--hover [HOLD_MS] | EVDEV_KEY ...]"
+        "Usage: ui_probe OUTPUT X Y WIDTH HEIGHT [--hover [HOLD_MS] | --drag END_X END_Y | EVDEV_KEY ...]"
     );
     let c = Connection::connect_to_env()?;
     let (g, mut q) = registry_queue_init::<State>(&c)?;
@@ -96,10 +96,31 @@ fn main() -> anyhow::Result<()> {
     pointer.frame();
     q.roundtrip(&mut s)?;
     std::thread::sleep(Duration::from_millis(150));
-    pointer.button(3, 0x110, wl_pointer::ButtonState::Released);
+    let dragging = a.get(5).is_some_and(|arg| arg == "--drag");
+    if dragging {
+        anyhow::ensure!(a.len() == 8, "--drag needs END_X END_Y");
+        let (x, y): (f64, f64) = (a[1].parse()?, a[2].parse()?);
+        let (end_x, end_y): (f64, f64) = (a[6].parse()?, a[7].parse()?);
+        for step in 1..=24 {
+            let t = step as f64 / 24.;
+            pointer.motion_absolute(
+                10 + step,
+                (x + (end_x - x) * t) as u32,
+                (y + (end_y - y) * t) as u32,
+                a[3].parse()?,
+                a[4].parse()?,
+            );
+            pointer.frame();
+            q.roundtrip(&mut s)?;
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        // Allow assertions against the server while the button is still held.
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    pointer.button(40, 0x110, wl_pointer::ButtonState::Released);
     pointer.frame();
     q.roundtrip(&mut s)?;
-    if a.len() > 5 {
+    if a.len() > 5 && !dragging {
         std::thread::sleep(Duration::from_millis(500));
         let km = xkbcommon::xkb::Keymap::new_from_names(
             &xkbcommon::xkb::Context::new(0),

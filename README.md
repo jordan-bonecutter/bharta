@@ -56,10 +56,11 @@ by building or running this project. Ctrl-C stops a foreground instance.
   live hidden-window images require Sway 1.12+ and its capture protocols. Image data stays in memory; capture stops on pointer leave.
 - Sound button with master volume, mute, output selection, available speaker/headphone
   ports, and individual channel levels. Master adjustments preserve channel balance;
-  selecting an output also moves current playback. Click a level to set it; scroll
+  selecting an output also moves current playback. Click or drag a level to set it; scroll
   the panel to reach additional outputs or channels. Requires `pactl` and PulseAudio
   or PipeWire-Pulse. Audio commands run on a worker and external changes refresh
-  within two seconds.
+  within two seconds. Slider thumbs follow the pointer immediately; audio updates
+  are coalesced while dragging and always apply the final release position.
 - Battery percentage and charging state from Linux sysfs, with a green vector
   lightning bolt while charging (no icon-font dependency).
 - Current song and artist from playing MPRIS players. Paused song text hides

@@ -168,7 +168,7 @@ pub fn read() -> Result<Snapshot> {
         default,
     )
 }
-fn volumes(output: &Output, channel: Option<&str>, percent: u8) -> Result<Vec<String>> {
+fn volume_values(output: &Output, channel: Option<&str>, percent: u8) -> Result<Vec<u32>> {
     ensure!(!output.channels.is_empty(), "Output has no volume channels");
     ensure!(percent <= 100, "Volume must be between 0 and 100 percent");
     if let Some(name) = channel {
@@ -182,18 +182,34 @@ fn volumes(output: &Output, channel: Option<&str>, percent: u8) -> Result<Vec<St
     Ok(output
         .channels
         .iter()
-        .map(|c| {
-            let value = match channel {
-                Some(name) if c.name == name => target,
-                Some(_) => c.value,
-                None if peak > 0 => {
-                    (u64::from(c.value) * u64::from(target) / u64::from(peak)) as u32
-                }
-                None => target,
-            };
-            value.to_string()
+        .map(|c| match channel {
+            Some(name) if c.name == name => target,
+            Some(_) => c.value,
+            None if peak > 0 => (u64::from(c.value) * u64::from(target) / u64::from(peak)) as u32,
+            None => target,
         })
         .collect())
+}
+fn volumes(output: &Output, channel: Option<&str>, percent: u8) -> Result<Vec<String>> {
+    Ok(volume_values(output, channel, percent)?
+        .into_iter()
+        .map(|v| v.to_string())
+        .collect())
+}
+// Immediate visual feedback uses the same channel math as the audio worker.
+pub fn preview(snapshot: &mut Snapshot, control: &Control) {
+    if let Control::Volume {
+        output,
+        channel,
+        percent,
+    } = control
+        && let Some(sink) = snapshot.outputs.iter_mut().find(|s| &s.name == output)
+        && let Ok(values) = volume_values(sink, channel.as_deref(), *percent)
+    {
+        for (c, value) in sink.channels.iter_mut().zip(values) {
+            c.value = value;
+        }
+    }
 }
 fn apply(control: Control) -> Result<()> {
     let current = read()?;

@@ -58,6 +58,8 @@ impl Row {
 pub struct Panel {
     pub volume: Option<crate::volume::Snapshot>,
     pub volume_channels: bool,
+    pub volume_drag: Option<crate::volume_ui::Drag>,
+    pub volume_pending: Option<crate::volume::Control>,
     pub popup: Popup,
     pub kind: Kind,
     pub ready: bool,
@@ -84,7 +86,8 @@ impl Panel {
     pub fn update_dismissal(&mut self, on_bar: bool) {
         self.dismissal
             .pointer_inside(on_bar || self.hover.is_some(), std::time::Instant::now());
-        let pinned = self.selected.is_some()
+        let pinned = self.volume_drag.is_some()
+            || self.selected.is_some()
             || self.busy
             || self.confirm
             || (self.kind == Kind::Launcher && !self.query.is_empty());
@@ -95,6 +98,8 @@ impl Panel {
         Self {
             volume: None,
             volume_channels: false,
+            volume_drag: None,
+            volume_pending: None,
             popup,
             kind,
             ready: false,
