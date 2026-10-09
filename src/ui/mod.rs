@@ -252,6 +252,7 @@ impl Ui {
         }
     }
     fn poll(&mut self) {
+        let mut audio_changed = false;
         while let Ok(claim) = self.services.popup_events.try_recv() {
             if claim > self.claim {
                 self.finish_close();
@@ -259,6 +260,7 @@ impl Ui {
             }
         }
         while let Ok(mut s) = self.services.statuses.try_recv() {
+            audio_changed = true;
             self.ctx.request_repaint();
             s.extras = self.state.extras.clone();
             self.state = s;
@@ -282,6 +284,7 @@ impl Ui {
             let extras = &mut self.state.extras;
             match event {
                 media::Update::Playback(tracks) => {
+                    audio_changed = true;
                     extras.track = tracks.first().cloned();
                     extras
                         .artworks
@@ -292,7 +295,10 @@ impl Ui {
                     extras.artwork = Some(art.clone());
                     extras.artworks.insert(art.url.clone(), art);
                 }
-                media::Update::Audio(sources) => extras.audio_sources = sources,
+                media::Update::Audio(sources) => {
+                    audio_changed = true;
+                    extras.audio_sources = sources;
+                }
                 media::Update::Wifi(Ok(s)) => {
                     extras.wifi_enabled = Some(s.enabled);
                     extras.wifi_name = s.networks.iter().find(|n| n.active).map(|n| n.ssid.clone());
@@ -304,7 +310,9 @@ impl Ui {
                 _ => {}
             }
         }
-        self.state.update_audio();
+        if audio_changed {
+            self.state.update_audio();
+        }
         while let Ok(event) = self.services.events.try_recv() {
             self.ctx.request_repaint();
             match event {
@@ -774,6 +782,10 @@ impl Ui {
                     .is_some_and(|(_, t)| now.duration_since(*t) >= Duration::from_millis(220))
                 {
                     self.open(kind, rect.center().x, false);
+                } else if let Some((_, since)) = &self.hover {
+                    ctx.request_repaint_after(
+                        Duration::from_millis(220).saturating_sub(now.duration_since(*since)),
+                    );
                 }
             }
         } else {
@@ -800,6 +812,9 @@ impl Ui {
         if opacity <= 0. && panel.closing.is_some() {
             self.finish_close();
             return;
+        }
+        if opacity < 1. || panel.closing.is_some() || kind == Menu::Sound {
+            ctx.request_repaint_after(Duration::from_millis(16));
         }
         let min_height = match &kind {
             Menu::Apps => {
@@ -860,6 +875,9 @@ impl Ui {
         if let Some(panel) = &mut self.panel {
             panel.dismissal.set_pinned(pinned, now);
             panel.dismissal.pointer_inside(inside, now);
+            if let Some(delay) = panel.dismissal.repaint_after(now) {
+                ctx.request_repaint_after(delay);
+            }
             if panel.dismissal.progress(now) >= 1. {
                 self.finish_close();
             } else if panel.dismissal.progress(now) > 0. {

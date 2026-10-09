@@ -55,7 +55,7 @@ elif 'list' in a:print('[]')
     fake.chmod(0o755)
     fake_capture = runtime / 'parec'
     fake_capture.write_text('''#!/usr/bin/env python3
-import math,struct,sys
+import math,struct,sys,time
 phase=0.0
 rate=24000
 args=sys.argv[1:]
@@ -67,6 +67,7 @@ while True:
   phase += 2*math.pi*frequency/rate
   if phase > 2*math.pi: phase -= 2*math.pi
  sys.stdout.buffer.write(struct.pack('<1024h',*values));sys.stdout.buffer.flush()
+ time.sleep(1024/rate)
 ''')
     fake_capture.chmod(0o755)
     env['PATH'] = str(runtime) + os.pathsep + env['PATH']
@@ -129,6 +130,14 @@ while True:
         assert battery_left is not None, 'Cannot locate battery/Wi-Fi controls'
         wifi_x=battery_left-20
         time.sleep(2)
+        def cpu_ticks(pid):
+            fields=Path(f'/proc/{pid}/stat').read_text().split()
+            return int(fields[13])+int(fields[14])
+        started=time.monotonic();previous=cpu_ticks(bar.pid)
+        time.sleep(3)
+        idle_cpu=(cpu_ticks(bar.pid)-previous)/os.sysconf('SC_CLK_TCK')/(time.monotonic()-started)*100
+        (DEST/'idle-cpu.txt').write_text(f'{idle_cpu:.2f}% CPU\n')
+        assert idle_cpu<15, f'Idle bar continually redraws: {idle_cpu:.1f}% CPU'
         # All input is scoped to HEADLESS-1 on the private Wayland socket.
         holder = probe(1260, 14, '--click-hold', 6000)
         time.sleep(1)
@@ -193,6 +202,16 @@ while True:
             for child in node.get('nodes',[])+node.get('floating_nodes',[]): result.extend(fixture_ids(child))
             return result
         identifiers=dict(fixture_ids(tree))
+        # A transparent part of the open layer must not swallow desktop clicks.
+        run(['swaymsg','[app_id="bharta-fixture" title="second window"] focus'])
+        preview=probe(120,14,'--hover',1500);time.sleep(.6)
+        preview.terminate();preview.wait()
+        desktop_click=probe(600,100);desktop_click.wait()
+        def focused_name(node):
+            if node.get('focused'):return node.get('name')
+            return next((name for child in node.get('nodes',[])+node.get('floating_nodes',[])
+                         if (name:=focused_name(child))),None)
+        assert focused_name(json.loads(run(['swaymsg','-t','get_tree']).stdout))=='Preview fixture — wide window', 'Popup intercepts input outside its visible bounds'
         if len(identifiers)==2:
             Path(env['BHARTA_TEST_ANIMATE']).touch()
             # Observe the displayed thumbnail after the opening fade has finished.

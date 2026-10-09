@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use egui::{Event, Key, Modifiers as EModifiers, PointerButton, pos2, vec2};
 use egui_software_backend::{BufferMutRef, ColorFieldOrder, EguiSoftwareRender};
 use smithay_client_toolkit::{
-    compositor::{CompositorHandler, CompositorState},
+    compositor::{CompositorHandler, CompositorState, Region},
     data_device_manager::{
         DataDeviceManagerState, WritePipe,
         data_device::{DataDevice, DataDeviceHandler},
@@ -38,7 +38,7 @@ use smithay_client_toolkit::{
 use std::{
     io::{Read, Write},
     os::{fd::OwnedFd, unix::fs::FileExt},
-    sync::mpsc,
+    sync::{Arc, Mutex, mpsc},
     time::{Duration, Instant},
 };
 use wayland_client::{
@@ -87,7 +87,10 @@ pub fn run(options: crate::Options) -> Result<()> {
         output_height: 900,
         output: None,
         scale: 1,
-        expanded: false,
+        requested_height: 28,
+        keyboard_interactive: false,
+        compositor,
+        repaint_at: Arc::new(Mutex::new(Some(Instant::now()))),
         focus: false,
         serial: 0,
         exit: false,
@@ -122,7 +125,14 @@ pub fn run(options: crate::Options) -> Result<()> {
         app.scale = info.scale_factor.max(1);
     }
     app.output = Some(output.clone());
-    let surface = compositor.create_surface(&qh);
+    let repaint_at = app.repaint_at.clone();
+    app.ui.ctx.set_request_repaint_callback(move |info| {
+        if let Some(at) = Instant::now().checked_add(info.delay) {
+            let mut next = repaint_at.lock().unwrap();
+            *next = Some(next.map_or(at, |old| old.min(at)));
+        }
+    });
+    let surface = app.compositor.create_surface(&qh);
     let layer = shell.create_layer_surface(&qh, surface, Layer::Top, Some("bharta"), Some(&output));
     layer.set_anchor(Anchor::TOP | Anchor::LEFT | Anchor::RIGHT);
     layer.set_size(0, 28);
@@ -136,10 +146,25 @@ pub fn run(options: crate::Options) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("Wayland event source: {e}"))?;
     let mut last = Instant::now();
     while !app.exit && (!options.smoke || app.start.elapsed() < Duration::from_secs(3)) {
-        event_loop.dispatch(
-            Duration::from_millis(if app.ui.panel.is_some() { 4 } else { 50 }),
-            &mut app,
-        )?;
+        let now = Instant::now();
+        let mut wait = Duration::from_millis(if app.ui.preview.is_some() { 4 } else { 50 });
+        if app.frame_ready {
+            let at = if app.dirty {
+                Some(now)
+            } else {
+                *app.repaint_at.lock().unwrap()
+            };
+            if let Some(at) = at {
+                wait = wait.min(
+                    at.max(last + Duration::from_millis(16))
+                        .saturating_duration_since(now),
+                );
+            }
+        }
+        if let Some((_, at)) = app.repeated {
+            wait = wait.min(at.saturating_duration_since(now));
+        }
+        event_loop.dispatch(wait, &mut app)?;
         app.ui.poll();
         while let Ok(text) = app.paste_rx.try_recv() {
             app.input.events.push(Event::Paste(text));
@@ -158,11 +183,14 @@ pub fn run(options: crate::Options) -> Result<()> {
         }
         if app.configured
             && app.frame_ready
+            && last.elapsed() >= Duration::from_millis(16)
             && (app.dirty
-                || app.ui.ctx.has_requested_repaint()
-                || last.elapsed() >= Duration::from_secs(1)
-                || (app.ui.panel.is_some() || app.ui.hover.is_some())
-                    && last.elapsed() >= Duration::from_millis(16))
+                || app
+                    .repaint_at
+                    .lock()
+                    .unwrap()
+                    .is_some_and(|at| Instant::now() >= at)
+                || last.elapsed() >= Duration::from_secs(1))
         {
             app.draw(&qh)?;
             last = Instant::now();
@@ -198,7 +226,10 @@ struct App {
     output_height: u32,
     output: Option<wl_output::WlOutput>,
     scale: i32,
-    expanded: bool,
+    requested_height: u32,
+    keyboard_interactive: bool,
+    compositor: CompositorState,
+    repaint_at: Arc<Mutex<Option<Instant>>>,
     focus: bool,
     serial: u32,
     exit: bool,
@@ -211,6 +242,7 @@ struct App {
 }
 impl App {
     fn draw(&mut self, qh: &QueueHandle<Self>) -> Result<()> {
+        *self.repaint_at.lock().unwrap() = None;
         let ctx = self.ui.ctx.clone();
         self.input.screen_rect = Some(egui::Rect::from_min_size(
             Default::default(),
@@ -228,6 +260,11 @@ impl App {
             self.ui
                 .frame(ctx, self.width as f32, self.output_height as f32)
         });
+        // Delayed egui requests are deadlines, not reasons to draw every frame.
+        *self.repaint_at.lock().unwrap() = out
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .and_then(|v| Instant::now().checked_add(v.repaint_delay));
         for command in &out.platform_output.commands {
             if let egui::OutputCommand::CopyText(text) = command
                 && let (Some(manager), Some(device)) = (&self.data_manager, &self.data_device)
@@ -239,18 +276,42 @@ impl App {
                 self.copy_source = Some(source);
             }
         }
-        let expanded = self.ui.panel.is_some();
         let layer = self.layer.as_ref().unwrap();
-        layer.set_keyboard_interactivity(if self.ui.keyboard() {
-            KeyboardInteractivity::Exclusive
+        let keyboard = self.ui.keyboard();
+        if self.keyboard_interactive != keyboard {
+            self.keyboard_interactive = keyboard;
+            layer.set_keyboard_interactivity(if keyboard {
+                KeyboardInteractivity::Exclusive
+            } else {
+                KeyboardInteractivity::None
+            });
+        }
+        let height = if self.ui.panel.is_some() {
+            self.ui.panel_rect.max.y.ceil().max(28.) as u32
         } else {
-            KeyboardInteractivity::None
-        });
-        if self.expanded != expanded {
-            self.expanded = expanded;
-            layer.set_size(0, if expanded { self.output_height } else { 28 });
+            28
+        }
+        .min(self.output_height);
+        if self.requested_height != height {
+            self.requested_height = height;
+            layer.set_size(0, height);
             layer.commit();
         }
+        // Transparent popup margins must pass pointer input to the desktop.
+        let region = Region::new(&self.compositor)?;
+        region.add(0, 0, self.width as i32, 28);
+        if self.ui.panel.is_some() {
+            let r = self.ui.panel_rect;
+            region.add(
+                r.min.x.floor() as i32,
+                r.min.y.floor() as i32,
+                r.width().ceil() as i32,
+                r.height().ceil() as i32,
+            );
+        }
+        layer
+            .wl_surface()
+            .set_input_region(Some(region.wl_region()));
         let scale = self.scale as u32;
         let (w, h) = (self.width * scale, self.height * scale);
         self.buffers
@@ -462,11 +523,14 @@ impl LayerShellHandler for App {
         c: LayerSurfaceConfigure,
         _: u32,
     ) {
-        self.width = c.new_size.0.max(1);
-        self.height = c.new_size.1.max(28);
-        self.configured = true;
-        self.frame_ready = true;
-        self.dirty = true;
+        let (width, height) = (c.new_size.0.max(1), c.new_size.1.max(28));
+        if !self.configured || (self.width, self.height) != (width, height) {
+            self.width = width;
+            self.height = height;
+            self.configured = true;
+            self.frame_ready = true;
+            self.dirty = true;
+        }
     }
 }
 impl OutputHandler for App {
@@ -481,12 +545,6 @@ impl OutputHandler for App {
         {
             self.output_height = h.max(28) as u32;
             self.dirty = true;
-            if self.expanded
-                && let Some(l) = &self.layer
-            {
-                l.set_size(0, self.output_height);
-                l.commit();
-            }
         }
     }
     fn output_destroyed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}

@@ -51,6 +51,16 @@ impl Dismissal {
             .unwrap_or(0.0)
             .clamp(0.0, 1.0)
     }
+    pub fn repaint_after(&self, now: Instant) -> Option<Duration> {
+        if self.pinned {
+            return None;
+        }
+        self.outside.map(|at| {
+            (at + GRACE)
+                .saturating_duration_since(now)
+                .max(Duration::from_millis(16))
+        })
+    }
 }
 #[cfg(test)]
 mod tests {
