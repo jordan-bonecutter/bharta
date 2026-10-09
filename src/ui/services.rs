@@ -20,7 +20,7 @@ pub struct Services {
     pub media_events: mpsc::Receiver<media::Update>,
     pub volume: mpsc::Sender<volume::Request>,
     pub volume_events: mpsc::Receiver<volume::Update>,
-    pub preview: mpsc::Sender<Option<String>>,
+    pub preview: mpsc::Sender<Option<(String, f32)>>,
     pub preview_events: mpsc::Receiver<workspace_preview::Snapshot>,
     pub events: mpsc::Receiver<Event>,
     events_tx: mpsc::Sender<Event>,
@@ -60,7 +60,7 @@ impl Services {
         let media = media::watch(tx);
         let (tx, volume_events) = mpsc::channel();
         let volume = volume::watch(tx);
-        let (tx, preview_events) = mpsc::channel();
+        let (tx, preview_events) = mpsc::sync_channel(1);
         let preview = workspace_preview::watch(tx);
         let (events_tx, events) = mpsc::channel();
         Self {

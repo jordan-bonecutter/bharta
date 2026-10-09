@@ -2,13 +2,13 @@
 
 ## Build portability
 
-`./build.sh` is the fresh-clone build entry point. It reports native prerequisites,
-installs them together on supported distro families, provisions a recent Rust
-compiler when needed, and builds missing GTK4 layer-shell privately from a pinned,
-checksum-verified source release. Do not add undocumented native dependencies.
-Preserve GTK4 4.6 compatibility and Rust 1.92 minimum unless an actual feature
-requires a deliberate baseline change. The clean-image CI builds Ubuntu 22.04,
-Ubuntu 24.04, and Fedora. Validate build-helper changes in disposable containers;
+`./build.sh` is the fresh-clone build entry point. It produces a single static
+musl executable at `dist/bharta`, provisions Rust 1.92 and a pinned private Zig
+compiler when needed, and never installs system packages. Do not add system
+native library, header, compiler, or pkg-config requirements. Preserve Rust 1.92
+minimum unless an actual feature requires a deliberate baseline change.
+The clean-image CI builds Ubuntu 22.04, Ubuntu 24.04, and Fedora with only basic
+bootstrap tools. Validate build-helper changes in disposable containers;
 never install test dependencies into the user's desktop just to simulate a distro.
 
 ## UI testing
@@ -24,7 +24,8 @@ python3 tests/headless_ui.py /tmp/bharta-headless
 The harness creates a private Wayland compositor and D-Bus session, simulates
 audio, and saves screenshots and logs. It requires Sway, grim, dbus-daemon, and
 Python with Pillow. Run it with socket permissions if the sandbox blocks local
-IPC. Inspect the screenshots as well as the assertions.
+IPC. Inspect the screenshots as well as the assertions. To test the distributed
+executable, set `BHARTA_BINARY="$PWD/dist/bharta"` when running the harness.
 
 Do not run `ui_probe`, virtual input, clicks, drags, or keyboard injection on the
 user's real desktop. The user explicitly finds mouse takeover disruptive. Keep
@@ -39,7 +40,7 @@ changes. Socket-based unit tests need local IPC access.
 
 Preserve the original compact, macOS-inspired bar: 28px height, centered app
 name, understated neutral palette, small monochrome icons, and flat menu rows.
-GTK is the widget/interaction framework, not a request for GNOME/Adwaita styling.
+egui supplies widgets and interaction; preserve the existing visual style.
 Avoid orange accents, large pill buttons, bulky headings, and instructional text
 on obvious controls. Prefer borderless popups; avoid nested frames. Native slider
 dragging must work continuously. Preserve the speaker control position across

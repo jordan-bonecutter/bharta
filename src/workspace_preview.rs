@@ -2,7 +2,7 @@ use crate::{capture::Capture, status};
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::{
-    sync::mpsc,
+    sync::{Arc, mpsc},
     time::{Duration, Instant},
 };
 use tiny_skia::Pixmap;
@@ -24,12 +24,14 @@ impl Geometry {
         }
     }
 }
+#[derive(Clone)]
 pub struct Window {
     id: Option<String>,
     pub title: String,
     pub rect: Geometry,
-    pub pixels: Option<Pixmap>,
+    pub pixels: Option<Arc<Pixmap>>,
 }
+#[derive(Clone)]
 pub struct Snapshot {
     pub name: String,
     pub rect: Geometry,
@@ -107,33 +109,50 @@ fn snapshot(name: &str) -> Result<Snapshot> {
         message: String::new(),
     })
 }
-pub fn watch(sender: mpsc::Sender<Snapshot>) -> mpsc::Sender<Option<String>> {
-    let (tx, rx) = mpsc::channel::<Option<String>>();
+pub fn watch(sender: mpsc::SyncSender<Snapshot>) -> mpsc::Sender<Option<(String, f32)>> {
+    let (tx, rx) = mpsc::channel::<Option<(String, f32)>>();
     std::thread::spawn(move || {
         let mut capture = None;
         let mut target = None;
-        let mut retry_capture = Instant::now();
+        let mut layout: Option<Snapshot> = None;
+        let mut pixels = std::collections::HashMap::new();
+        let mut refresh = Instant::now();
+        let mut retry = Instant::now();
         loop {
             let request = if target.is_some() {
-                rx.recv_timeout(Duration::from_millis(200))
+                rx.recv_timeout(Duration::from_millis(4))
             } else {
                 rx.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected)
             };
+            let mut changed = false;
             match request {
-                Ok(value) => target = value,
+                Ok(value) => {
+                    changed = target != value;
+                    target = value;
+                }
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
             }
             while let Ok(value) = rx.try_recv() {
+                changed |= target != value;
                 target = value;
             }
-            let Some(name) = target.clone() else {
+            let Some((name, scale)) = &target else {
                 capture = None;
+                layout = None;
+                pixels.clear();
                 continue;
             };
-            let mut shot = match snapshot(&name) {
-                Ok(s) => s,
-                Err(_) => Snapshot {
+            if changed {
+                capture = None;
+                layout = None;
+                pixels.clear();
+                refresh = Instant::now();
+                retry = Instant::now();
+            }
+            let layout_changed = layout.is_none() || Instant::now() >= refresh;
+            if layout_changed {
+                layout = Some(snapshot(name).unwrap_or_else(|_| Snapshot {
                     name: name.clone(),
                     rect: Geometry {
                         x: 0.,
@@ -143,47 +162,70 @@ pub fn watch(sender: mpsc::Sender<Snapshot>) -> mpsc::Sender<Option<String>> {
                     },
                     windows: vec![],
                     message: "Workspace unavailable".into(),
-                },
-            };
-            let capturable = shot.windows.iter().any(|w| w.id.is_some());
-            if !shot.windows.is_empty() && !capturable {
-                shot.message = "Window layout · live capture needs Sway 1.12+".into();
+                }));
+                refresh = Instant::now() + Duration::from_millis(500);
             }
-            if capture.is_none() && capturable && Instant::now() >= retry_capture {
+            let shot = layout.as_mut().unwrap();
+            let factor = preview_scale(shot.rect) * scale.max(1.);
+            let targets: Vec<_> = shot
+                .windows
+                .iter()
+                .filter_map(|w| {
+                    Some((
+                        w.id.clone()?,
+                        (w.rect.w * factor).round().max(1.) as u32,
+                        (w.rect.h * factor).round().max(1.) as u32,
+                    ))
+                })
+                .collect();
+            pixels.retain(|id, _| targets.iter().any(|(name, _, _)| name == id));
+            if capture.is_none() && !targets.is_empty() && Instant::now() >= retry {
                 match Capture::new() {
                     Ok(c) => capture = Some(c),
-                    Err(error) => {
-                        eprintln!("Workspace capture unavailable: {error:#}");
-                        retry_capture = Instant::now() + Duration::from_secs(5);
+                    Err(e) => {
+                        eprintln!("Workspace capture unavailable: {e:#}");
+                        retry = Instant::now() + Duration::from_secs(5);
                     }
                 }
             }
-            if capturable && capture.is_none() {
-                shot.message = "Window layout · live capture unavailable".into();
-            }
-            let mut cancelled = false;
+            let mut new_frame = false;
             if let Some(c) = &mut capture {
-                for window in &mut shot.windows {
-                    if let Ok(value) = rx.try_recv() {
-                        target = value;
-                        cancelled = true;
-                        break;
+                match c.poll(&targets) {
+                    Ok(frames) => {
+                        for (id, frame) in frames {
+                            pixels.insert(id, Arc::new(frame));
+                            new_frame = true;
+                        }
                     }
-                    window.pixels = window.id.as_deref().and_then(|id| c.window(id).ok());
+                    Err(e) => {
+                        eprintln!("Workspace capture failed: {e:#}");
+                        capture = None;
+                        retry = Instant::now() + Duration::from_secs(1);
+                    }
                 }
             }
-            if cancelled {
-                continue;
-            }
-            if shot.windows.iter().any(|w| w.pixels.is_none()) && shot.message.is_empty() {
-                shot.message = "Window layout · some captures unavailable".into();
-            }
-            if sender.send(shot).is_err() {
-                break;
+            if new_frame || layout_changed {
+                shot.message = if !shot.windows.is_empty() && targets.is_empty() {
+                    "Window layout · live capture needs Sway 1.12+".into()
+                } else if !targets.is_empty() && capture.is_none() {
+                    "Window layout · live capture unavailable".into()
+                } else {
+                    String::new()
+                };
+                for w in &mut shot.windows {
+                    w.pixels = w.id.as_ref().and_then(|id| pixels.get(id).cloned());
+                }
+                // One pending snapshot bounds memory and provides backpressure.
+                if sender.send(shot.clone()).is_err() {
+                    break;
+                }
             }
         }
     });
     tx
+}
+pub fn preview_scale(rect: Geometry) -> f32 {
+    (312. / rect.w.max(1.)).min(220. / rect.h.max(1.))
 }
 #[cfg(test)]
 mod tests {
@@ -229,5 +271,17 @@ mod tests {
         collect(&tree, &mut windows);
         assert_eq!(windows.len(), 1);
         assert_eq!(windows[0].id.as_deref(), Some("b"));
+    }
+}
+
+#[cfg(test)]
+mod bounds_tests {
+    use super::*;
+    #[test]
+    fn previews_are_bounded_independently_of_capture_size() {
+        for (w, h) in [(7680., 2160.), (3840., 2160.), (1080., 1920.)] {
+            let factor = preview_scale(Geometry { x: 0., y: 0., w, h });
+            assert!(w * factor <= 312.001 && h * factor <= 220.001);
+        }
     }
 }

@@ -2,3 +2,5 @@
 /preview*.png
 
 /.build/
+
+/dist/

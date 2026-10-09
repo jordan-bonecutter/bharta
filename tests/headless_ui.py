@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Isolated GTK/Sway UI harness. Never connects input to the desktop session.
+"""Isolated egui/Sway UI harness. Never connects input to the desktop session.
 Build first: cargo build --release --examples && cargo build --release
 Run: python3 tests/headless_ui.py /tmp/bharta-headless
 Requires sway, grim, dbus-daemon, and Python 3. Screenshots/logs go to the argument.
@@ -15,6 +15,7 @@ import time
 from PIL import Image, ImageChops
 
 ROOT = Path(__file__).resolve().parents[1]
+BAR = Path(os.environ.get("BHARTA_BINARY", ROOT / "target/release/bharta"))
 DEST = Path(sys.argv[1] if len(sys.argv) > 1 else '/tmp/bharta-headless').resolve()
 DEST.mkdir(parents=True, exist_ok=True)
 processes = []
@@ -24,7 +25,7 @@ with tempfile.TemporaryDirectory(prefix='bharta-headless-') as directory:
     env = os.environ.copy()
     for key in ['SWAYSOCK', 'WAYLAND_DISPLAY', 'DISPLAY', 'DBUS_SESSION_BUS_ADDRESS']:
         env.pop(key, None)
-    env.update(XDG_RUNTIME_DIR=str(runtime), WLR_BACKENDS='headless', GTK_A11Y='none', GTK_IM_MODULE='simple', GDK_BACKEND='wayland', GSK_RENDERER='cairo', BHARTA_HEADLESS='1',
+    env.update(XDG_RUNTIME_DIR=str(runtime), WLR_BACKENDS='headless', BHARTA_HEADLESS='1',
                WLR_RENDERER='pixman', WLR_HEADLESS_OUTPUTS='1',
                DBUS_SYSTEM_BUS_ADDRESS='unix:path=' + str(runtime / 'no-system-bus'),
                PULSE_SERVER='unix:' + str(runtime / 'no-audio-server'))
@@ -71,6 +72,7 @@ while True:
     env['PATH'] = str(runtime) + os.pathsep + env['PATH']
     env['BHARTA_TEST_AUDIO'] = str(state)
     env['BHARTA_TEST_WINDOW_PID'] = str(runtime / 'fixture.pid')
+    env['BHARTA_TEST_ANIMATE'] = str(runtime / 'animate')
     for app, color in [('FIREFOX', (220, 105, 40)), ('SPOTIFY', (40, 180, 90))]:
         art = runtime / (app.lower() + '.png')
         Image.new('RGB', (32, 32), color).save(art)
@@ -110,15 +112,22 @@ while True:
         # Seed a keyboard before mapping layer surfaces: a headless seat has no
         # physical keyboard to receive the initial Wayland focus event.
         keyboard=probe(600,600,'--keyboard-hold',120000);time.sleep(.8)
-        bar = start([str(ROOT / 'target/release/bharta'), '--dark', '--output', 'HEADLESS-1'], 'bar.log')
+        bar = start([str(BAR), '--dark', '--output', 'HEADLESS-1'], 'bar.log')
         for _ in range(100):
-            assert bar.poll() is None, 'GTK bar exited before mapping'
+            assert bar.poll() is None, 'egui bar exited before mapping'
             shot('bar')
             if Image.open(DEST / 'bar.png').getpixel((800,10))[:3] != (0,0,0):
                 break
             time.sleep(.2)
         else:
-            raise AssertionError('GTK bar did not map; see bar.log')
+            raise AssertionError('egui bar did not map; see bar.log')
+        # The installed font changes the clock width. Locate the battery's
+        # fixed-width outline, then use the adjacent Wi-Fi slot.
+        bar_pixels=Image.open(DEST/'bar.png').convert('RGB')
+        battery_left=next((x for x in range(1000,1500)
+            if all(min(bar_pixels.getpixel((dx,9)))>100 for dx in range(x,x+16))),None)
+        assert battery_left is not None, 'Cannot locate battery/Wi-Fi controls'
+        wifi_x=battery_left-20
         time.sleep(2)
         # All input is scoped to HEADLESS-1 on the private Wayland socket.
         holder = probe(1260, 14, '--click-hold', 6000)
@@ -131,7 +140,7 @@ while True:
         # Find the native scale's long, bright filled trough, independent of
         # typography and spacing tweaks.
         runs=[]
-        for y in range(65,500):
+        for y in range(75,110):
             begin=None
             for x in range(1100,1550):
                 bright=min(pixels.getpixel((x,y)))>150
@@ -175,7 +184,34 @@ while True:
         image=Image.open(DEST / 'workspace.png').convert('RGB')
         baseline=Image.open(DEST / 'fixture.png').convert('RGB')
         bounds=ImageChops.difference(image,baseline).crop((0,28,1600,900)).getbbox()
-        assert bounds and bounds[2]-bounds[0]<=380 and bounds[3]-bounds[1]<=300, f'Preview is oversized: {bounds}'
+        assert bounds and bounds[2]-bounds[0]<=380 and 150<=bounds[3]-bounds[1]<=300, f'Preview is clipped or oversized: {bounds}'
+        tree=json.loads(run(['swaymsg','-t','get_tree']).stdout)
+        def fixture_ids(node):
+            result=[]
+            if node.get('app_id')=='bharta-fixture' and node.get('foreign_toplevel_identifier'):
+                result.append((node.get('name',''),node['foreign_toplevel_identifier']))
+            for child in node.get('nodes',[])+node.get('floating_nodes',[]): result.extend(fixture_ids(child))
+            return result
+        identifiers=dict(fixture_ids(tree))
+        if len(identifiers)==2:
+            Path(env['BHARTA_TEST_ANIMATE']).touch()
+            # Observe the displayed thumbnail after the opening fade has finished.
+            # Capture throughput alone cannot catch a stale rasterized texture.
+            live=probe(120,14,'--hover',8000)
+            time.sleep(.8)
+            animated=[];static=[]
+            for frame in range(6):
+                shot(f'preview-live-{frame}')
+                displayed=Image.open(DEST/f'preview-live-{frame}.png').convert('RGB')
+                animated.append(displayed.crop((25,75,155,200)).tobytes())
+                static.append(displayed.crop((195,75,325,200)).tobytes())
+                time.sleep(.12)
+            assert len(set(animated))>=4, 'Displayed preview freezes when the opening fade finishes'
+            assert len(set(static))==1, 'Static source thumbnail changes without source damage'
+            live.wait()
+            leave=probe(600,600,'--hover',900);leave.wait()
+            performance=run([str(ROOT/'target/release/examples/capture_perf'),identifiers['Preview fixture — wide window'],identifiers['Preview fixture — second window']])
+            (DEST/'preview-performance.log').write_text(performance.stdout)
         fixture.terminate();fixture.wait();Path(env['BHARTA_TEST_WINDOW_PID']).unlink(missing_ok=True);time.sleep(1.2)
         outside=probe(600,600,'--hover',2600);outside.wait()
         player=subprocess.Popen([str(ROOT / 'target/release/examples/headless_player')],cwd=ROOT,env=env,stdin=subprocess.PIPE,stdout=open(DEST / 'player.log','w'),stderr=subprocess.STDOUT,start_new_session=True)
@@ -244,8 +280,8 @@ while True:
         click=probe(600,600,'--click-hold',600);time.sleep(.23);shot('click-fade');click.wait();time.sleep(.3);shot('click-dismissed')
         assert Image.open(DEST / 'click-dismissed.png').crop((0,28,1600,600)).getbbox() is None, 'Outside click failed to dismiss'
         music.wait()
-        wifi=probe(1298,14,'--hover',2000);time.sleep(.8);shot('wifi-hover');wifi.wait()
-        assert Image.open(DEST / 'wifi-hover.png').convert('RGB').getpixel((1250,50)) != (0,0,0), 'Wi-Fi hover failed'
+        wifi=probe(wifi_x,14,'--hover',2000);time.sleep(.8);shot('wifi-hover');wifi.wait()
+        assert Image.open(DEST / 'wifi-hover.png').convert('RGB').getpixel((wifi_x-60,50)) != (0,0,0), 'Wi-Fi hover failed'
         session=probe(28,14,'--hover',1600);time.sleep(.8);shot('session-hover');session.wait()
         switched=Image.open(DEST / 'session-hover.png').convert('RGB')
         assert switched.getpixel((50,55)) != (0,0,0), 'Session hover failed'
@@ -264,8 +300,8 @@ while True:
         # Promote the hovered menu to clicked, then toggle it closed. Remaining
         # over the same button must not immediately reopen it.
         background=switched.getpixel((1250,80))
-        promote=probe(1260,14,'--click-hold',1000)
-        deadline=time.monotonic()+.8
+        promote=probe(1260,14,'--click-hold',2500)
+        deadline=time.monotonic()+2.0
         frame=0
         while time.monotonic()<deadline:
             name=f'click-stable-{frame}'
@@ -284,10 +320,10 @@ while True:
         # A second real bar on another private output must dismiss the first.
         run(['swaymsg','create_output'])
         run(['swaymsg','output HEADLESS-2 mode 1600x900 pos 1600 0'])
-        second=start([str(ROOT / 'target/release/bharta'),'--dark','--output','HEADLESS-2'],'second-bar.log');time.sleep(2)
+        second=start([str(BAR),'--dark','--output','HEADLESS-2'],'second-bar.log');time.sleep(2)
         first=probe(72,14,'--click-hold',2000);time.sleep(.8)
         # Pin an actual search so pointer leave alone cannot explain dismissal.
-        typed=probe(100,82,30);typed.wait();first.wait()
+        typed=probe(72,14,'--keys-only',30);typed.wait();first.wait()
         shot('pinned-search')
         assert Image.open(DEST / 'pinned-search.png').convert('RGB').getpixel((50,100)) != (0,0,0), 'Pinned search missing'
         other=probe(1260,14,'--hover',2500,output='HEADLESS-2');time.sleep(1)
@@ -297,8 +333,10 @@ while True:
         assert Image.open(DEST / 'single-popup.png').convert('RGB').crop((0,28,1600,900)).getbbox() is None, 'Other output left a popup open'
         assert Image.open(DEST / 'single-popup.png').convert('RGB').getpixel((110,8)) == Image.open(DEST / 'bar.png').convert('RGB').getpixel((110,8)), 'Workspace highlight changed when focus moved to the other output'
         other.wait()
+        for log in ('bar.log','second-bar.log'):
+            assert 'Keyboard map:' not in (DEST/log).read_text(), f'Keyboard map failed on {log}'
         assert second.poll() is None, 'Second bar exited'
-        assert bar.poll() is None, 'GTK bar exited' 
+        assert bar.poll() is None, 'egui bar exited'
         print('Headless screenshots and logs:', DEST)
     finally:
         for p in reversed(processes):

@@ -2,7 +2,7 @@ use crate::network::{Backend, Network, Snapshot};
 use anyhow::{Context, Result, bail};
 use zbus::{
     blocking::{Connection, Proxy, fdo::ObjectManagerProxy},
-    zvariant::{ObjectPath, OwnedObjectPath},
+    zvariant::{ObjectPath, OwnedObjectPath, OwnedValue},
 };
 const SERVICE: &str = "net.connman.iwd";
 fn proxy<'a>(
@@ -56,11 +56,23 @@ pub fn scan(rescan: bool) -> Result<Snapshot> {
         let current = station
             .get_property::<OwnedObjectPath>("ConnectedNetwork")
             .ok();
-        let mut networks: Vec<(OwnedObjectPath, i16)> = station.call("GetOrderedNetworks", &())?;
+        let ordered: Vec<(OwnedObjectPath, i16)> = station.call("GetOrderedNetworks", &())?;
+        let mut networks: Vec<_> = ordered
+            .into_iter()
+            .map(|(path, rssi)| (path, Some(rssi)))
+            .collect();
+        // Scan RSSI is cached; diagnostics supplies the current connected BSS in dBm.
+        let live_rssi = proxy(&c, path.as_str(), "net.connman.iwd.StationDiagnostic")
+            .ok()
+            .and_then(|p| {
+                p.call::<_, _, std::collections::HashMap<String, OwnedValue>>("GetDiagnostics", &())
+                    .ok()
+            })
+            .and_then(|d| diagnostic_rssi(&d));
         if let Some(current) = &current
             && !networks.iter().any(|(p, _)| p == current)
         {
-            networks.insert(0, (current.clone(), -7000));
+            networks.insert(0, (current.clone(), None));
         }
         for (network_path, strength) in networks {
             let n = proxy(&c, network_path.as_str(), "net.connman.iwd.Network")?;
@@ -70,7 +82,18 @@ pub fn scan(rescan: bool) -> Result<Snapshot> {
                 ssid: n.get_property("Name")?,
                 bssid: network_path.to_string(),
                 device: path.to_string(),
-                signal: signal_percent(strength),
+                signal: if current.as_ref() == Some(&network_path) {
+                    live_rssi
+                        .map(|rssi| signal_percent(rssi * 100))
+                        .or_else(|| strength.map(signal_percent))
+                } else {
+                    strength.map(signal_percent)
+                },
+                rssi_dbm: if current.as_ref() == Some(&network_path) {
+                    live_rssi.or_else(|| strength.map(|s| s / 100))
+                } else {
+                    strength.map(|s| s / 100)
+                },
                 security: match security.as_str() {
                     "open" => "--",
                     "psk" => "WPA",
@@ -89,7 +112,17 @@ pub fn scan(rescan: bool) -> Result<Snapshot> {
     Ok(snapshot)
 }
 fn signal_percent(rssi: i16) -> u8 {
-    ((i32::from(rssi) / 100 + 100) * 2).clamp(0, 100) as u8
+    // Match NetworkManager's RSSI quality scale: -100 dBm = 0%, -40 dBm = 100%.
+    // Keep iwd's hundredths of a dBm until the final conversion.
+    (100 - ((-4000 - i32::from(rssi).clamp(-10000, -4000)) * 100 / 6000)) as u8
+}
+fn diagnostic_rssi(values: &std::collections::HashMap<String, OwnedValue>) -> Option<i16> {
+    ["AverageRSSI", "RSSI"].iter().find_map(|key| {
+        values
+            .get(*key)
+            .and_then(|v| i16::try_from(v).ok())
+            .filter(|rssi| (-120..0).contains(rssi))
+    })
 }
 pub fn radio(enabled: bool) -> Result<Snapshot> {
     let c = Connection::system()?;
@@ -177,9 +210,21 @@ pub fn connect(network: &Network, password: String) -> Result<Snapshot> {
 mod tests {
     use super::*;
     #[test]
+    fn connected_diagnostics_uses_dbm_and_prefers_average() {
+        let values = std::collections::HashMap::from([
+            ("AverageRSSI".into(), OwnedValue::from(-66i16)),
+            ("RSSI".into(), OwnedValue::from(-49i16)),
+        ]);
+        assert_eq!(diagnostic_rssi(&values), Some(-66));
+        assert_eq!(signal_percent(diagnostic_rssi(&values).unwrap() * 100), 57);
+        assert_eq!(diagnostic_rssi(&std::collections::HashMap::new()), None);
+    }
+    #[test]
     fn signal_is_clamped() {
         assert_eq!(signal_percent(-10000), 0);
-        assert_eq!(signal_percent(-7500), 50);
+        assert_eq!(signal_percent(-7500), 42);
+        assert_eq!(signal_percent(-6600), 57);
+        assert_eq!(signal_percent(-4900), 85);
         assert_eq!(signal_percent(-4000), 100);
     }
 }

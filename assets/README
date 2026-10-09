@@ -1,0 +1,3 @@
+Compose contains the UTF-8 compose rules from X.Org libX11 1.8.13
+(nls/en_US.UTF-8/Compose.pre), with comments removed. See Compose.LICENSE.
+They provide a built-in fallback when the user's compose data is unavailable.

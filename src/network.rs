@@ -16,7 +16,8 @@ pub struct Network {
     pub ssid: String,
     pub bssid: String,
     pub device: String,
-    pub signal: u8,
+    pub signal: Option<u8>,
+    pub rssi_dbm: Option<i16>,
     pub security: String,
     pub active: bool,
 }
@@ -73,7 +74,8 @@ fn parse(text: &str) -> Vec<Network> {
                 active: f[0] == "*",
                 bssid: f[1].clone(),
                 ssid: f[2].clone(),
-                signal: f[3].parse().unwrap_or(0),
+                signal: f[3].parse::<u8>().ok().filter(|s| *s <= 100),
+                rssi_dbm: None,
                 security: f[4].clone(),
                 device: f[6].clone(),
             })

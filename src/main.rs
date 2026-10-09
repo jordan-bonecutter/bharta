@@ -1,14 +1,14 @@
 mod artwork;
 mod audio_meter;
 mod capture;
-mod gtk_ui;
 mod icons;
 mod iwd;
 mod launcher;
 mod media;
 mod network;
 mod popup_motion;
-// The small headless PNG exporter is independent of the live GTK interface.
+mod ui;
+// The small headless PNG exporter is independent of the live egui interface.
 #[allow(dead_code)]
 mod render;
 mod status;
@@ -110,5 +110,5 @@ fn main() -> Result<()> {
     if !options.smoke && (options.all_outputs || options.output.is_none()) {
         return supervisor::run(&options);
     }
-    gtk_ui::run(options)
+    ui::run(options)
 }

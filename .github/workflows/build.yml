@@ -12,11 +12,33 @@ jobs:
     container: ${{ matrix.container }}
     steps:
       - uses: actions/checkout@v4
-      - name: Build from a bare distro image
-        shell: bash
-        run: ./build.sh
-      - name: Verify bundled library resolution and executable startup
+      - name: Install bootstrap tools only
         shell: bash
         run: |
-          if ldd target/release/bharta | grep 'not found'; then exit 1; fi
-          target/release/bharta --help
+          if command -v apt-get >/dev/null; then
+            apt-get update
+            apt-get install -y --no-install-recommends curl ca-certificates xz-utils
+          else
+            dnf install -y curl-minimal ca-certificates tar xz
+          fi
+          test ! -e /usr/include/stdio.h
+          test ! -e /usr/bin/pkg-config
+      - name: Build static executable
+        shell: bash
+        run: ./build.sh
+      - name: Verify static linkage and startup
+        shell: bash
+        run: |
+          if command -v apt-get >/dev/null; then
+            apt-get install -y --no-install-recommends binutils
+          else
+            dnf install -y binutils
+          fi
+          if readelf -l dist/bharta | grep -q INTERP; then exit 1; fi
+          if readelf -d dist/bharta | grep -q NEEDED; then exit 1; fi
+          dist/bharta --help
+          tar -C dist -czf dist/bharta-x86_64.tar.gz bharta
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bharta-${{ matrix.container == 'fedora:43' && 'fedora' || matrix.container == 'ubuntu:22.04' && 'ubuntu-22.04' || 'ubuntu-24.04' }}
+          path: dist/bharta-x86_64.tar.gz

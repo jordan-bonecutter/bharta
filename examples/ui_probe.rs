@@ -159,17 +159,7 @@ fn main() -> anyhow::Result<()> {
         ));
     } else if a.len() > 5 && !dragging {
         std::thread::sleep(Duration::from_millis(500));
-        let km = xkbcommon::xkb::Keymap::new_from_names(
-            &xkbcommon::xkb::Context::new(0),
-            "",
-            "",
-            "us",
-            "",
-            None,
-            0,
-        )
-        .unwrap();
-        let text = km.get_as_string(xkbcommon::xkb::KEYMAP_FORMAT_TEXT_V1) + "\0";
+        let text = concat!(include_str!("../tests/fixtures/us.xkb"), "\0");
         let mut file = tempfile::tempfile()?;
         file.write_all(text.as_bytes())?;
         let manager: ZwpVirtualKeyboardManagerV1 = g.bind(&h, 1..=1, ())?;
