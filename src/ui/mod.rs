@@ -46,6 +46,7 @@ struct Ui {
     cpu_history: VecDeque<f32>,
     network: Option<network::Snapshot>,
     bluetooth: Option<bluetooth::Snapshot>,
+    bluetooth_pin: String,
     apps: Vec<launcher::Entry>,
     panel: Option<Panel>,
     preview: Option<workspace_preview::Snapshot>,
@@ -139,6 +140,7 @@ impl Ui {
             cpu_history: VecDeque::with_capacity(32),
             network: None,
             bluetooth: None,
+            bluetooth_pin: String::new(),
             apps: vec![],
             panel: None,
             preview: None,
@@ -397,6 +399,17 @@ impl Ui {
             {
                 match result {
                     Ok(s) => {
+                        if self.bluetooth.as_ref().and_then(|old| old.prompt.as_ref())
+                            != s.prompt.as_ref()
+                            && matches!(
+                                s.prompt,
+                                Some(bluetooth::Prompt::Pin | bluetooth::Prompt::Passkey)
+                            )
+                        {
+                            self.bluetooth_pin.clear();
+                            self.ctx
+                                .memory_mut(|m| m.request_focus(egui::Id::new("bluetooth-pin")));
+                        }
                         self.bluetooth = Some(s);
                         self.error.clear();
                     }
@@ -1150,10 +1163,10 @@ impl Ui {
                     .count();
                     (2 + groups
                         + s.devices.len()
-                        + s.receivers.len()
-                        + usize::from(!s.receivers.is_empty())
-                        + usize::from(!s.bluez)
-                        + usize::from(s.scanning)) as f32
+                        + usize::from(s.scanning)
+                        + 3 * usize::from(s.prompt.is_some())
+                        + 2 * usize::from(s.action_error.is_some())
+                        + usize::from(s.busy.is_some())) as f32
                         * row
                 })
             }
@@ -1273,33 +1286,6 @@ impl Ui {
                     || p.clicked)
         })
     }
-}
-
-fn wireless_row(ui: &mut egui::Ui, name: &str, detail: &str, tooltip: &str) {
-    let (rect, response) = ui.allocate_exact_size(
-        vec2(
-            ui.available_width(),
-            config::get().number("layout.control_height"),
-        ),
-        egui::Sense::hover(),
-    );
-    response.on_hover_text(tooltip);
-    ui.scope_builder(
-        egui::UiBuilder::new().max_rect(Rect::from_min_max(
-            rect.min + vec2(4., 3.),
-            rect.max - vec2(90., 0.),
-        )),
-        |ui| {
-            ui.add(egui::Label::new(name).truncate());
-        },
-    );
-    ui.painter().text(
-        pos2(rect.right() - 4., rect.center().y),
-        egui::Align2::RIGHT_CENTER,
-        detail,
-        egui::FontId::proportional(config::get().number("appearance.font_size")),
-        ui.visuals().weak_text_color(),
-    );
 }
 
 fn flat(ui: &mut egui::Ui, text: impl Into<egui::WidgetText>) -> egui::Response {
@@ -1525,7 +1511,9 @@ impl Ui {
             let scanning = snapshot.as_ref().is_some_and(|s| s.scanning);
             if ui
                 .add_enabled(
-                    snapshot.as_ref().is_some_and(|s| s.enabled()),
+                    snapshot
+                        .as_ref()
+                        .is_some_and(|s| s.enabled() && s.busy.is_none()),
                     egui::Button::new(if scanning { "Stop scan" } else { "Scan" }).frame(false),
                 )
                 .clicked()
@@ -1543,18 +1531,80 @@ impl Ui {
             }
             return;
         };
-        for (title, group) in [
-            (
-                if s.bluez {
-                    "Connected"
-                } else {
-                    "Bluetooth inputs"
-                },
-                0,
-            ),
-            ("Saved devices", 1),
-            ("Other devices", 2),
-        ] {
+        if s.adapters.is_empty() {
+            ui.weak("No Bluetooth adapter");
+            return;
+        }
+        if !s.enabled() {
+            ui.weak("Bluetooth is off");
+            return;
+        }
+        if let Some(prompt) = &s.prompt {
+            match prompt {
+                bluetooth::Prompt::Confirm(message) => {
+                    ui.label(message);
+                    ui.horizontal(|ui| {
+                        if ui.add(egui::Button::new("Confirm").frame(false)).clicked() {
+                            let _ = self
+                                .services
+                                .bluetooth
+                                .send(bluetooth::Request::Answer(Some(String::new())));
+                        }
+                        if ui.add(egui::Button::new("Cancel").frame(false)).clicked() {
+                            let _ = self.services.bluetooth.send(bluetooth::Request::Cancel);
+                        }
+                    });
+                }
+                bluetooth::Prompt::Pin | bluetooth::Prompt::Passkey => {
+                    ui.label("Enter the device’s pairing code");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.bluetooth_pin)
+                            .id(egui::Id::new("bluetooth-pin"))
+                            .desired_width(ui.available_width()),
+                    );
+                    ui.horizontal(|ui| {
+                        if ui.add(egui::Button::new("Pair").frame(false)).clicked() {
+                            let _ = self
+                                .services
+                                .bluetooth
+                                .send(bluetooth::Request::Answer(Some(std::mem::take(
+                                    &mut self.bluetooth_pin,
+                                ))));
+                        }
+                        if ui.add(egui::Button::new("Cancel").frame(false)).clicked() {
+                            let _ = self.services.bluetooth.send(bluetooth::Request::Cancel);
+                        }
+                    });
+                }
+                bluetooth::Prompt::Display(message) => {
+                    ui.label(message);
+                }
+            }
+        }
+        if let Some(path) = &s.busy {
+            ui.horizontal(|ui| {
+                let name = s
+                    .devices
+                    .iter()
+                    .find(|d| &d.path == path)
+                    .map(|d| d.name.as_str())
+                    .unwrap_or("device");
+                ui.add_sized(
+                    vec2(
+                        (ui.available_width() - 65.).max(1.),
+                        config::get().number("layout.control_height"),
+                    ),
+                    egui::Label::new(format!("Connecting {name}…")).truncate(),
+                );
+                if ui.add(egui::Button::new("Cancel").frame(false)).clicked() {
+                    let _ = self.services.bluetooth.send(bluetooth::Request::Cancel);
+                }
+            });
+        }
+        if let Some(error) = &s.action_error {
+            ui.label(error);
+        }
+        for (title, group) in [("Connected", 0), ("Saved devices", 1), ("Other devices", 2)] {
             let devices: Vec<_> = s
                 .devices
                 .iter()
@@ -1573,43 +1623,70 @@ impl Ui {
             }
             ui.weak(title);
             for device in devices {
-                let detail = if !s.bluez {
-                    "Present".into()
+                let (rect, response) = ui.allocate_exact_size(
+                    vec2(
+                        ui.available_width(),
+                        config::get().number("layout.control_height"),
+                    ),
+                    egui::Sense::hover(),
+                );
+                response.on_hover_text(format!("{}\n{}", device.name, device.address));
+                ui.scope_builder(
+                    egui::UiBuilder::new().max_rect(Rect::from_min_max(
+                        rect.min + vec2(4., 3.),
+                        rect.max - vec2(170., 0.),
+                    )),
+                    |ui| {
+                        ui.add(egui::Label::new(&device.name).truncate());
+                    },
+                );
+                let detail = if let Some(battery) = device.battery {
+                    format!("{battery}%")
                 } else if device.connected {
                     "Connected".into()
                 } else {
                     device.rssi.map(|r| format!("{r} dBm")).unwrap_or_default()
                 };
-                wireless_row(ui, &device.name, &detail, &device.address);
-            }
-        }
-        if !s.receivers.is_empty() {
-            ui.weak("Wireless receivers");
-            for receiver in &s.receivers {
-                wireless_row(
-                    ui,
-                    &receiver.name,
-                    "USB",
-                    &format!(
-                        "{}\n{}\nReceiver present; paired-device connection state is unavailable",
-                        receiver.id, receiver.path
-                    ),
+                ui.painter().text(
+                    pos2(rect.right() - 90., rect.center().y),
+                    egui::Align2::RIGHT_CENTER,
+                    detail,
+                    egui::FontId::proportional(config::get().number("appearance.font_size")),
+                    ui.visuals().weak_text_color(),
                 );
+                let mut controls = ui.new_child(egui::UiBuilder::new().max_rect(
+                    Rect::from_min_max(pos2(rect.right() - 86., rect.top()), rect.max),
+                ));
+                controls.spacing_mut().interact_size.y = rect.height();
+                controls.spacing_mut().button_padding = vec2(2., 0.);
+                if s.busy.is_some() {
+                    controls.disable();
+                }
+                let (label, action) = if device.connected {
+                    ("Disconnect", bluetooth::Action::Disconnect)
+                } else if device.paired {
+                    ("Connect", bluetooth::Action::Connect)
+                } else {
+                    ("Pair", bluetooth::Action::Pair)
+                };
+                if controls
+                    .add(
+                        egui::Button::new(label)
+                            .frame(false)
+                            .wrap_mode(egui::TextWrapMode::Extend),
+                    )
+                    .clicked()
+                {
+                    let _ = self
+                        .services
+                        .bluetooth
+                        .send(bluetooth::Request::Action(device.path.clone(), action));
+                }
             }
         }
-        if !s.bluez {
-            ui.weak("Bluetooth scan unavailable").on_hover_text(
-                s.notice
-                    .as_deref()
-                    .unwrap_or("Bluetooth discovery service is unavailable"),
-            );
-        } else if s.adapters.is_empty() {
-            ui.weak("No Bluetooth adapter");
-        } else if !s.enabled() {
-            ui.weak("Bluetooth is off");
-        } else if s.scanning {
+        if s.scanning {
             ui.weak("Scanning…");
-        } else if s.devices.is_empty() && s.receivers.is_empty() {
+        } else if s.devices.is_empty() {
             ui.weak("No devices found");
         }
     }

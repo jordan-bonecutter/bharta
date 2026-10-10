@@ -244,6 +244,7 @@ version = "0.1.0"
 dependencies = [
  "ab_glyph",
  "anyhow",
+ "async-channel",
  "chrono",
  "egui",
  "egui_software_backend",

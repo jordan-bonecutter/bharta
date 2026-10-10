@@ -30,20 +30,6 @@ with tempfile.TemporaryDirectory(prefix='bharta-headless-') as directory:
                WLR_RENDERER='pixman', WLR_HEADLESS_OUTPUTS='1',
                DBUS_SYSTEM_BUS_ADDRESS='unix:path=' + str(runtime / 'no-system-bus'),
                PULSE_SERVER='unix:' + str(runtime / 'no-audio-server'))
-    # Synthetic sysfs keeps receiver tests independent of the user's hardware.
-    sysfs = runtime / 'sysfs'
-    env['BHARTA_TEST_SYSFS'] = str(sysfs)
-    for name, value in {
-        'bus/usb/devices/3-4/idVendor': '046d',
-        'bus/usb/devices/3-4/idProduct': 'c548',
-        'bus/usb/devices/3-4/manufacturer': 'Logitech',
-        'bus/usb/devices/3-4/product': 'USB Receiver',
-        'bus/hid/devices/bt-mouse/uevent': 'HID_ID=0005:0000046D:0000B023\nHID_NAME=Kernel Bluetooth mouse\nHID_UNIQ=AA:BB:CC:DD:EE:01\n',
-        'class/bluetooth/hci0/uevent': 'DEVTYPE=host',
-    }.items():
-        path = sysfs / name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(value)
     state = runtime / 'volume.json'
     state.write_text('[32768, 32768]')
     routing = runtime / 'routing.json'
@@ -143,6 +129,7 @@ while True:
         env['DBUS_SYSTEM_BUS_ADDRESS'] = bus[0]
         env['BHARTA_TEST_BLUETOOTH_LOG'] = str(DEST / 'bluetooth-discovery.txt')
         (DEST / 'bluetooth-discovery.txt').write_text('')
+        (DEST / 'bluetooth-discovery.txt.actions').write_text('')
         bluetooth_fixture = start([str(ROOT / 'target/release/examples/headless_bluetooth')], 'bluetooth.log')
         sway = start(['sway', '--unsupported-gpu', '-c', str(config)], 'sway.log')
         for _ in range(100):
@@ -226,29 +213,6 @@ while True:
         cpu_clicked=probe(cpu_x,14,'--click-hold',1000);time.sleep(.6);shot('process-monitor-clicked');cpu_clicked.wait()
         assert Image.open(DEST/'process-monitor-clicked.png').convert('RGB').getpixel((int(monitor_left)+5,80))!=(0,0,0), 'Clicking CPU did not open its monitor'
         leave_cpu=probe(600,600,'--hover',900);leave_cpu.wait()
-        def verify_bluetooth_fallback():
-            global bluetooth_fixture
-            # Without BlueZ, kernel Bluetooth inputs and USB receivers still render.
-            bluetooth_fixture.terminate();bluetooth_fixture.wait(timeout=3)
-            fallback=probe(bluetooth_x,14,'--click-hold',2500)
-            time.sleep(1.5);shot('bluetooth-receiver-fallback');fallback.wait()
-            fallback_image=Image.open(DEST/'bluetooth-receiver-fallback.png').convert('RGB')
-            receiver_text=sum(1 for y in range(115,150) for x in range(int(bt_left)+12,int(bt_left)+180)
-                              if min(fallback_image.getpixel((x,y)))>80)
-            assert receiver_text>20, 'Missing USB receiver row when BlueZ is unavailable'
-            before_scan=bt_log.read_text()
-            unavailable_scan=probe(bt_left+100,50,'--click-hold',1000);unavailable_scan.wait()
-            assert bt_log.read_text()==before_scan, 'Receiver fallback attempted Bluetooth discovery'
-            diagnostic=run([str(BAR),'--check-bluetooth']).stdout
-            assert 'Logitech USB Receiver (046d:c548)' in diagnostic, diagnostic
-            assert 'Kernel Bluetooth mouse' in diagnostic, diagnostic
-            assert 'BlueZ: false' in diagnostic, diagnostic
-            bluetooth_fixture=start([str(ROOT/'target/release/examples/headless_bluetooth')], 'bluetooth-restored.log')
-            time.sleep(1.5);shot('bluetooth-bluez-restored')
-            diagnostic=run([str(BAR),'--check-bluetooth']).stdout
-            assert 'BlueZ: true' in diagnostic, diagnostic
-            assert 'Studio headphones' in diagnostic, diagnostic
-            assert 'Logitech USB Receiver (046d:c548)' in diagnostic, diagnostic
         # All input is scoped to HEADLESS-1 on the private Wayland socket.
         bluetooth_hover=probe(bluetooth_x,14,'--hover',1600)
         time.sleep(1.2);shot('bluetooth-connected');bluetooth_hover.wait()
@@ -279,11 +243,36 @@ while True:
         time.sleep(1)
         shot('sound')
         assert bt_log.read_text().splitlines() == ['start','stop']*4, 'Switching menus did not release discovery'
+        def bluetooth_status(expected):
+            deadline=time.monotonic()+6
+            while time.monotonic()<deadline:
+                diagnostic=run([str(BAR),'--check-bluetooth']).stdout
+                if expected in diagnostic:return diagnostic
+                time.sleep(.1)
+            raise AssertionError(diagnostic)
+        assert 'battery 73%' in bluetooth_status('Studio headphones')
+        reopen=probe(bluetooth_x,14,'--hover',1800);time.sleep(1.2);reopen.wait()
+        pair=probe(bt_left+240,178,'--click-hold',2200);time.sleep(1.5);shot('bluetooth-pair-confirmation');pair.wait()
+        actions=Path(str(bt_log)+'.actions')
+        assert actions.exists() and 'confirmation' in actions.read_text(), 'Pair did not register and invoke its agent'
+        cancel=probe(bt_left+95,96,'--click-hold',1600);cancel.wait()
+        bluetooth_status('Nearby speaker (AA:BB:CC:DD:EE:FF) — discovered')
+        assert 'paired' not in actions.read_text(), 'Cancel accepted Bluetooth pairing'
+        pair=probe(bt_left+240,178,'--click-hold',2200);time.sleep(1.5);pair.wait()
+        confirm=probe(bt_left+30,96,'--click-hold',1800);confirm.wait()
+        bluetooth_status('Nearby speaker (AA:BB:CC:DD:EE:FF) — connected')
+        shot('bluetooth-paired')
+        disconnect=probe(bt_left+240,96,'--click-hold',1800);disconnect.wait()
+        bluetooth_status('Nearby speaker (AA:BB:CC:DD:EE:FF) — saved')
+        reconnect=probe(bt_left+240,158,'--click-hold',1800);reconnect.wait()
+        bluetooth_status('Nearby speaker (AA:BB:CC:DD:EE:FF) — connected')
+        assert actions.read_text().splitlines()==['confirmation','confirmation','paired','connected','disconnected','connected'], actions.read_text()
+        shot('bluetooth-reconnected')
         if '--bluetooth-only' in sys.argv[2:]:
-            verify_bluetooth_fallback()
             print('Headless Bluetooth screenshots and logs:', DEST)
             sys.exit(0)
 
+        holder=probe(sound_x,14,'--click-hold',6000);time.sleep(.8)
         assert Image.open(DEST / 'sound.png').getpixel((1250,80))[:3] != (0,0,0), 'Sound popup missing'
         sound_image=Image.open(DEST / 'sound.png').convert('RGB')
         assert sound_image.crop((1180,180,1530,520)).getbbox(), 'Per-application audio controls missing'
@@ -618,7 +607,6 @@ while True:
             assert 'Keyboard map:' not in (DEST/log).read_text(), f'Keyboard map failed on {log}'
         assert second.poll() is None, 'Second bar exited'
         assert bar.poll() is None, 'egui bar exited'
-        verify_bluetooth_fallback()
         # A real XDG config changes geometry, palette, timing, and typography.
         # The desktop user's settings never enter this private session.
         second.terminate();second.wait()

@@ -12,6 +12,7 @@ egui_software_backend = { version = "0.0.3", default-features = false, features 
 libc = "0.2"
 anyhow = "1"
 zbus = "4.4"
+async-channel = "2.5"
 ab_glyph = "0.2"
 chrono = "0.4"
 serde_json = "1"

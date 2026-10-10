@@ -129,14 +129,14 @@ clicking again closes it until the pointer leaves that control.
   scan, connect/disconnect, saved credentials, and a password
   field with reveal and clipboard paste. Enterprise and hidden networks can be
   provisioned in system network settings.
-- Bluetooth: connected, saved, and discovered devices through BlueZ, plus
-  wireless USB receivers and Bluetooth input devices reported by Linux sysfs.
-  Receivers remain visible when BlueZ is absent; their presence does not claim
-  that a paired mouse or keyboard is awake. Bluetooth scanning uses BlueZ and a
-  powered adapter. Scan updates live for 12 seconds; Stop scan, closing the menu,
-  or switching menus releases discovery. `bharta --check-bluetooth` reports both
-  sources without starting a scan or changing hardware settings. No input device
-  is opened and no packages are installed by the bar.
+- Bluetooth: connected, saved, and discovered devices through BlueZ with names,
+  signal strength, and battery percentages when available. Pair new devices with
+  confirmation/PIN prompts, reconnect saved devices, or disconnect devices.
+  Requires the system BlueZ service and a powered adapter. Closing or switching
+  menus cancels pending pairing.
+  Scan updates live for 12 seconds; Stop scan, closing the menu, or switching
+  menus releases discovery. `bharta --check-bluetooth` lists devices without
+  starting discovery or changing hardware settings.
 - CPU: a compact icon and filled usage sparkline updated once a second, colored
   from green at 0% to red at 100%. Hover or click
   for total usage and the busiest processes with PID, CPU usage, and resident

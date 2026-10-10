@@ -94,32 +94,26 @@ fn main() -> Result<()> {
     if options.check_bluetooth {
         let snapshot = bluetooth::snapshot()?;
         println!(
-            "BlueZ: {}; Bluetooth adapters: {}; Bluetooth devices: {}; wireless receivers: {}",
-            snapshot.bluez,
+            "Bluetooth adapters: {}; Bluetooth devices: {}",
             snapshot.adapters.len(),
-            snapshot.devices.len(),
-            snapshot.receivers.len()
+            snapshot.devices.len()
         );
-        if let Some(notice) = &snapshot.notice {
-            println!("{notice}");
-        }
-        for receiver in &snapshot.receivers {
-            println!("{} ({}) — USB receiver present", receiver.name, receiver.id);
-        }
         for device in snapshot.devices {
             println!(
-                "{} ({}) — {}",
+                "{} ({}) — {}{}",
                 device.name,
                 device.address,
-                if !snapshot.bluez {
-                    "kernel input present"
-                } else if device.connected {
+                if device.connected {
                     "connected"
                 } else if device.paired {
                     "saved"
                 } else {
                     "discovered"
-                }
+                },
+                device
+                    .battery
+                    .map(|n| format!("; battery {n}%"))
+                    .unwrap_or_default()
             );
         }
         return Ok(());

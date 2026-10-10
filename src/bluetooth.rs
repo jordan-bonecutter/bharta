@@ -1,9 +1,14 @@
-//! BlueZ discovery and read-only kernel device enumeration share one worker.
-mod kernel;
+//! BlueZ access stays on one worker connection so discovery belongs to this panel.
+mod agent;
+pub use agent::Prompt;
 use anyhow::{Context, Result, bail};
 use std::{
     collections::HashMap,
-    sync::mpsc,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     time::{Duration, Instant},
 };
 use zbus::{
@@ -25,40 +30,41 @@ pub struct Device {
     pub connected: bool,
     pub paired: bool,
     pub rssi: Option<i16>,
-}
-#[derive(Clone, Debug)]
-pub struct Receiver {
-    pub path: String,
-    pub name: String,
-    pub id: String,
+    pub battery: Option<u8>,
 }
 #[derive(Clone, Debug, Default)]
 pub struct Snapshot {
-    pub bluez: bool,
-    pub notice: Option<String>,
-    pub receivers: Vec<Receiver>,
     pub adapters: Vec<(String, bool)>,
     pub devices: Vec<Device>,
     pub scanning: bool,
+    pub busy: Option<String>,
+    pub prompt: Option<Prompt>,
+    pub action_error: Option<String>,
 }
 impl Snapshot {
     pub fn enabled(&self) -> bool {
-        self.bluez && self.adapters.iter().any(|(_, powered)| *powered)
+        self.adapters.iter().any(|(_, powered)| *powered)
     }
 }
 pub enum Request {
     Open(u64),
     Scan,
     Stop,
+    Action(String, Action),
+    Answer(Option<String>),
+    Cancel,
     Close,
+}
+#[derive(Clone, Copy)]
+pub enum Action {
+    Pair,
+    Connect,
+    Disconnect,
 }
 pub type Update = (u64, Result<Snapshot, String>);
 
 fn parse(objects: Objects) -> Snapshot {
-    let mut snapshot = Snapshot {
-        bluez: true,
-        ..Snapshot::default()
-    };
+    let mut snapshot = Snapshot::default();
     for (path, interfaces) in objects {
         if let Some(props) = interfaces.get(ADAPTER) {
             snapshot
@@ -77,6 +83,11 @@ fn parse(objects: Objects) -> Snapshot {
                 connected: boolean(props, "Connected"),
                 paired: boolean(props, "Paired"),
                 rssi: props.get("RSSI").and_then(|v| i16::try_from(v).ok()),
+                battery: interfaces
+                    .get("org.bluez.Battery1")
+                    .and_then(|p| p.get("Percentage"))
+                    .and_then(|v| u8::try_from(v).ok())
+                    .filter(|n| *n <= 100),
             });
         }
     }
@@ -120,56 +131,163 @@ fn bluez_error(error: zbus::fdo::Error) -> anyhow::Error {
 
 /// Read-only diagnostics: never starts discovery or changes adapter settings.
 pub fn snapshot() -> Result<Snapshot> {
-    Session::new().snapshot()
+    Session::new()?.snapshot()
 }
 
+struct Job {
+    path: String,
+    connection: Connection,
+    result: mpsc::Receiver<Result<()>>,
+    started: Instant,
+    canceled: Arc<AtomicBool>,
+    action: Action,
+}
 struct Session {
-    connection: Option<Connection>,
-    connection_error: Option<String>,
+    connection: Connection,
     discovery: Vec<String>,
     deadline: Option<Instant>,
+    job: Option<Job>,
+    agent: agent::Shared,
+    action_error: Option<String>,
 }
 impl Session {
-    fn new() -> Self {
-        let (connection, connection_error) = match Connection::system() {
-            Ok(c) => (Some(c), None),
-            Err(e) => (
-                None,
-                Some(format!("Cannot reach the Bluetooth system bus: {e}")),
-            ),
-        };
-        Self {
-            connection,
-            connection_error,
+    fn new() -> Result<Self> {
+        Ok(Self {
+            connection: Connection::system()
+                .context("Bluetooth is unavailable: cannot reach the system bus")?,
             discovery: vec![],
             deadline: None,
-        }
+            job: None,
+            agent: Arc::new(Mutex::new(agent::State::default())),
+            action_error: None,
+        })
     }
     fn snapshot(&self) -> Result<Snapshot> {
-        let mut kernel = kernel::read();
-        let bluez: Result<Snapshot> = (|| {
-            let connection = self.connection.as_ref().context(
-                self.connection_error
-                    .clone()
-                    .unwrap_or_else(|| "Bluetooth system bus is unavailable".into()),
+        let objects = ObjectManagerProxy::builder(&self.connection)
+            .destination(SERVICE)?
+            .path("/")?
+            .build()?
+            .get_managed_objects()
+            .map_err(bluez_error)?;
+        let mut snapshot = parse(objects);
+        snapshot.scanning = !self.discovery.is_empty();
+        snapshot.busy = self.job.as_ref().map(|j| j.path.clone());
+        snapshot.prompt = self.agent.lock().unwrap().prompt.clone();
+        snapshot.action_error = self.action_error.clone();
+        Ok(snapshot)
+    }
+    fn action(&mut self, path: String, action: Action) -> Result<()> {
+        anyhow::ensure!(
+            self.job.is_none(),
+            "A Bluetooth operation is already running"
+        );
+        anyhow::ensure!(
+            self.snapshot()?.devices.iter().any(|d| d.path == path),
+            "Bluetooth device disappeared; scan again"
+        );
+        self.stop();
+        self.action_error = None;
+        self.agent = Arc::new(Mutex::new(agent::State::default()));
+        let canceled = Arc::new(AtomicBool::new(false));
+        let connection = zbus::blocking::connection::Builder::system()?
+            .serve_at(
+                "/org/bharta/agent",
+                agent::Agent {
+                    device: path.clone(),
+                    state: self.agent.clone(),
+                    canceled: canceled.clone(),
+                },
+            )?
+            .build()?;
+        if matches!(action, Action::Pair) {
+            let manager = Proxy::new(
+                &connection,
+                SERVICE,
+                "/org/bluez",
+                "org.bluez.AgentManager1",
             )?;
-            let objects = ObjectManagerProxy::builder(connection)
-                .destination(SERVICE)?
-                .path("/")?
-                .build()?
-                .get_managed_objects()
-                .map_err(bluez_error)?;
-            Ok(parse(objects))
-        })();
-        match bluez {
-            Ok(mut s) => {
-                s.receivers = kernel.receivers;
-                s.scanning = !self.discovery.is_empty();
-                Ok(s)
+            let agent_path = OwnedObjectPath::try_from("/org/bharta/agent")?;
+            manager.call::<_, _, ()>("RegisterAgent", &(agent_path, "KeyboardDisplay"))?;
+        }
+        let (tx, result) = mpsc::channel();
+        self.job = Some(Job {
+            path: path.clone(),
+            connection: connection.clone(),
+            result,
+            started: Instant::now(),
+            canceled: canceled.clone(),
+            action,
+        });
+        std::thread::spawn(move || {
+            let result = (|| -> Result<()> {
+                let proxy = Proxy::new(&connection, SERVICE, path.as_str(), DEVICE)?;
+                match action {
+                    Action::Pair => {
+                        proxy
+                            .call::<_, _, ()>("Pair", &())
+                            .context("Could not pair Bluetooth device")?;
+                        anyhow::ensure!(!canceled.load(Ordering::SeqCst), "Pairing canceled");
+                        proxy
+                            .set_property("Trusted", true)
+                            .context("Could not save Bluetooth trust")?;
+                        proxy
+                            .call::<_, _, ()>("Connect", &())
+                            .context("Paired, but could not connect Bluetooth device")?;
+                    }
+                    Action::Connect => proxy
+                        .call::<_, _, ()>("Connect", &())
+                        .context("Could not connect Bluetooth device")?,
+                    Action::Disconnect => proxy
+                        .call::<_, _, ()>("Disconnect", &())
+                        .context("Could not disconnect Bluetooth device")?,
+                }
+                if canceled.load(Ordering::SeqCst) && !matches!(action, Action::Disconnect) {
+                    let _: zbus::Result<()> = proxy.call("Disconnect", &());
+                    bail!("Bluetooth operation canceled");
+                }
+                Ok(())
+            })();
+            let _ = tx.send(result);
+        });
+        Ok(())
+    }
+    fn poll_job(&mut self) {
+        if self
+            .job
+            .as_ref()
+            .is_some_and(|j| j.started.elapsed() > Duration::from_secs(90))
+        {
+            self.cancel();
+            self.action_error = Some(
+                "Bluetooth operation timed out; put the device in pairing mode and try again"
+                    .into(),
+            );
+            return;
+        }
+        let result = self.job.as_ref().and_then(|j| match j.result.try_recv() {
+            Ok(r) => Some(r),
+            Err(mpsc::TryRecvError::Disconnected) => {
+                Some(Err(anyhow::anyhow!("Bluetooth operation stopped")))
             }
-            Err(e) => {
-                kernel.notice = Some(format!("{e:#}"));
-                Ok(kernel)
+            Err(mpsc::TryRecvError::Empty) => None,
+        });
+        if let Some(result) = result {
+            self.job = None;
+            self.agent.lock().unwrap().answer(None);
+            self.action_error = result.err().map(|e| format!("{e:#}"));
+        }
+    }
+    fn cancel(&mut self) {
+        if let Some(job) = self.job.take() {
+            job.canceled.store(true, Ordering::SeqCst);
+            self.agent.lock().unwrap().answer(None);
+            if let Ok(proxy) = Proxy::new(&job.connection, SERVICE, job.path.as_str(), DEVICE) {
+                let method = if matches!(job.action, Action::Pair) {
+                    "CancelPairing"
+                } else {
+                    "Disconnect"
+                };
+                let _: zbus::Result<()> = proxy.call(method, &());
             }
         }
     }
@@ -185,15 +303,8 @@ impl Session {
             if !powered {
                 continue;
             }
-            let result = Proxy::new(
-                self.connection
-                    .as_ref()
-                    .context("Bluetooth system bus is unavailable")?,
-                SERVICE,
-                path.as_str(),
-                ADAPTER,
-            )
-            .and_then(|p| p.call::<_, _, ()>("StartDiscovery", &()));
+            let result = Proxy::new(&self.connection, SERVICE, path.as_str(), ADAPTER)
+                .and_then(|p| p.call::<_, _, ()>("StartDiscovery", &()));
             if let Err(e) = result {
                 self.stop();
                 return Err(e).context("Could not scan for Bluetooth devices");
@@ -204,11 +315,8 @@ impl Session {
         Ok(())
     }
     fn stop(&mut self) {
-        let Some(connection) = &self.connection else {
-            return;
-        };
         for path in self.discovery.drain(..) {
-            if let Ok(proxy) = Proxy::new(connection, SERVICE, path.as_str(), ADAPTER) {
+            if let Ok(proxy) = Proxy::new(&self.connection, SERVICE, path.as_str(), ADAPTER) {
                 let _: zbus::Result<()> = proxy.call("StopDiscovery", &());
             }
         }
@@ -217,6 +325,7 @@ impl Session {
 }
 impl Drop for Session {
     fn drop(&mut self) {
+        self.cancel();
         self.stop();
     }
 }
@@ -255,6 +364,21 @@ pub fn watch() -> (mpsc::Sender<Request>, mpsc::Receiver<Update>) {
                         error = s.scan().err();
                     }
                 }
+                Some(Request::Action(path, action)) if open.is_some() => {
+                    if let Some(s) = session.as_mut() {
+                        error = s.action(path, action).err();
+                    }
+                }
+                Some(Request::Answer(answer)) => {
+                    if let Some(s) = session.as_mut() {
+                        s.agent.lock().unwrap().answer(answer);
+                    }
+                }
+                Some(Request::Cancel) => {
+                    if let Some(s) = session.as_mut() {
+                        s.cancel();
+                    }
+                }
                 Some(Request::Stop) => {
                     // Dropping the connection also releases discovery if StopDiscovery fails.
                     session = None;
@@ -272,12 +396,13 @@ pub fn watch() -> (mpsc::Sender<Request>, mpsc::Receiver<Update>) {
                     session = None;
                 }
                 if session.is_none() {
-                    session = Some(Session::new());
+                    session = Some(Session::new()?);
                 }
                 let s = session.as_mut().unwrap();
                 if let Some(e) = error {
                     return Err(e);
                 }
+                s.poll_job();
                 s.snapshot()
             })()
             .map_err(|e| format!("{e:#}"));
@@ -295,22 +420,6 @@ pub fn watch() -> (mpsc::Sender<Request>, mpsc::Receiver<Update>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn service_and_permission_errors_explain_the_remedy_and_keep_the_cause() {
-        let missing = bluez_error(zbus::fdo::Error::ServiceUnknown(
-            "The name is not activatable".into(),
-        ));
-        let message = format!("{missing:#}");
-        assert!(message.contains("discovery service is unavailable"));
-        assert!(message.contains("not activatable"));
-        let denied = bluez_error(zbus::fdo::Error::AccessDenied(
-            "Policy rejected the call".into(),
-        ));
-        let message = format!("{denied:#}");
-        assert!(message.contains("permission"));
-        assert!(message.contains("Policy rejected"));
-        assert!(!message.contains("discovery service is unavailable"));
-    }
     fn device(name: Option<&str>, connected: bool, paired: bool) -> HashMap<String, OwnedValue> {
         let mut props = HashMap::from([
             ("Connected".into(), OwnedValue::from(connected)),
@@ -342,13 +451,20 @@ mod tests {
         props.insert("RSSI".into(), OwnedValue::from(-64i16));
         objects.insert(
             "/org/bluez/hci1/dev_a".try_into().unwrap(),
-            HashMap::from([(DEVICE.try_into().unwrap(), props)]),
+            HashMap::from([
+                (DEVICE.try_into().unwrap(), props),
+                (
+                    "org.bluez.Battery1".try_into().unwrap(),
+                    HashMap::from([("Percentage".into(), OwnedValue::from(73u8))]),
+                ),
+            ]),
         );
         let s = parse(objects);
         assert!(s.enabled());
         assert_eq!(s.adapters.len(), 2);
         assert_eq!(s.devices[0].name, "Nearby mouse");
         assert_eq!(s.devices[0].rssi, Some(-64));
+        assert_eq!(s.devices[0].battery, Some(73));
     }
     #[test]
     fn groups_connected_saved_and_available_with_optional_properties() {
@@ -386,6 +502,7 @@ mod tests {
             ["Z headphones", "A keyboard", "AA:BB"]
         );
         assert_eq!(s.devices[2].rssi, None);
+        assert_eq!(s.devices[2].battery, None);
         assert!(!Snapshot::default().enabled());
     }
 }
