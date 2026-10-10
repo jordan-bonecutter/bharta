@@ -1,3 +1,4 @@
+mod bar_button;
 mod keyboard;
 mod services;
 mod wayland;
@@ -727,8 +728,8 @@ impl Ui {
                       this: &mut Self,
                       ui: &mut egui::Ui,
                       rect: Rect,
-                      text: &str,
-                      icon: Option<Icon>,
+                      icon: Icon,
+                      content: bar_button::Content,
                       kind: Menu| {
             let response = ui.interact(rect, egui::Id::new(("bar", &kind)), egui::Sense::click());
             if response.hovered() {
@@ -738,47 +739,18 @@ impl Ui {
                     config::get().color("hover", this.dark),
                 );
             }
-            let mut text_rect = rect.shrink2(vec2(4., 0.));
-            if let Some(icon) = icon {
-                ui.painter().image(
-                    this.icon(icon),
-                    Rect::from_center_size(
-                        pos2(
-                            if text.is_empty() {
-                                rect.center().x
-                            } else {
-                                rect.left() + slot / 2.
-                            },
-                            center_y,
-                        ),
-                        vec2(
-                            config::get().number("appearance.icon_size"),
-                            config::get().number("appearance.icon_size"),
-                        ),
-                    ),
-                    Rect::from_min_max(Pos2::ZERO, pos2(1., 1.)),
-                    Color32::WHITE,
-                );
-                text_rect.min.x = rect.left() + slot;
-            }
-            if !text.is_empty() {
-                let mut job = egui::text::LayoutJob::simple(
-                    text.into(),
-                    egui::FontId::proportional(config::get().number("appearance.font_size")),
-                    ui.visuals().text_color(),
-                    text_rect.width(),
-                );
-                job.wrap.max_rows = 1;
-                job.wrap.break_anywhere = true;
-                let galley = ui.painter().layout_job(job);
-                let position = text_rect.center() - galley.size() / 2.;
-                ui.painter()
-                    .galley(position, galley, ui.visuals().text_color());
-            }
+            let layout = bar_button::Layout::new(
+                rect,
+                content,
+                slot,
+                config::get().number("appearance.icon_size"),
+            );
+            layout.paint_icon(ui.painter(), this.icon(icon));
             if response.clicked() {
                 this.open(kind.clone(), rect.center().x, true);
             }
             targets.push((rect, kind));
+            layout
         };
         button(
             &mut targets,
@@ -788,8 +760,8 @@ impl Ui {
                 pos2(margin, 0.),
                 vec2(session_width, config::get().number("layout.bar_height")),
             ),
-            "",
-            Some(Icon::Logout),
+            Icon::Logout,
+            bar_button::Content::Icon,
             Menu::Session,
         );
         button(
@@ -800,8 +772,8 @@ impl Ui {
                 pos2(margin + session_width + gap, 0.),
                 vec2(apps_width, config::get().number("layout.bar_height")),
             ),
-            "",
-            Some(Icon::Apps),
+            Icon::Apps,
+            bar_button::Content::Icon,
             Menu::Apps,
         );
         let mut x = margin + session_width + gap + apps_width + gap;
@@ -972,13 +944,13 @@ impl Ui {
                 pos2(wifi_x, 0.),
                 vec2(slot, config::get().number("layout.bar_height")),
             ),
-            "",
-            Some(Icon::Wifi(self.state.extras.wifi_signal)),
+            Icon::Wifi(self.state.extras.wifi_signal),
+            bar_button::Content::Icon,
             Menu::Wifi,
         );
         let bluetooth_x = wifi_x - slot - gap;
         let sound_x = bluetooth_x - sound_width - gap;
-        button(
+        let sound_layout = button(
             &mut targets,
             self,
             ui,
@@ -986,25 +958,24 @@ impl Ui {
                 pos2(sound_x, 0.),
                 vec2(sound_width, config::get().number("layout.bar_height")),
             ),
-            "",
-            Some(Icon::Volume(self.audio.active().is_some_and(|o| o.muted))),
+            Icon::Volume(self.audio.active().is_some_and(|o| o.muted)),
+            bar_button::Content::IconAndPlot,
             Menu::Sound,
         );
-        let spectrum = Rect::from_min_max(
-            pos2(sound_x + slot, center_y - 7.),
-            pos2(sound_x + sound_width - 4., center_y + 7.),
-        );
-        if spectrum.width() > 0. {
+        if let Some((painter, spectrum)) = sound_layout.plot(ui.painter()) {
             let step = spectrum.width() / self.tray_levels.len() as f32;
             for (i, level) in self.tray_levels.iter().enumerate() {
                 let level = *level as f32;
-                ui.painter().rect_filled(
+                painter.rect_filled(
                     Rect::from_min_size(
                         pos2(
                             spectrum.left() + i as f32 * step,
                             spectrum.bottom() - (level * spectrum.height()).max(1.),
                         ),
-                        vec2((step - 1.).max(1.), (level * spectrum.height()).max(1.)),
+                        vec2(
+                            (step - 1.).max(1.).min(step),
+                            (level * spectrum.height()).max(1.),
+                        ),
                     ),
                     0,
                     plot_color(level).gamma_multiply(if level > 0. { 1. } else { 0.2 }),
@@ -1019,12 +990,12 @@ impl Ui {
                 pos2(bluetooth_x, 0.),
                 vec2(slot, config::get().number("layout.bar_height")),
             ),
-            "",
-            Some(Icon::Bluetooth),
+            Icon::Bluetooth,
+            bar_button::Content::Icon,
             Menu::Bluetooth,
         );
         let cpu_x = sound_x - cpu_width - gap;
-        button(
+        let cpu_layout = button(
             &mut targets,
             self,
             ui,
@@ -1032,17 +1003,13 @@ impl Ui {
                 pos2(cpu_x, 0.),
                 vec2(cpu_width, config::get().number("layout.bar_height")),
             ),
-            "",
-            Some(Icon::Cpu),
+            Icon::Cpu,
+            bar_button::Content::IconAndPlot,
             Menu::Cpu,
         );
-        let chart = Rect::from_min_max(
-            pos2(cpu_x + slot, center_y - 7.),
-            pos2(cpu_x + cpu_width - 4., center_y + 7.),
-        );
-        if chart.width() > 0. {
+        if let Some((painter, chart)) = cpu_layout.plot(ui.painter()) {
             let color = ui.visuals().text_color();
-            ui.painter().line_segment(
+            painter.line_segment(
                 [chart.left_bottom(), chart.right_bottom()],
                 egui::Stroke::new(1_f32, color.gamma_multiply(0.2)),
             );
@@ -1073,17 +1040,17 @@ impl Ui {
                     fill.add_triangle(index, index + 1, index + 2);
                     fill.add_triangle(index + 1, index + 3, index + 2);
                 }
-                ui.painter().add(egui::Shape::mesh(fill));
+                painter.add(egui::Shape::mesh(fill));
                 for pair in points.windows(2) {
-                    ui.painter()
+                    painter
                         .line_segment([pair[0].0, pair[1].0], egui::Stroke::new(1_f32, pair[1].1));
                 }
             } else if let Some((point, color)) = points.first() {
-                ui.painter().line_segment(
+                painter.line_segment(
                     [*point, pos2(point.x, chart.bottom())],
                     egui::Stroke::new(1_f32, color.gamma_multiply(0.55)),
                 );
-                ui.painter().circle_filled(*point, 1., *color);
+                painter.circle_filled(*point, 1., *color);
             }
         }
         for separator in [

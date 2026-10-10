@@ -4,6 +4,7 @@ Build first: cargo build --release --examples && cargo build --release
 Run: python3 tests/headless_ui.py /tmp/bharta-headless
 Add --audio-only to check audio controls, event updates, and drawer height.
 Add --launcher-only to check the default and external app launchers.
+Add --alignment-only to check bar icons across themes, geometry, states, and scale.
 Requires sway, grim, dbus-daemon, and Python 3. Screenshots/logs go to the argument.
 """
 import json
@@ -15,6 +16,7 @@ import sys
 import tempfile
 import time
 from PIL import Image, ImageChops
+from bar_alignment import assert_bar_alignment
 
 ROOT = Path(__file__).resolve().parents[1]
 BAR = Path(os.environ.get("BHARTA_BINARY", ROOT / "target/release/bharta"))
@@ -33,6 +35,9 @@ with tempfile.TemporaryDirectory(prefix='bharta-headless-') as directory:
                PULSE_SERVER='unix:' + str(runtime / 'no-audio-server'))
     state = runtime / 'volume.json'
     state.write_text('[32768, 32768]')
+    muted = runtime / 'muted.json'
+    muted.write_text('false')
+    env['BHARTA_TEST_MUTED'] = str(muted)
     routing = runtime / 'routing.json'
     routing.write_text(json.dumps({'default':'test', 'test':'speaker', 'hdmi':'hdmi'}))
     moves = runtime / 'moves.json'
@@ -50,7 +55,7 @@ if a==['subscribe']:
  previous=None
  while True:
   pidfile=Path(os.environ['BHARTA_TEST_WINDOW_PID'])
-  current=(p.read_text(),r.read_text(),pidfile.exists())
+  current=(p.read_text(),r.read_text(),Path(os.environ['BHARTA_TEST_MUTED']).read_text(),pidfile.exists())
   if current!=previous:
    print("Event 'change' on sink #0",flush=True);previous=current
   time.sleep(.01)
@@ -59,7 +64,7 @@ elif a==['--format=json','list','sinks']:
  v=json.loads(p.read_text())
  outputs=[]
  for name,description,ports in [('test','Built-in audio',[('speaker','Speakers'),('headphones','Headphones')]),('hdmi','External display',[('hdmi','HDMI')])]:
-  outputs.append({'name':name,'description':description,'channel_map':'front-left,front-right','volume':{k:{'value':n} for k,n in zip(['front-left','front-right'],v)},'ports':[{'name':n,'description':d,'availability':'yes'} for n,d in ports],'active_port':route[name],'mute':False})
+  outputs.append({'name':name,'description':description,'channel_map':'front-left,front-right','volume':{k:{'value':n} for k,n in zip(['front-left','front-right'],v)},'ports':[{'name':n,'description':d,'availability':'yes'} for n,d in ports],'active_port':route[name],'mute':json.loads(Path(os.environ['BHARTA_TEST_MUTED']).read_text())})
  print(json.dumps(outputs))
 elif a==['--format=json','list','sink-inputs']:
  streams=[
@@ -71,6 +76,8 @@ elif a==['--format=json','list','sink-inputs']:
   streams.append({'index':13,'corked':False,'mute':False,'volume':{'front-left':{'value':32768},'front-right':{'value':32768}},'properties':{'application.name':'Fixture','application.process.id':Path(pidfile).read_text().strip()}})
  print(json.dumps(streams))
 elif a and a[0]=='set-sink-volume':p.write_text(json.dumps([int(n) for n in a[2:]]))
+elif a and a[0]=='set-sink-mute':
+ m=Path(os.environ['BHARTA_TEST_MUTED']);m.write_text(json.dumps(not json.loads(m.read_text())))
 elif a and a[0]=='set-sink-port':route[a[1]]=a[2];r.write_text(json.dumps(route))
 elif a and a[0]=='set-default-sink':route['default']=a[1];r.write_text(json.dumps(route))
 elif a and a[0]=='move-sink-input':
@@ -186,6 +193,8 @@ while True:
             time.sleep(.2)
         else:
             raise AssertionError('egui bar did not map; see bar.log')
+        default_settings=json.loads((ROOT/'config.default.json').read_text())
+        assert_bar_alignment(Image.open(DEST/'bar.png'), default_settings)
         if '--launcher-only' in sys.argv[2:]:
             probe(72,14,'--hover',700).wait();shot('launcher')
             assert Image.open(DEST/'launcher.png').convert('RGB').getpixel((20,60))!=(0,0,0), 'Default launcher did not open on hover'
@@ -222,6 +231,44 @@ while True:
         tray_tone.write_text('0');time.sleep(.4);shot('tray-silent')
         assert max(tray_heights(Image.open(DEST/'tray-silent.png').convert('RGB')))<=1, 'Tray fabricated activity during silence'
         tray_tone.write_text('375')
+        # Live spectrum values must never move or paint over either icon.
+        slots=[]
+        for name in ('tray-low', 'tray-high', 'tray-silent'):
+            image, controls=assert_bar_alignment(Image.open(DEST/(name+'.png')), default_settings)
+            slots.append([image.crop((int(left),0,int(left+32),28))
+                          for left,_,_ in (controls['CPU'],controls['Sound'])])
+        for changed in slots[1:]:
+            assert all(ImageChops.difference(before,after).getbbox() is None
+                       for before,after in zip(slots[0],changed)), 'Live plots changed an icon slot'
+        if '--alignment-only' in sys.argv[2:]:
+            bar.terminate();bar.wait()
+            cases=[
+                ('dark',1,{}), ('light',1,{}),
+                ('dark',1,{'bar_height':34,'icon_slot_width':40,'cpu_width':88,'sound_tray_width':96,'group_gap':12}),
+                ('light',2,{'bar_height':34,'icon_slot_width':40,'cpu_width':88,'sound_tray_width':96,'group_gap':12}),
+                ('dark',1,{'cpu_width':32,'sound_tray_width':32}),
+            ]
+            for case,(theme,scale,geometry) in enumerate(cases):
+                run(['swaymsg','output HEADLESS-1 mode',f'{1600*scale}x{900*scale}','scale',str(scale)])
+                settings=json.loads(json.dumps(default_settings))
+                settings['layout'].update(geometry)
+                (initial_settings/'config.json').write_text(json.dumps({'layout':geometry}))
+                muted.write_text('false')
+                current=start([str(BAR),'--'+theme,'--output','HEADLESS-1'],f'alignment-{case}.log')
+                time.sleep(1.2)
+                sound_icons=[]
+                for mute in (False,True):
+                    muted.write_text(json.dumps(mute));time.sleep(.4)
+                    name=f'alignment-{case}-'+('muted' if mute else 'playing')
+                    shot(name)
+                    image,controls=assert_bar_alignment(Image.open(DEST/(name+'.png')), settings, scale)
+                    left,width,_=controls['Sound']
+                    sound_icons.append(image.crop((int(left),0,int(left+min(width,settings['layout']['icon_slot_width'])),settings['layout']['bar_height'])))
+                assert ImageChops.difference(*sound_icons).getbbox(), 'Mute fixture did not change the speaker glyph'
+                assert current.poll() is None, 'Alignment fixture bar exited'
+                current.terminate();current.wait()
+            print('Headless alignment screenshots and logs:', DEST)
+            sys.exit(0)
         search_fixture=start(['python3','-c',
             'import ctypes,time; ctypes.CDLL(None).prctl(15,b"qzprocess",0,0,0); time.sleep(120)'], 'cpu-search-fixture.log')
         time.sleep(2)
@@ -544,6 +591,7 @@ while True:
         # Fake parec gives each sink input a distinct tone. Each mini-EQ must
         # show only the frequency band for its own source.
         playing_image=Image.open(DEST / 'playing.png').convert('RGB')
+        assert_bar_alignment(playing_image, default_settings)
         def eq_heights(center):
             candidates=[]
             # Anchor to the source row, not the screen: clock/date and battery
@@ -586,6 +634,7 @@ while True:
         player.stdin.write(b'pause\n');player.stdin.flush();time.sleep(1.2)
         shot('paused')
         paused_image=Image.open(DEST / 'paused.png').convert('RGB')
+        assert_bar_alignment(paused_image, default_settings)
         playing_image=paused_image
         paused_firefox_eq,paused_spotify_eq=eq_heights(firefox_center),eq_heights(spotify_center)
         assert paused_firefox_eq[3]>=10 and max(paused_firefox_eq[:3]+paused_firefox_eq[4:])<=5, 'Firefox meter stopped when unrelated MPRIS playback paused'

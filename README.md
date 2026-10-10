@@ -172,7 +172,9 @@ blur the bar. Desktop portal screen sharing is separate from window previews.
 
 ## Code and validation
 
-`src/ui/mod.rs` contains the egui bar and menus; `wayland.rs` supplies layer-shell,
+`src/ui/mod.rs` contains the egui bar and menus. `bar_button.rs` gives icon-only
+and icon/plot controls explicit layouts; icons and plots share one geometry
+calculation, independent of labels and live values. `wayland.rs` supplies layer-shell,
 software presentation, keyboard, pointer, and clipboard; `services.rs` connects
 background workers. Audio, media, Wi-Fi, launcher, capture, and Sway backends
 remain independent. Edit Rust styling and rebuild; no CSS or GTK bindings remain.
@@ -194,6 +196,16 @@ an animated capture alongside a static source (45 FPS minimum under headless
 testing, with no repeated captures of the static source). Inspect its screenshots
 and logs.
 It never sends input to the desktop or changes real audio levels.
+
+For bar layout changes, run
+`python3 tests/headless_ui.py /tmp/bharta-alignment --alignment-only`.
+This shorter check measures rendered icon positions in both
+themes, with custom bar/slot/plot sizes, muted and playing audio, silence, and
+2× output scaling. The regular harness also checks the default alignment and
+verifies live plots never alter the icon slots.
+The UI alignment CI job runs these checks on each push and pull request and
+uploads screenshots. Its runtime test tools are separate from the clean-image
+static build jobs.
 
 `--smoke-test` maps a layer surface for three seconds and requires Wayland.
 `--check-network` and `--check-media` diagnose the backends. Some unit tests need
