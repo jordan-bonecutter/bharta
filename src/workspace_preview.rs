@@ -30,6 +30,121 @@ pub struct Window {
     pub title: String,
     pub rect: Geometry,
     pub pixels: Option<Arc<Pixmap>>,
+    pub content: Geometry,
+    pub decorations: Vec<Decoration>,
+    pub state: usize,
+}
+#[derive(Clone)]
+pub struct Decoration {
+    pub rect: Geometry,
+    pub title: String,
+    pub state: usize,
+}
+#[derive(Clone)]
+pub struct Palette(pub [[egui::Color32; 4]; 5]);
+impl Default for Palette {
+    fn default() -> Self {
+        Self(
+            [
+                ["#4c7899", "#285577", "#ffffff", "#2e9ef4"],
+                ["#333333", "#5f676a", "#ffffff", "#484e50"],
+                ["#333333", "#222222", "#888888", "#292d2e"],
+                ["#2f343a", "#900000", "#ffffff", "#900000"],
+                ["#333333", "#5f676a", "#ffffff", "#484e50"],
+            ]
+            .map(|row| row.map(|color| egui::Color32::from_hex(color).unwrap())),
+        )
+    }
+}
+impl Palette {
+    // GET_CONFIG contains the main file, not the effective theme. Literal
+    // client colors and simple variables override the standard Sway defaults;
+    // included files and runtime theme commands are not exposed here.
+    fn read(config: &str) -> Self {
+        let mut palette = Self::default();
+        let mut variables = std::collections::HashMap::new();
+        let names = [
+            "client.focused",
+            "client.focused_inactive",
+            "client.unfocused",
+            "client.urgent",
+            "client.placeholder",
+        ];
+        for line in config.lines() {
+            let words: Vec<_> = line.split_whitespace().collect();
+            if words.len() >= 3 && words[0] == "set" {
+                variables.insert(words[1], words[2]);
+            }
+            if let Some(index) = words
+                .first()
+                .and_then(|name| names.iter().position(|n| n == name))
+            {
+                for (dest, word) in palette.0[index]
+                    .iter_mut()
+                    .zip(words.iter().skip(1).take(4))
+                {
+                    let value = variables.get(word).copied().unwrap_or(word);
+                    if let Ok(color) = egui::Color32::from_hex(value) {
+                        *dest = color;
+                    }
+                }
+            }
+        }
+        palette
+    }
+}
+fn state(v: &Value, selected: bool) -> usize {
+    if v["urgent"] == true {
+        3
+    } else if v["focused"] == true {
+        0
+    } else if selected {
+        1
+    } else {
+        2
+    }
+}
+fn decoration(
+    v: &Value,
+    layout: &str,
+    index: usize,
+    count: usize,
+    selected: bool,
+) -> Option<Decoration> {
+    let height = v["deco_rect"]["height"].as_f64().unwrap_or(0.) as f32;
+    if height <= 0. || v["fullscreen_mode"].as_u64().unwrap_or(0) > 0 {
+        return None;
+    }
+    // Sway IPC excludes the title rows from rect, while window_rect is
+    // relative to that rect. deco_rect is relative to the parent container.
+    let rect = Geometry::read(&v["rect"]);
+    let width = v["deco_rect"]["width"].as_f64().unwrap_or(0.) as f32;
+    Some(Decoration {
+        rect: Geometry {
+            x: rect.x
+                + if layout == "tabbed" {
+                    width * index as f32
+                } else {
+                    0.
+                },
+            y: rect.y
+                - height
+                    * if layout == "stacked" {
+                        count as f32
+                    } else {
+                        1.
+                    }
+                + if layout == "stacked" {
+                    height * index as f32
+                } else {
+                    0.
+                },
+            w: width,
+            h: height,
+        },
+        title: v["name"].as_str().unwrap_or("Window").into(),
+        state: state(v, selected),
+    })
 }
 #[derive(Clone)]
 pub struct Snapshot {
@@ -37,6 +152,7 @@ pub struct Snapshot {
     pub rect: Geometry,
     pub windows: Vec<Window>,
     pub message: String,
+    pub palette: Palette,
 }
 impl Snapshot {
     pub fn ready(&self) -> bool {
@@ -58,6 +174,9 @@ fn workspace<'a>(v: &'a Value, name: &str) -> Option<&'a Value> {
         .find_map(|c| workspace(c, name))
 }
 fn collect(v: &Value, result: &mut Vec<Window>) {
+    collect_node(v, result, true, false);
+}
+fn collect_node(v: &Value, result: &mut Vec<Window>, selected: bool, grouped: bool) {
     // The capture identifier is optional on older Sway versions. Window
     // discovery must not depend on capture protocol support.
     if v["foreign_toplevel_identifier"].is_string()
@@ -65,11 +184,25 @@ fn collect(v: &Value, result: &mut Vec<Window>) {
         || v["window"].is_number()
         || v["window_properties"].is_object()
     {
+        let rect = Geometry::read(&v["rect"]);
+        let mut content = rect;
+        if v["window_rect"]["width"].as_f64().unwrap_or(0.) > 0. {
+            content = Geometry::read(&v["window_rect"]);
+            content.x += rect.x;
+            content.y += rect.y;
+        }
         result.push(Window {
             id: v["foreign_toplevel_identifier"].as_str().map(str::to_owned),
             title: v["name"].as_str().unwrap_or("Window").into(),
-            rect: Geometry::read(&v["rect"]),
+            rect,
             pixels: None,
+            content,
+            state: state(v, selected),
+            decorations: if grouped {
+                vec![]
+            } else {
+                decoration(v, "", 0, 1, selected).into_iter().collect()
+            },
         });
         return;
     }
@@ -84,7 +217,7 @@ fn collect(v: &Value, result: &mut Vec<Window>) {
         .chain(floating)
         .find(|c| c["fullscreen_mode"].as_u64().unwrap_or(0) > 0)
     {
-        collect(full, result);
+        collect_node(full, result, true, false);
         return;
     }
     if matches!(v["layout"].as_str(), Some("tabbed" | "stacked")) {
@@ -94,15 +227,40 @@ fn collect(v: &Value, result: &mut Vec<Window>) {
             .find(|c| Some(&c["id"]) == focused)
             .or(nodes.first())
         {
-            collect(child, result);
+            let first = result.len();
+            collect_node(child, result, selected, true);
+            if let Some(window) = result.get_mut(first) {
+                window.decorations.splice(
+                    0..0,
+                    nodes.iter().enumerate().filter_map(|(i, node)| {
+                        decoration(
+                            node,
+                            v["layout"].as_str().unwrap_or(""),
+                            i,
+                            nodes.len(),
+                            selected && node["id"] == child["id"],
+                        )
+                    }),
+                );
+            }
         }
     } else {
         for child in nodes {
-            collect(child, result);
+            collect_node(
+                child,
+                result,
+                selected && Some(&child["id"]) == v["focus"].as_array().and_then(|a| a.first()),
+                false,
+            );
         }
     }
     for child in floating {
-        collect(child, result);
+        collect_node(
+            child,
+            result,
+            selected && Some(&child["id"]) == v["focus"].as_array().and_then(|a| a.first()),
+            false,
+        );
     }
 }
 fn snapshot(name: &str) -> Result<Snapshot> {
@@ -116,6 +274,10 @@ fn snapshot(name: &str) -> Result<Snapshot> {
         rect: Geometry::read(&ws["rect"]),
         windows,
         message: String::new(),
+        palette: status::ipc(9, "")
+            .ok()
+            .and_then(|v| v["config"].as_str().map(Palette::read))
+            .unwrap_or_default(),
     })
 }
 pub type Request = (String, f32, [f32; 2]);
@@ -172,6 +334,7 @@ pub fn watch(sender: mpsc::SyncSender<Snapshot>) -> mpsc::Sender<Option<Request>
                     },
                     windows: vec![],
                     message: "Workspace unavailable".into(),
+                    palette: Palette::default(),
                 }));
                 refresh =
                     Instant::now() + crate::config::get().duration("intervals.preview_layout_ms");
@@ -184,8 +347,8 @@ pub fn watch(sender: mpsc::SyncSender<Snapshot>) -> mpsc::Sender<Option<Request>
                 .filter_map(|w| {
                     Some((
                         w.id.clone()?,
-                        (w.rect.w * factor).round().max(1.) as u32,
-                        (w.rect.h * factor).round().max(1.) as u32,
+                        (w.content.w * factor).round().max(1.) as u32,
+                        (w.content.h * factor).round().max(1.) as u32,
                     ))
                 })
                 .collect();
@@ -287,6 +450,67 @@ mod tests {
         let mut empty = vec![];
         collect(&json!({"type":"workspace","nodes":[]}), &mut empty);
         assert!(empty.is_empty());
+    }
+    #[test]
+    fn decorations_leave_capture_in_its_content_rect() {
+        let tree = json!({"nodes":[{
+            "id":1,"app_id":"fixture","focused":true,"name":"Title",
+            "rect":{"x":100,"y":60,"width":800,"height":500},
+            "window_rect":{"x":4,"y":0,"width":792,"height":496},
+            "deco_rect":{"x":0,"y":0,"width":800,"height":24}
+        }],"focus":[1]});
+        let mut windows = vec![];
+        collect(&tree, &mut windows);
+        let w = &windows[0];
+        assert_eq!(
+            (w.content.x, w.content.y, w.content.w, w.content.h),
+            (104., 60., 792., 496.)
+        );
+        assert_eq!(
+            (
+                w.decorations[0].rect.x,
+                w.decorations[0].rect.y,
+                w.decorations[0].rect.h
+            ),
+            (100., 36., 24.)
+        );
+        assert_eq!(w.state, 0);
+    }
+    #[test]
+    fn tabbed_and_stacked_titles_include_hidden_siblings() {
+        for layout in ["tabbed", "stacked"] {
+            let leaf = |id| {
+                json!({"id":id,"app_id":"fixture","name":format!("Title {id}"),
+                "rect":{"x":1600,"y":if layout=="stacked" {76} else {52},"width":800,"height":500},
+                "deco_rect":{"width":if layout=="tabbed" {400} else {800},"height":24}})
+            };
+            let tree = json!({"layout":layout,"focus":[2,1],"nodes":[leaf(1),leaf(2)]});
+            let mut windows = vec![];
+            collect(&tree, &mut windows);
+            assert_eq!(windows.len(), 1);
+            assert_eq!(windows[0].title, "Title 2");
+            let titles = &windows[0].decorations;
+            assert_eq!(titles.len(), 2);
+            assert_eq!(titles[0].rect.y, 28.);
+            assert_eq!(
+                (titles[1].rect.x, titles[1].rect.y),
+                if layout == "tabbed" {
+                    (2000., 28.)
+                } else {
+                    (1600., 52.)
+                }
+            );
+            assert_eq!((titles[0].state, titles[1].state), (2, 1));
+        }
+    }
+    #[test]
+    fn sway_palette_reads_colors_and_variables() {
+        let colors = Palette::read(
+            "set $border #123456\nclient.focused $border #abcdef #fedcba #000000 #000000",
+        );
+        assert_eq!(colors.0[0][0], egui::Color32::from_rgb(0x12, 0x34, 0x56));
+        assert_eq!(colors.0[0][1], egui::Color32::from_rgb(0xab, 0xcd, 0xef));
+        assert_eq!(colors.0[2], Palette::default().0[2]);
     }
     #[test]
     fn fullscreen_hides_siblings() {

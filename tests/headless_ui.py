@@ -210,6 +210,20 @@ while True:
         baseline=Image.open(DEST / 'fixture.png').convert('RGB')
         bounds=ImageChops.difference(image,baseline).crop((0,28,1600,900)).getbbox()
         assert bounds and 400<=bounds[2]-bounds[0]<=450 and 150<=bounds[3]-bounds[1]<=330, f'Preview does not fit its display bounds: {bounds}'
+        # Server decorations are absent from toplevel captures. The preview
+        # must draw their title rows instead of stretching the app over them.
+        def title_colors(name):
+            pixels=Image.open(DEST/f'{name}.png').convert('RGB').crop((20,64,420,280))
+            counts={color:count for count,color in pixels.getcolors(pixels.width*pixels.height)}
+            return {color:counts.get(color,0) for color in [(40,85,119),(34,34,34)]}
+        colors=title_colors('workspace')
+        assert all(count>100 for count in colors.values()), f'Missing tiled title bars: {colors}'
+        for layout in ['tabbed','stacking']:
+            run(['swaymsg','layout '+layout]);time.sleep(.8)
+            titles=probe(120,14,'--hover',1200);time.sleep(.7);shot('decorations-'+layout);titles.wait()
+            colors=title_colors('decorations-'+layout)
+            assert all(count>100 for count in colors.values()), f'Missing {layout} title bars: {colors}'
+        run(['swaymsg','layout splith']);time.sleep(.8)
         def preview_title(name):
             return Image.open(DEST/f'{name}.png').convert('RGB').crop((20,40,130,56)).tobytes()
         title_one=preview_title('workspace')

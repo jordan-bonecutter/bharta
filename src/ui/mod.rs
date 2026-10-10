@@ -1703,15 +1703,29 @@ impl Ui {
         let scale = workspace_preview::preview_scale(s.rect, self.preview_size);
         painter.rect_filled(canvas, 0, config::get().color("preview_canvas", self.dark));
         for (i, w) in s.windows.iter().enumerate() {
-            let rect = Rect::from_min_size(
-                canvas.min + vec2((w.rect.x - s.rect.x) * scale, (w.rect.y - s.rect.y) * scale),
-                vec2(w.rect.w * scale, w.rect.h * scale),
-            );
-            painter.rect_filled(
-                rect.shrink(1.),
-                0,
-                config::get().color("preview_window", self.dark),
-            );
+            let map = |r: workspace_preview::Geometry| {
+                Rect::from_min_size(
+                    canvas.min + vec2((r.x - s.rect.x) * scale, (r.y - s.rect.y) * scale),
+                    vec2(r.w * scale, r.h * scale),
+                )
+            };
+            let colors = s.palette.0[w.state];
+            painter.rect_filled(map(w.rect), 0, colors[3]);
+            for decoration in &w.decorations {
+                let title = map(decoration.rect);
+                let colors = s.palette.0[decoration.state];
+                painter.rect_filled(title, 0, colors[0]);
+                painter.rect_filled(title.shrink(scale), 0, colors[1]);
+                painter.with_clip_rect(title.intersect(canvas)).text(
+                    title.left_center() + vec2(4. * scale, 0.),
+                    egui::Align2::LEFT_CENTER,
+                    &decoration.title,
+                    egui::FontId::proportional((decoration.rect.h - 6.).max(1.) * scale),
+                    colors[2],
+                );
+            }
+            let rect = map(w.content);
+            painter.rect_filled(rect, 0, config::get().color("preview_window", self.dark));
             if w.pixels.is_some() {
                 if let Some(texture) = self.textures.get(&format!("{prefix}{i}")) {
                     painter.image(
