@@ -2,6 +2,7 @@
 """Isolated egui/Sway UI harness. Never connects input to the desktop session.
 Build first: cargo build --release --examples && cargo build --release
 Run: python3 tests/headless_ui.py /tmp/bharta-headless
+Add --audio-only to check audio controls, event updates, and drawer height.
 Requires sway, grim, dbus-daemon, and Python 3. Screenshots/logs go to the argument.
 """
 import json
@@ -31,15 +32,34 @@ with tempfile.TemporaryDirectory(prefix='bharta-headless-') as directory:
                PULSE_SERVER='unix:' + str(runtime / 'no-audio-server'))
     state = runtime / 'volume.json'
     state.write_text('[32768, 32768]')
+    routing = runtime / 'routing.json'
+    routing.write_text(json.dumps({'default':'test', 'test':'speaker', 'hdmi':'hdmi'}))
+    moves = runtime / 'moves.json'
+    moves.write_text('[]')
     fake = runtime / 'pactl'
     fake.write_text('''#!/usr/bin/env python3
 import json,sys,os
 from pathlib import Path
 p=Path(os.environ['BHARTA_TEST_AUDIO'])
+r=Path(os.environ['BHARTA_TEST_ROUTING'])
+route=json.loads(r.read_text())
 a=sys.argv[1:]
-if a==['get-default-sink']:print('test')
+if a==['subscribe']:
+ import time
+ previous=None
+ while True:
+  pidfile=Path(os.environ['BHARTA_TEST_WINDOW_PID'])
+  current=(p.read_text(),r.read_text(),pidfile.exists())
+  if current!=previous:
+   print("Event 'change' on sink #0",flush=True);previous=current
+  time.sleep(.01)
+elif a==['get-default-sink']:print(route['default'])
 elif a==['--format=json','list','sinks']:
- v=json.loads(p.read_text());print(json.dumps([{'name':'test','description':'Test speakers','channel_map':'front-left,front-right','volume':{k:{'value':n} for k,n in zip(['front-left','front-right'],v)},'ports':[{'name':'speaker','description':'Speakers','availability':'yes'}],'active_port':'speaker','mute':False}]))
+ v=json.loads(p.read_text())
+ outputs=[]
+ for name,description,ports in [('test','Built-in audio',[('speaker','Speakers'),('headphones','Headphones')]),('hdmi','External display',[('hdmi','HDMI')])]:
+  outputs.append({'name':name,'description':description,'channel_map':'front-left,front-right','volume':{k:{'value':n} for k,n in zip(['front-left','front-right'],v)},'ports':[{'name':n,'description':d,'availability':'yes'} for n,d in ports],'active_port':route[name],'mute':False})
+ print(json.dumps(outputs))
 elif a==['--format=json','list','sink-inputs']:
  streams=[
   {'index':11,'corked':False,'mute':False,'volume':{'front-left':{'value':49152},'front-right':{'value':49152}},'properties':{'application.name':'Firefox','media.name':'YouTube'}},
@@ -50,6 +70,10 @@ elif a==['--format=json','list','sink-inputs']:
   streams.append({'index':13,'corked':False,'mute':False,'volume':{'front-left':{'value':32768},'front-right':{'value':32768}},'properties':{'application.name':'Fixture','application.process.id':Path(pidfile).read_text().strip()}})
  print(json.dumps(streams))
 elif a and a[0]=='set-sink-volume':p.write_text(json.dumps([int(n) for n in a[2:]]))
+elif a and a[0]=='set-sink-port':route[a[1]]=a[2];r.write_text(json.dumps(route))
+elif a and a[0]=='set-default-sink':route['default']=a[1];r.write_text(json.dumps(route))
+elif a and a[0]=='move-sink-input':
+ m=Path(os.environ['BHARTA_TEST_MOVES']);values=json.loads(m.read_text());values.append(a[1:]);m.write_text(json.dumps(values))
 elif 'list' in a:print('[]')
 ''')
     fake.chmod(0o755)
@@ -72,6 +96,11 @@ while True:
     fake_capture.chmod(0o755)
     env['PATH'] = str(runtime) + os.pathsep + env['PATH']
     env['BHARTA_TEST_AUDIO'] = str(state)
+    env['BHARTA_TEST_ROUTING'] = str(routing)
+    env['BHARTA_TEST_MOVES'] = str(moves)
+    initial_settings=Path(env['XDG_CONFIG_HOME'])/'bharta'
+    initial_settings.mkdir(parents=True)
+    (initial_settings/'config.json').write_text(json.dumps({'intervals':{'volume_ms':10000}}))
     env['BHARTA_TEST_WINDOW_PID'] = str(runtime / 'fixture.pid')
     env['BHARTA_TEST_ANIMATE'] = str(runtime / 'animate')
     for app, color in [('FIREFOX', (220, 105, 40)), ('SPOTIFY', (40, 180, 90))]:
@@ -183,11 +212,61 @@ while True:
         assert 0 < final[0] <= during[0] < 32768, 'Final slider position was lost'
         time.sleep(.3)
         assert json.loads(state.read_text())==final, 'Volume changed after commands settled'
+        # All destinations are visible without scrolling, with a reserved
+        # selection column. Clicking a port on another sink also moves playback.
+        popup_left=max(8,min(sound_x-168,1600-344))
+        marker_x=int(popup_left)+20
+        marker_ys=[y for y in range(280,600)
+                   if min(pixels.getpixel((marker_x,y)))>100
+                   and max(pixels.getpixel((marker_x-5,y)))<100
+                   and max(pixels.getpixel((marker_x+5,y)))<100]
+        assert marker_ys, 'Output table selection marker missing or clipped'
+        speaker_y=min(marker_ys)+2
+        reopen=probe(sound_x,14,'--hover',800);reopen.wait()
+        keeper=probe(marker_x+60,speaker_y,'--hover',2500)
+        time.sleep(.2);shot('external-volume-before')
+        state.write_text('[61440, 61440]')
+        time.sleep(.6);shot('external-volume-after')
+        before=Image.open(DEST/'external-volume-before.png').convert('RGB')
+        after=Image.open(DEST/'external-volume-after.png').convert('RGB')
+        slider_rect=(int(popup_left)+12,slider_y-7,int(popup_left)+324,slider_y+8)
+        assert ImageChops.difference(before,after).crop(slider_rect).getbbox(), 'External volume change waited for polling'
+        state.write_text(json.dumps(final));keeper.wait()
+        for offset,sink,port in [(29,'test','headphones'),(58,'hdmi','hdmi'),(0,'test','speaker')]:
+            ready=runtime/'output-ready'
+            ready.unlink(missing_ok=True)
+            click=probe(sound_x,14,'--hover-click',marker_x+60,speaker_y+offset,ready)
+            time.sleep(.7);ready.write_text('ready')
+            click.wait()
+            deadline=time.monotonic()+2
+            while time.monotonic()<deadline:
+                selected=json.loads(routing.read_text())
+                if selected['default']==sink and selected[sink]==port:break
+                time.sleep(.05)
+            assert selected['default']==sink and selected[sink]==port, f'Destination did not switch: {selected}'
+            while time.monotonic()<deadline and ['11',sink] not in json.loads(moves.read_text()):time.sleep(.05)
+            assert ['11',sink] in json.loads(moves.read_text()), 'Existing playback did not follow the output'
+        reopen=probe(sound_x,14,'--hover',800);time.sleep(.6);shot('output-table');reopen.wait()
         hover=probe(1580,14,'--hover',4000)
         time.sleep(3)
         shot('bar-hover')
         assert Image.open(DEST / 'bar-hover.png').getpixel((1250,80))[:3] != (0,0,0), 'Popup closed over the bar'
         hover.wait();holder.wait()
+        if '--audio-only' in sys.argv[2:]:
+            bar.terminate();bar.wait()
+            (initial_settings/'config.json').write_text(json.dumps({
+                'layout':{'sound_max_height':200},'intervals':{'volume_ms':10000},
+            }))
+            capped=start([str(BAR),'--dark','--output','HEADLESS-1'],'capped-sound.log')
+            time.sleep(1.2)
+            capped_hover=probe(sound_x,14,'--hover',1800);time.sleep(.8);shot('capped-sound')
+            capped_image=Image.open(DEST/'capped-sound.png').convert('RGB')
+            drawer_bounds=capped_image.crop((int(popup_left),28,int(popup_left)+336,900)).getbbox()
+            assert drawer_bounds and 220<=drawer_bounds[3]<=224, f'Configured Sound height not applied: {drawer_bounds}'
+            capped_hover.wait()
+            assert capped.poll() is None, 'Capped Sound drawer exited'
+            print('Headless audio screenshots and logs:', DEST)
+            sys.exit(0)
         outside=probe(600,600,'--hover',4000)
         time.sleep(3)
         shot('dismissed')
@@ -428,10 +507,10 @@ while True:
         # The desktop user's settings never enter this private session.
         second.terminate();second.wait()
         config_dir=Path(env['XDG_CONFIG_HOME'])/'bharta'
-        config_dir.mkdir(parents=True)
+        config_dir.mkdir(parents=True,exist_ok=True)
         (config_dir/'config.json').write_text(json.dumps({
             'appearance':{'dark':True,'font_size':13},
-            'layout':{'bar_height':34,'group_gap':12},
+            'layout':{'bar_height':34,'group_gap':12,'sound_max_height':200},
             'animation':{'preview_fade_ms':80},
             'colors':{'dark':{'bar':'#26313b','popup':'#29343e'}},
         }))
@@ -444,6 +523,14 @@ while True:
         run(['grim','-o','HEADLESS-2',str(DEST/'configured-preview.png')])
         assert Image.open(DEST/'configured-preview.png').convert('RGB').getpixel((10,80))==(41,52,62), 'Configured popup palette was not applied'
         custom_preview.wait()
+        configured_battery=next(x for x in range(3200,3800)
+            if all(min(configured_image.getpixel((dx,12)))>100 for dx in range(x,x+16)))
+        custom_sound=probe(configured_battery-68,17,'--hover',1800,output='HEADLESS-2',size=(3840,2160));time.sleep(.8)
+        run(['grim','-o','HEADLESS-2',str(DEST/'configured-sound.png')])
+        configured_sound=Image.open(DEST/'configured-sound.png').convert('RGB')
+        drawer_bounds=configured_sound.crop((3000,34,3840,2160)).getbbox()
+        assert drawer_bounds and 220<=drawer_bounds[3]<=224, f'Configured Sound height not applied: {drawer_bounds}'
+        custom_sound.wait()
         assert configured.poll() is None, 'Configured bar exited'
         print('Headless screenshots and logs:', DEST)
     finally:

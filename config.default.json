@@ -20,6 +20,7 @@
     "popup_padding": 12,
     "popup_width": 320,
     "sound_width": 336,
+    "sound_max_height": 720,
     "row_height": 28,
     "item_gap_x": 6,
     "item_gap_y": 5,

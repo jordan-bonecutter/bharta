@@ -1,8 +1,9 @@
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::Value;
 use std::{
-    io::Read,
-    process::{Command, Stdio},
+    io::{ErrorKind, Read},
+    os::fd::AsRawFd,
+    process::{Child, ChildStdout, Command, Stdio},
     sync::mpsc,
     time::Instant,
 };
@@ -356,26 +357,31 @@ fn apply(control: Control) -> Result<()> {
                 "Audio port is unavailable"
             );
             run(&["set-sink-port", &name, &port])?;
+            activate_output(&name)?;
         }
         Control::Output(name) => {
-            run(&["set-default-sink", &name])?;
-            // Move current playback too, so choosing an output is audible immediately.
-            let inputs: Value =
-                serde_json::from_slice(&run(&["--format=json", "list", "sink-inputs"])?)?;
-            for input in inputs.as_array().into_iter().flatten() {
-                if let Some(id) = input["index"].as_u64() {
-                    // A stream can disappear between enumeration and move.
-                    let _ = run(&["move-sink-input", &id.to_string(), &name]);
-                }
-            }
+            activate_output(&name)?;
         }
         Control::StreamVolume(_, _) | Control::StreamMute(_) => unreachable!(),
+    }
+    Ok(())
+}
+fn activate_output(name: &str) -> Result<()> {
+    run(&["set-default-sink", name])?;
+    // Move current playback too, so choosing any destination is audible immediately.
+    let inputs: Value = serde_json::from_slice(&run(&["--format=json", "list", "sink-inputs"])?)?;
+    for input in inputs.as_array().into_iter().flatten() {
+        if let Some(id) = input["index"].as_u64() {
+            // A stream can disappear between enumeration and move.
+            let _ = run(&["move-sink-input", &id.to_string(), name]);
+        }
     }
     Ok(())
 }
 pub fn watch(sender: std::sync::mpsc::Sender<Update>) -> mpsc::Sender<Request> {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
+        let mut subscription = Subscription::start().ok();
         let mut request = Request::Refresh;
         loop {
             let (completed, result) = match request {
@@ -391,18 +397,126 @@ pub fn watch(sender: std::sync::mpsc::Sender<Update>) -> mpsc::Sender<Request> {
             {
                 break;
             }
-            request = match rx.recv_timeout(crate::config::get().duration("intervals.volume_ms")) {
-                Ok(r) => r,
-                Err(mpsc::RecvTimeoutError::Timeout) => Request::Refresh,
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            let deadline = Instant::now() + crate::config::get().duration("intervals.volume_ms");
+            request = loop {
+                let wait = if subscription.is_some() {
+                    crate::config::get().duration("intervals.idle_poll_ms")
+                } else {
+                    deadline.saturating_duration_since(Instant::now())
+                };
+                match rx.recv_timeout(wait.min(deadline.saturating_duration_since(Instant::now())))
+                {
+                    Ok(r) => break r,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => return,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                }
+                if let Some(events) = subscription.as_mut() {
+                    match events.changed() {
+                        Ok(true) => break Request::Refresh,
+                        Ok(false) => {}
+                        Err(_) => subscription = None,
+                    }
+                }
+                if Instant::now() >= deadline {
+                    if subscription.is_none() {
+                        subscription = Subscription::start().ok();
+                    }
+                    break Request::Refresh;
+                }
             };
         }
     });
     tx
 }
+
+struct Subscription {
+    child: Child,
+    stdout: ChildStdout,
+    pending: Vec<u8>,
+}
+impl Subscription {
+    fn start() -> Result<Self> {
+        let mut child = Command::new("pactl")
+            .arg("subscribe")
+            .env("LC_ALL", "C")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()?;
+        let stdout = child.stdout.take().context("Missing pactl event stream")?;
+        let subscription = Self {
+            child,
+            stdout,
+            pending: Vec::new(),
+        };
+        let fd = subscription.stdout.as_raw_fd();
+        // The audio worker must keep servicing sliders while waiting for events.
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        ensure!(
+            flags >= 0 && unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } >= 0,
+            "Cannot make pactl event stream nonblocking"
+        );
+        Ok(subscription)
+    }
+    fn changed(&mut self) -> Result<bool> {
+        let mut changed = false;
+        let mut bytes = [0; 4096];
+        loop {
+            match self.stdout.read(&mut bytes) {
+                Ok(0) => bail!("Audio event stream disconnected"),
+                Ok(n) => {
+                    self.pending.extend_from_slice(&bytes[..n]);
+                    while let Some(end) = self.pending.iter().position(|b| *b == b'\n') {
+                        changed |= audio_event(&String::from_utf8_lossy(&self.pending[..end]));
+                        self.pending.drain(..=end);
+                    }
+                    ensure!(self.pending.len() <= 4096, "Oversized audio event");
+                }
+                Err(e) if e.kind() == ErrorKind::WouldBlock => return Ok(changed),
+                Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e.into()),
+            }
+        }
+    }
+}
+impl Drop for Subscription {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+fn audio_event(line: &str) -> bool {
+    [
+        " on sink #",
+        " on sink-input #",
+        " on server #",
+        " on card #",
+    ]
+    .iter()
+    .any(|facility| line.contains(facility))
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn refreshes_for_output_stream_and_default_device_events() {
+        for event in [
+            "Event 'change' on sink #42",
+            "Event 'new' on sink-input #7",
+            "Event 'remove' on sink-input #7",
+            "Event 'change' on server #0",
+            "Event 'change' on card #1",
+        ] {
+            assert!(audio_event(event), "ignored {event}");
+        }
+        for event in [
+            "Event 'change' on source #42",
+            "Event 'new' on client #2",
+            "",
+        ] {
+            assert!(!audio_event(event), "refreshed for {event}");
+        }
+    }
     fn fixture() -> Snapshot {
         parse(&serde_json::json!([{
         "name":"speaker", "channel_map":"front-right,front-left", "volume":{

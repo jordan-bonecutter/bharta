@@ -1068,6 +1068,18 @@ impl Ui {
             }
             _ => 0.,
         };
+        let screen_max_height = (height
+            - config::get().number("layout.bar_height")
+            - config::get().number("layout.popup_bottom_margin")
+            - 2. * config::get().number("layout.popup_padding"))
+        .max(1.);
+        let max_height = if kind == Menu::Sound {
+            config::get()
+                .number("layout.sound_max_height")
+                .min(screen_max_height)
+        } else {
+            screen_max_height.max(config::get().number("layout.popup_min_height"))
+        };
         let shown = egui::Area::new(egui::Id::new(("panel", self.serial)))
             .fixed_pos(pos2(x, config::get().number("layout.bar_height")))
             .order(egui::Order::Foreground)
@@ -1079,21 +1091,14 @@ impl Ui {
                     .inner_margin(config::get().number("layout.popup_padding") as i8)
                     .show(ui, |ui| {
                         ui.set_width(w - 2. * config::get().number("layout.popup_padding"));
+                        if kind == Menu::Sound {
+                            // Areas remember their previous size. Allow the drawer to grow
+                            // when streams/devices arrive, rather than scrolling at that size.
+                            ui.set_max_height(max_height);
+                        }
                         egui::ScrollArea::vertical()
-                            .min_scrolled_height(
-                                min_height.min(
-                                    (height
-                                        - config::get().number("layout.bar_height")
-                                        - config::get().number("layout.popup_bottom_margin"))
-                                    .max(config::get().number("layout.popup_min_height")),
-                                ),
-                            )
-                            .max_height(
-                                (height
-                                    - config::get().number("layout.bar_height")
-                                    - config::get().number("layout.popup_bottom_margin"))
-                                .max(config::get().number("layout.popup_min_height")),
-                            )
+                            .min_scrolled_height(min_height.min(max_height))
+                            .max_height(max_height)
                             .show(ui, |ui| {
                                 match kind {
                                     Menu::Sound => self.sound(ui),
@@ -1158,6 +1163,62 @@ fn flat(ui: &mut egui::Ui, text: impl Into<egui::WidgetText>) -> egui::Response 
                 config::get().number("layout.control_height"),
             )),
     )
+}
+
+fn output_row(ui: &mut egui::Ui, selected: bool, name: &str, device: &str) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(
+        vec2(
+            ui.available_width(),
+            config::get().number("layout.control_height"),
+        ),
+        egui::Sense::click(),
+    );
+    if response.hovered() || response.has_focus() {
+        ui.painter().rect_filled(
+            rect,
+            0,
+            config::get().color("hover", ui.visuals().dark_mode),
+        );
+    }
+    // Reserve the selection column even for inactive destinations.
+    let text_left = rect.left() + 20.;
+    if selected {
+        ui.painter().circle_filled(
+            pos2(rect.left() + 8., rect.center().y),
+            2.5,
+            ui.visuals().text_color(),
+        );
+    }
+    let split = text_left + (rect.right() - text_left) * 0.52;
+    for (text, left, right) in [
+        (
+            name,
+            text_left,
+            if device.is_empty() {
+                rect.right()
+            } else {
+                split - 6.
+            },
+        ),
+        (device, split, rect.right()),
+    ] {
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(Rect::from_min_max(
+                    pos2(left, rect.top()),
+                    pos2(right, rect.bottom()),
+                ))
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+            |ui| {
+                ui.add(egui::Label::new(text).truncate().selectable(false));
+            },
+        );
+    }
+    response.on_hover_text(if device.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{name} · {device}")
+    })
 }
 impl Ui {
     fn launcher(&mut self, ui: &mut egui::Ui) {
@@ -1532,36 +1593,21 @@ impl Ui {
             });
         }
         ui.separator();
+        ui.label("Output");
         for output in self.audio.outputs.clone() {
-            if flat(
-                ui,
-                format!(
-                    "{}{}",
-                    if output.name == self.audio.default {
-                        "•  "
-                    } else {
-                        ""
-                    },
-                    output.description
-                ),
-            )
-            .clicked()
-            {
-                self.control(volume::Control::Output(output.name.clone()));
-            }
-            if output.name == self.audio.default {
-                for port in output.ports.iter().filter(|p| p.available) {
-                    if flat(
+            let active = output.name == self.audio.default;
+            let ports: Vec<_> = output.ports.iter().filter(|p| p.available).collect();
+            if ports.is_empty() {
+                if output_row(ui, active, &output.description, "").clicked() {
+                    self.control(volume::Control::Output(output.name.clone()));
+                }
+            } else {
+                for port in ports {
+                    if output_row(
                         ui,
-                        format!(
-                            "    {}{}",
-                            if port.name == output.active_port {
-                                "•  "
-                            } else {
-                                ""
-                            },
-                            port.description
-                        ),
+                        active && port.name == output.active_port,
+                        &port.description,
+                        &output.description,
                     )
                     .clicked()
                     {
@@ -1571,21 +1617,23 @@ impl Ui {
                         ));
                     }
                 }
-                ui.collapsing("Channels", |ui| {
-                    for c in &output.channels {
-                        ui.label(&c.name);
-                        let mut v = c.percent() as f32;
-                        let width = ui.available_width();
-                        if volume_slider(ui, &mut v, width).changed() {
-                            self.control(volume::Control::Volume {
-                                output: output.name.clone(),
-                                channel: Some(c.name.clone()),
-                                percent: v.round() as u8,
-                            });
-                        }
-                    }
-                });
             }
+        }
+        if let Some(output) = self.audio.active().cloned() {
+            ui.collapsing("Channels", |ui| {
+                for c in &output.channels {
+                    ui.label(&c.name);
+                    let mut v = c.percent() as f32;
+                    let width = ui.available_width();
+                    if volume_slider(ui, &mut v, width).changed() {
+                        self.control(volume::Control::Volume {
+                            output: output.name.clone(),
+                            channel: Some(c.name.clone()),
+                            percent: v.round() as u8,
+                        });
+                    }
+                }
+            });
         }
     }
     fn processes(&mut self, ui: &mut egui::Ui) {

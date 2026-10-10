@@ -62,6 +62,12 @@ Use `--config /path/to/config.json` for a separate configuration. `--dark`,
 `--light`, and `--font` override file settings, including across all outputs.
 Restart bharta after editing.
 
+The Sound drawer grows with its contents up to `layout.sound_max_height`
+(720 logical pixels by default), then scrolls. It also stays within the screen.
+For a taller drawer, set `"layout": { "sound_max_height": 1000 }`.
+Volume keys and changes from other audio controls update through audio-server
+events; `intervals.volume_ms` controls fallback polling.
+
 You can include only the settings you want to change:
 
 ```json
