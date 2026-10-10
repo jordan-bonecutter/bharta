@@ -79,16 +79,22 @@ elif 'list' in a:print('[]')
 ''')
     fake.chmod(0o755)
     fake_capture = runtime / 'parec'
+    tray_tone = runtime / 'tray-tone'
+    tray_tone.write_text('375')
+    env['BHARTA_TEST_TRAY_TONE'] = str(tray_tone)
     fake_capture.write_text('''#!/usr/bin/env python3
-import math,struct,sys,time
+import math,os,struct,sys,time
+from pathlib import Path
 phase=0.0
 rate=24000
 args=sys.argv[1:]
 frequency=750 if '--monitor-stream=11' in args else 1600
 while True:
+ if not any(a.startswith('--monitor-stream=') for a in args):
+  frequency=float(Path(os.environ['BHARTA_TEST_TRAY_TONE']).read_text().strip() or frequency)
  values=[]
  for _ in range(1024):
-  values.append(int(10000*math.sin(phase)))
+  values.append(int(10000*math.sin(phase)) if frequency else 0)
   phase += 2*math.pi*frequency/rate
   if phase > 2*math.pi: phase -= 2*math.pi
  sys.stdout.buffer.write(struct.pack('<1024h',*values));sys.stdout.buffer.flush()
@@ -195,9 +201,27 @@ while True:
             if all(min(bar_pixels.getpixel((dx,9)))>100 for dx in range(x,x+16))),None)
         assert battery_left is not None, 'Cannot locate battery/Wi-Fi controls'
         wifi_x=battery_left-24
-        sound_x=battery_left-64
-        bluetooth_x=battery_left-104
-        cpu_x=battery_left-164
+        sound_x=battery_left-118
+        popup_left=max(8,min(sound_x-168,1600-344))
+        bluetooth_x=battery_left-64
+        cpu_x=battery_left-192
+        def tray_heights(image):
+            heights=[]
+            for i in range(7):
+                x=int(sound_x+2+i*24/7)
+                ys=[y for y in range(7,21)
+                    if max(image.getpixel((x,y)))-min(image.getpixel((x,y)))>70]
+                heights.append(len(ys))
+            return heights
+        time.sleep(.4);shot('tray-low')
+        low=tray_heights(Image.open(DEST/'tray-low.png').convert('RGB'))
+        assert low[2]>=10 and max(low[:2]+low[3:])<=3, f'Tray did not measure 375 Hz: {low}'
+        tray_tone.write_text('3000');time.sleep(.4);shot('tray-high')
+        high=tray_heights(Image.open(DEST/'tray-high.png').convert('RGB'))
+        assert high[5]>=10 and max(high[:5]+high[6:])<=3, f'Tray did not update to 3000 Hz: {high}'
+        tray_tone.write_text('0');time.sleep(.4);shot('tray-silent')
+        assert max(tray_heights(Image.open(DEST/'tray-silent.png').convert('RGB')))<=1, 'Tray fabricated activity during silence'
+        tray_tone.write_text('375')
         search_fixture=start(['python3','-c',
             'import ctypes,time; ctypes.CDLL(None).prctl(15,b"qzprocess",0,0,0); time.sleep(120)'], 'cpu-search-fixture.log')
         time.sleep(2)
@@ -320,7 +344,7 @@ while True:
         runs=[]
         for y in range(75,110):
             begin=None
-            for x in range(1100,1550):
+            for x in range(int(popup_left)+12,int(popup_left)+324):
                 bright=min(pixels.getpixel((x,y)))>150
                 if bright and begin is None: begin=x
                 if not bright and begin is not None:
@@ -342,7 +366,6 @@ while True:
         assert json.loads(state.read_text())==final, 'Volume changed after commands settled'
         # All destinations are visible without scrolling, with a reserved
         # selection column. Clicking a port on another sink also moves playback.
-        popup_left=max(8,min(sound_x-168,1600-344))
         marker_x=int(popup_left)+20
         marker_ys=[y for y in range(280,600)
                    if min(pixels.getpixel((marker_x,y)))>100
@@ -541,7 +564,7 @@ while True:
                                    for bar in bars if len(bar)<=3])
             return next((candidate for candidate in candidates if len(candidate)==7),candidates[0])
         def image_bounds(color):
-            pixels=[(x,y) for y in range(28,550) for x in range(1050,1300)
+            pixels=[(x,y) for y in range(28,550) for x in range(int(popup_left)+12,int(popup_left)+80)
                     if playing_image.getpixel((x,y))==color]
             assert pixels, f'Source artwork missing: {color}'
             xs,ys=zip(*pixels)
@@ -667,7 +690,7 @@ while True:
         custom_preview.wait()
         configured_battery=next(x for x in range(3200,3800)
             if all(min(configured_image.getpixel((dx,12)))>100 for dx in range(x,x+16)))
-        custom_sound=probe(configured_battery-68,17,'--hover',1800,output='HEADLESS-2',size=(3840,2160));time.sleep(.8)
+        custom_sound=probe(configured_battery-140,17,'--hover',1800,output='HEADLESS-2',size=(3840,2160));time.sleep(.8)
         run(['grim','-o','HEADLESS-2',str(DEST/'configured-sound.png')])
         configured_sound=Image.open(DEST/'configured-sound.png').convert('RGB')
         drawer_bounds=configured_sound.crop((3000,34,3840,2160)).getbbox()

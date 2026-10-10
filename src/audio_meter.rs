@@ -23,6 +23,12 @@ pub struct Capture {
 }
 impl Capture {
     pub fn start(levels: Arc<Mutex<[f64; 7]>>, stream: u32) -> std::io::Result<Self> {
+        Self::spawn(levels, Some(stream))
+    }
+    pub fn start_output(levels: Arc<Mutex<[f64; 7]>>) -> std::io::Result<Self> {
+        Self::spawn(levels, None)
+    }
+    fn spawn(levels: Arc<Mutex<[f64; 7]>>, stream: Option<u32>) -> std::io::Result<Self> {
         let mut command = Command::new("parec");
         command.args([
             "--device=@DEFAULT_MONITOR@",
@@ -32,7 +38,9 @@ impl Capture {
             "--channels=1",
             "--latency-msec=50",
         ]);
-        command.arg(format!("--monitor-stream={stream}"));
+        if let Some(stream) = stream {
+            command.arg(format!("--monitor-stream={stream}"));
+        }
         let mut child = command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -51,6 +59,9 @@ impl Capture {
                 if let Ok(mut output) = levels.lock() {
                     *output = analyze(&samples);
                 }
+            }
+            if let Ok(mut output) = levels.lock() {
+                *output = [0.; 7];
             }
         });
         Ok(Self {

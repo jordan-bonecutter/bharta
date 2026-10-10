@@ -29,6 +29,9 @@ struct Meter {
     capture: Option<audio_meter::Capture>,
     retry: Instant,
 }
+fn plot_color(level: f32) -> Color32 {
+    Color32::from(egui::ecolor::Hsva::new((1. - level) / 3., 0.65, 0.85, 1.))
+}
 struct Panel {
     kind: Menu,
     x: f32,
@@ -56,6 +59,9 @@ struct Ui {
     preview_pending: Option<workspace_preview::Snapshot>,
     textures: HashMap<String, egui::TextureHandle>,
     meters: HashMap<u32, Meter>,
+    tray_meter: Meter,
+    tray_levels: [f64; 7],
+    tray_output: Option<String>,
     query: String,
     selection: usize,
     selected_network: Option<network::Network>,
@@ -148,6 +154,13 @@ impl Ui {
             preview_pending: None,
             textures: HashMap::new(),
             meters: HashMap::new(),
+            tray_meter: Meter {
+                levels: Arc::new(Mutex::new([0.; 7])),
+                capture: None,
+                retry: Instant::now(),
+            },
+            tray_levels: [0.; 7],
+            tray_output: None,
             query: String::new(),
             selection: 0,
             selected_network: None,
@@ -522,6 +535,47 @@ impl Ui {
                 self.preview = Some(s);
             }
         }
+        let output = self
+            .audio
+            .active()
+            .filter(|output| {
+                !output.muted && self.audio.streams.iter().any(|s| !s.corked && !s.muted)
+            })
+            .map(|output| output.name.clone());
+        if output != self.tray_output {
+            self.tray_meter.capture = None;
+            *self.tray_meter.levels.lock().unwrap() = [0.; 7];
+            self.tray_meter.retry = Instant::now();
+            self.tray_output = output;
+        }
+        if self
+            .tray_meter
+            .capture
+            .as_mut()
+            .is_some_and(|c| !c.is_running())
+        {
+            self.tray_meter.capture = None;
+        }
+        if self.tray_output.is_some()
+            && self.tray_meter.capture.is_none()
+            && Instant::now() >= self.tray_meter.retry
+        {
+            self.tray_meter.retry =
+                Instant::now() + config::get().duration("intervals.meter_retry_ms");
+            self.tray_meter.capture =
+                audio_meter::Capture::start_output(self.tray_meter.levels.clone()).ok();
+        }
+        // Ignore sub-pixel noise so a steady tone doesn't repaint the whole bar.
+        let levels = self
+            .tray_meter
+            .levels
+            .lock()
+            .unwrap()
+            .map(|v| (v * 100.).round() / 100.);
+        if self.tray_levels != levels {
+            self.tray_levels = levels;
+            self.ctx.request_repaint();
+        }
         if self
             .panel
             .as_ref()
@@ -653,6 +707,7 @@ impl Ui {
         let margin = config::get().number("layout.bar_margin");
         let slot = config::get().number("layout.icon_slot_width");
         let cpu_width = config::get().number("layout.cpu_width");
+        let sound_width = config::get().number("layout.sound_tray_width");
         let session_width = config::get().number("layout.session_width");
         let apps_width = config::get().number("layout.apps_width");
         let workspace_width = config::get().number("layout.workspace_width");
@@ -921,20 +976,41 @@ impl Ui {
             Some(Icon::Wifi(self.state.extras.wifi_signal)),
             Menu::Wifi,
         );
-        let sound_x = wifi_x - slot - gap;
+        let bluetooth_x = wifi_x - slot - gap;
+        let sound_x = bluetooth_x - sound_width - gap;
         button(
             &mut targets,
             self,
             ui,
             Rect::from_min_size(
                 pos2(sound_x, 0.),
-                vec2(slot, config::get().number("layout.bar_height")),
+                vec2(sound_width, config::get().number("layout.bar_height")),
             ),
             "",
             Some(Icon::Volume(self.audio.active().is_some_and(|o| o.muted))),
             Menu::Sound,
         );
-        let bluetooth_x = sound_x - slot - gap;
+        let spectrum = Rect::from_min_max(
+            pos2(sound_x + slot, center_y - 7.),
+            pos2(sound_x + sound_width - 4., center_y + 7.),
+        );
+        if spectrum.width() > 0. {
+            let step = spectrum.width() / self.tray_levels.len() as f32;
+            for (i, level) in self.tray_levels.iter().enumerate() {
+                let level = *level as f32;
+                ui.painter().rect_filled(
+                    Rect::from_min_size(
+                        pos2(
+                            spectrum.left() + i as f32 * step,
+                            spectrum.bottom() - (level * spectrum.height()).max(1.),
+                        ),
+                        vec2((step - 1.).max(1.), (level * spectrum.height()).max(1.)),
+                    ),
+                    0,
+                    plot_color(level).gamma_multiply(if level > 0. { 1. } else { 0.2 }),
+                );
+            }
+        }
         button(
             &mut targets,
             self,
@@ -947,7 +1023,7 @@ impl Ui {
             Some(Icon::Bluetooth),
             Menu::Bluetooth,
         );
-        let cpu_x = bluetooth_x - cpu_width - gap;
+        let cpu_x = sound_x - cpu_width - gap;
         button(
             &mut targets,
             self,
@@ -981,8 +1057,7 @@ impl Ui {
                             - (self.cpu_history.len() - 1 - i) as f32 * chart.width() / 31.,
                         chart.bottom() - usage * chart.height(),
                     );
-                    let color =
-                        Color32::from(egui::ecolor::Hsva::new((1. - usage) / 3., 0.65, 0.85, 1.));
+                    let color = plot_color(usage);
                     (point, color)
                 })
                 .collect();
@@ -1014,7 +1089,7 @@ impl Ui {
         for separator in [
             cpu_x + cpu_width + gap / 2.,
             bluetooth_x + slot + gap / 2.,
-            sound_x + slot + gap / 2.,
+            sound_x + sound_width + gap / 2.,
             wifi_x + slot + gap / 2.,
             right + gap / 2.,
         ] {

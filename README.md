@@ -123,12 +123,15 @@ clicking again closes it until the pointer leaves that control.
   presentation follows compositor frame callbacks, and changed thumbnails invalidate
   their raster cache even after the opening fade. Capture stays in memory and
   stops when the preview closes.
-- Sound: individual app streams, per-stream volume/mute, source-specific
+- Sound: beside CPU, a live seven-band output spectrum uses the CPU plot's
+  green-to-red colors. `layout.sound_tray_width` sets its width (60px by default).
+  The drawer has individual app streams, per-stream volume/mute, source-specific
   frequency meters, MPRIS playback controls and artwork, output/port selection,
   master volume/mute, and expandable channels. Audio sliders use compact neutral
   tracks and round handles without percentage readouts. Paused sources retain their
-  sliders and row height. Meters monitor their own streams through `parec` and
-  stop when the drawer closes. Master volume preserves channel balance; changing
+  sliders and row height. Drawer meters monitor their own streams through `parec`
+  and stop when the drawer closes; the tray spectrum stays live while audio is active.
+  Master volume preserves channel balance; changing
   output moves current playback. Worker commands are ordered and slider updates
   are coalesced. Playback changes keep the speaker button in place.
 - Wi-Fi: aligned signal percentages, live connected RSSI on iwd, radio switch,
