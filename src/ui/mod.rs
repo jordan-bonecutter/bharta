@@ -909,18 +909,40 @@ impl Ui {
                 .iter()
                 .enumerate()
                 .map(|(i, percent)| {
-                    pos2(
+                    let usage = percent.clamp(0., 100.) / 100.;
+                    let point = pos2(
                         chart.right()
                             - (self.cpu_history.len() - 1 - i) as f32 * chart.width() / 31.,
-                        chart.bottom() - percent.clamp(0., 100.) / 100. * chart.height(),
-                    )
+                        chart.bottom() - usage * chart.height(),
+                    );
+                    let color =
+                        Color32::from(egui::ecolor::Hsva::new((1. - usage) / 3., 0.65, 0.85, 1.));
+                    (point, color)
                 })
                 .collect();
             if points.len() > 1 {
-                ui.painter()
-                    .add(egui::Shape::line(points, egui::Stroke::new(1_f32, color)));
-            } else if let Some(point) = points.first() {
-                ui.painter().circle_filled(*point, 1., color);
+                let mut fill = egui::Mesh::default();
+                for (point, color) in &points {
+                    let color = color.gamma_multiply(0.55);
+                    fill.colored_vertex(*point, color);
+                    fill.colored_vertex(pos2(point.x, chart.bottom()), color);
+                }
+                for i in 0..points.len() - 1 {
+                    let index = i as u32 * 2;
+                    fill.add_triangle(index, index + 1, index + 2);
+                    fill.add_triangle(index + 1, index + 3, index + 2);
+                }
+                ui.painter().add(egui::Shape::mesh(fill));
+                for pair in points.windows(2) {
+                    ui.painter()
+                        .line_segment([pair[0].0, pair[1].0], egui::Stroke::new(1_f32, pair[1].1));
+                }
+            } else if let Some((point, color)) = points.first() {
+                ui.painter().line_segment(
+                    [*point, pos2(point.x, chart.bottom())],
+                    egui::Stroke::new(1_f32, color.gamma_multiply(0.55)),
+                );
+                ui.painter().circle_filled(*point, 1., *color);
             }
         }
         for separator in [

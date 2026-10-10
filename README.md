@@ -128,7 +128,8 @@ clicking again closes it until the pointer leaves that control.
   scan, connect/disconnect, saved credentials, and a password
   field with reveal and clipboard paste. Enterprise and hidden networks can be
   provisioned in system network settings.
-- CPU: a compact icon and usage sparkline updated once a second. Hover or click
+- CPU: a compact icon and filled usage sparkline updated once a second, colored
+  from green at 0% to red at 100%. Hover or click
   for total usage and the busiest processes with PID, CPU usage, and resident
   memory. Type to search all running processes by name or PID.
   Process scanning runs only while the drawer is open. Sound and Wi-Fi use
