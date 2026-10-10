@@ -621,24 +621,18 @@ while True:
         playing_image=Image.open(DEST / 'playing.png').convert('RGB')
         assert_bar_alignment(playing_image, default_settings)
         def eq_heights(center):
-            candidates=[]
-            # Anchor to the source row, not the screen: clock/date and battery
-            # text move the popup horizontally across machines and days.
-            for left,right in ((control_right-84,control_right-30),):
-                columns=[]
-                for x in range(left,right):
-                    ys=[y for y in range(center-10,center+11)
-                        if min(playing_image.getpixel((x,y)))>120]
-                    if ys:
-                        columns.append((x,max(ys)-min(ys)))
-                bars=[]
-                for x,height in columns:
-                    if not bars or x>bars[-1][-1][0]+1:
-                        bars.append([])
-                    bars[-1].append((x,height))
-                candidates.append([max(height for _,height in bar)
-                                   for bar in bars if len(bar)<=3])
-            return next((candidate for candidate in candidates if len(candidate)==7),candidates[0])
+            # Sample each colored bar at its center, as for the closed tray.
+            # Dim idle baselines do not count as audio activity.
+            layout=default_settings['layout']
+            width=6*layout['meter_bar_gap']+layout['meter_bar_width']
+            left=control_right-layout['meter_offset']
+            heights=[]
+            for i in range(7):
+                x=int(left+(i+.5)*width/7)
+                ys=[y for y in range(center-10,center+11)
+                    if max(playing_image.getpixel((x,y)))-min(playing_image.getpixel((x,y)))>70]
+                heights.append(max(ys)-min(ys) if ys else 0)
+            return heights
         def image_bounds(color):
             pixels=[(x,y) for y in range(28,550) for x in range(int(popup_left)+12,int(popup_left)+80)
                     if playing_image.getpixel((x,y))==color]

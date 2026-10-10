@@ -49,6 +49,22 @@ impl Meter {
 fn plot_color(level: f32) -> Color32 {
     Color32::from(egui::ecolor::Hsva::new((1. - level) / 3., 0.65, 0.85, 1.))
 }
+fn paint_equalizer(painter: &egui::Painter, bounds: Rect, levels: &[f64; 7]) {
+    let painter = painter.with_clip_rect(bounds);
+    let step = bounds.width() / levels.len() as f32;
+    for (i, level) in levels.iter().enumerate() {
+        let level = *level as f32;
+        let height = (level * bounds.height()).max(1.);
+        painter.rect_filled(
+            Rect::from_min_size(
+                pos2(bounds.left() + i as f32 * step, bounds.bottom() - height),
+                vec2((step - 1.).max(1.).min(step), height),
+            ),
+            0,
+            plot_color(level).gamma_multiply(if level > 0. { 1. } else { 0.2 }),
+        );
+    }
+}
 struct Panel {
     kind: Menu,
     x: f32,
@@ -974,24 +990,7 @@ impl Ui {
             Menu::Sound,
         );
         if let Some((painter, spectrum)) = sound_layout.plot(ui.painter()) {
-            let step = spectrum.width() / self.tray_meter.displayed.len() as f32;
-            for (i, level) in self.tray_meter.displayed.iter().enumerate() {
-                let level = *level as f32;
-                painter.rect_filled(
-                    Rect::from_min_size(
-                        pos2(
-                            spectrum.left() + i as f32 * step,
-                            spectrum.bottom() - (level * spectrum.height()).max(1.),
-                        ),
-                        vec2(
-                            (step - 1.).max(1.).min(step),
-                            (level * spectrum.height()).max(1.),
-                        ),
-                    ),
-                    0,
-                    plot_color(level).gamma_multiply(if level > 0. { 1. } else { 0.2 }),
-                );
-            }
+            paint_equalizer(&painter, spectrum, &self.tray_meter.displayed);
         }
         button(
             &mut targets,
@@ -1925,24 +1924,7 @@ impl Ui {
                         meter_height,
                     ),
                 );
-                let meter_painter = ui.painter().with_clip_rect(meter_rect.expand(1.));
-                for (i, level) in levels.iter().enumerate() {
-                    let h = (level * config::get().number("layout.meter_height") as f64)
-                        .max(config::get().number("layout.meter_min_height") as f64)
-                        as f32;
-                    meter_painter.rect_filled(
-                        Rect::from_min_size(
-                            pos2(
-                                r.right() - config::get().number("layout.meter_offset")
-                                    + i as f32 * config::get().number("layout.meter_bar_gap"),
-                                r.center().y + 10. - h,
-                            ),
-                            vec2(config::get().number("layout.meter_bar_width"), h),
-                        ),
-                        0,
-                        ui.visuals().text_color(),
-                    );
-                }
+                paint_equalizer(ui.painter(), meter_rect, &levels);
                 ui.scope_builder(
                     egui::UiBuilder::new().max_rect(Rect::from_min_size(
                         pos2(
