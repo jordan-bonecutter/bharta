@@ -1,4 +1,4 @@
-use crate::{launcher, media, network, status, volume, workspace_preview};
+use crate::{bluetooth, launcher, media, network, status, volume, workspace_preview};
 use std::sync::mpsc;
 
 pub enum Job {
@@ -13,6 +13,8 @@ pub enum Event {
     Launched(u64, Result<(), String>),
 }
 pub struct Services {
+    pub bluetooth: mpsc::Sender<bluetooth::Request>,
+    pub bluetooth_events: mpsc::Receiver<bluetooth::Update>,
     pub cpu: mpsc::Sender<bool>,
     pub cpu_events: mpsc::Receiver<crate::cpu::Snapshot>,
     pub statuses: mpsc::Receiver<status::Status>,
@@ -29,6 +31,7 @@ pub struct Services {
 }
 impl Services {
     pub fn new(output: Option<String>) -> Self {
+        let (bluetooth, bluetooth_events) = bluetooth::watch();
         let (cpu, cpu_events) = crate::cpu::watch();
         let (status_tx, statuses) = mpsc::channel();
         let (status, requests) = mpsc::channel();
@@ -67,6 +70,8 @@ impl Services {
         let preview = workspace_preview::watch(tx);
         let (events_tx, events) = mpsc::channel();
         Self {
+            bluetooth,
+            bluetooth_events,
             cpu,
             cpu_events,
             statuses,

@@ -30,6 +30,20 @@ with tempfile.TemporaryDirectory(prefix='bharta-headless-') as directory:
                WLR_RENDERER='pixman', WLR_HEADLESS_OUTPUTS='1',
                DBUS_SYSTEM_BUS_ADDRESS='unix:path=' + str(runtime / 'no-system-bus'),
                PULSE_SERVER='unix:' + str(runtime / 'no-audio-server'))
+    # Synthetic sysfs keeps receiver tests independent of the user's hardware.
+    sysfs = runtime / 'sysfs'
+    env['BHARTA_TEST_SYSFS'] = str(sysfs)
+    for name, value in {
+        'bus/usb/devices/3-4/idVendor': '046d',
+        'bus/usb/devices/3-4/idProduct': 'c548',
+        'bus/usb/devices/3-4/manufacturer': 'Logitech',
+        'bus/usb/devices/3-4/product': 'USB Receiver',
+        'bus/hid/devices/bt-mouse/uevent': 'HID_ID=0005:0000046D:0000B023\nHID_NAME=Kernel Bluetooth mouse\nHID_UNIQ=AA:BB:CC:DD:EE:01\n',
+        'class/bluetooth/hci0/uevent': 'DEVTYPE=host',
+    }.items():
+        path = sysfs / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(value)
     state = runtime / 'volume.json'
     state.write_text('[32768, 32768]')
     routing = runtime / 'routing.json'
@@ -126,6 +140,10 @@ while True:
         bus_config.write_text('<busconfig><type>session</type><listen>unix:tmpdir=' + str(runtime) + '</listen><policy context="default"><allow send_destination="*"/><allow receive_sender="*"/><allow own="*"/></policy></busconfig>')
         bus = run(['dbus-daemon', '--config-file=' + str(bus_config), '--fork', '--print-address=1', '--print-pid=1']).stdout.splitlines()
         env['DBUS_SESSION_BUS_ADDRESS'] = bus[0]
+        env['DBUS_SYSTEM_BUS_ADDRESS'] = bus[0]
+        env['BHARTA_TEST_BLUETOOTH_LOG'] = str(DEST / 'bluetooth-discovery.txt')
+        (DEST / 'bluetooth-discovery.txt').write_text('')
+        bluetooth_fixture = start([str(ROOT / 'target/release/examples/headless_bluetooth')], 'bluetooth.log')
         sway = start(['sway', '--unsupported-gpu', '-c', str(config)], 'sway.log')
         for _ in range(100):
             sockets = list(runtime.glob('sway-ipc.*.sock'))
@@ -159,7 +177,8 @@ while True:
         assert battery_left is not None, 'Cannot locate battery/Wi-Fi controls'
         wifi_x=battery_left-24
         sound_x=battery_left-64
-        cpu_x=battery_left-124
+        bluetooth_x=battery_left-104
+        cpu_x=battery_left-164
         search_fixture=start(['python3','-c',
             'import ctypes,time; ctypes.CDLL(None).prctl(15,b"qzprocess",0,0,0); time.sleep(120)'], 'cpu-search-fixture.log')
         time.sleep(2)
@@ -207,10 +226,64 @@ while True:
         cpu_clicked=probe(cpu_x,14,'--click-hold',1000);time.sleep(.6);shot('process-monitor-clicked');cpu_clicked.wait()
         assert Image.open(DEST/'process-monitor-clicked.png').convert('RGB').getpixel((int(monitor_left)+5,80))!=(0,0,0), 'Clicking CPU did not open its monitor'
         leave_cpu=probe(600,600,'--hover',900);leave_cpu.wait()
+        def verify_bluetooth_fallback():
+            global bluetooth_fixture
+            # Without BlueZ, kernel Bluetooth inputs and USB receivers still render.
+            bluetooth_fixture.terminate();bluetooth_fixture.wait(timeout=3)
+            fallback=probe(bluetooth_x,14,'--click-hold',2500)
+            time.sleep(1.5);shot('bluetooth-receiver-fallback');fallback.wait()
+            fallback_image=Image.open(DEST/'bluetooth-receiver-fallback.png').convert('RGB')
+            receiver_text=sum(1 for y in range(115,150) for x in range(int(bt_left)+12,int(bt_left)+180)
+                              if min(fallback_image.getpixel((x,y)))>80)
+            assert receiver_text>20, 'Missing USB receiver row when BlueZ is unavailable'
+            before_scan=bt_log.read_text()
+            unavailable_scan=probe(bt_left+100,50,'--click-hold',1000);unavailable_scan.wait()
+            assert bt_log.read_text()==before_scan, 'Receiver fallback attempted Bluetooth discovery'
+            diagnostic=run([str(BAR),'--check-bluetooth']).stdout
+            assert 'Logitech USB Receiver (046d:c548)' in diagnostic, diagnostic
+            assert 'Kernel Bluetooth mouse' in diagnostic, diagnostic
+            assert 'BlueZ: false' in diagnostic, diagnostic
+            bluetooth_fixture=start([str(ROOT/'target/release/examples/headless_bluetooth')], 'bluetooth-restored.log')
+            time.sleep(1.5);shot('bluetooth-bluez-restored')
+            diagnostic=run([str(BAR),'--check-bluetooth']).stdout
+            assert 'BlueZ: true' in diagnostic, diagnostic
+            assert 'Studio headphones' in diagnostic, diagnostic
+            assert 'Logitech USB Receiver (046d:c548)' in diagnostic, diagnostic
         # All input is scoped to HEADLESS-1 on the private Wayland socket.
+        bluetooth_hover=probe(bluetooth_x,14,'--hover',1600)
+        time.sleep(1.2);shot('bluetooth-connected');bluetooth_hover.wait()
+        assert bluetooth_fixture.poll() is None, 'BlueZ fixture exited'
+        assert not (DEST/'bluetooth-discovery.txt').read_text(), 'Opening the menu started discovery without a scan request'
+        bt_image=Image.open(DEST/'bluetooth-connected.png').convert('RGB')
+        bt_left=max(8,min(bluetooth_x-160,1600-328))
+        assert bt_image.getpixel((bt_left+30,80)) != (0,0,0), 'Bluetooth devices popup missing'
+        scan=probe(bt_left+100,50,'--click-hold',2200)
+        time.sleep(1.6);shot('bluetooth-scan');scan.wait()
+        bt_log=DEST/'bluetooth-discovery.txt'
+        assert 'start' in bt_log.read_text().splitlines(), 'Scan did not call BlueZ StartDiscovery'
+        assert ImageChops.difference(Image.open(DEST/'bluetooth-connected.png'), Image.open(DEST/'bluetooth-scan.png')).crop((bt_left,70,bt_left+300,240)).getbbox(), 'Scan did not add the discovered device row'
+        leave_bt=probe(700,700,'--hover',1300);leave_bt.wait();time.sleep(.4)
+        assert bt_log.read_text().splitlines() == ['start','stop'], 'Closing Bluetooth did not release its discovery session'
+        reopen_bt=probe(bluetooth_x,14,'--click-hold',1200);time.sleep(.8);shot('bluetooth-reopened');reopen_bt.wait()
+        scan_again=probe(bt_left+100,50,'--click-hold',1200);time.sleep(.8);shot('bluetooth-scan-again');scan_again.wait()
+        assert bt_log.read_text().splitlines() == ['start','stop','start'], 'Second scan did not start'
+        stop_scan=probe(bt_left+100,50,'--click-hold',1200);time.sleep(.8);shot('bluetooth-stop');stop_scan.wait()
+        assert bt_log.read_text().splitlines() == ['start','stop','start','stop'], 'Stop scan did not release discovery'
+        bounded_scan=probe(bt_left+100,50,'--click-hold',14000)
+        time.sleep(13);shot('bluetooth-scan-complete');bounded_scan.wait()
+        assert bt_log.read_text().splitlines() == ['start','stop']*3, 'Discovery exceeded its 12 second deadline'
+
+        switch_scan=probe(bt_left+100,50,'--click-hold',1200);switch_scan.wait()
+        assert bt_log.read_text().splitlines() == ['start','stop']*3+['start'], 'Scan before menu switch did not start'
         holder = probe(sound_x, 14, '--click-hold', 6000)
         time.sleep(1)
         shot('sound')
+        assert bt_log.read_text().splitlines() == ['start','stop']*4, 'Switching menus did not release discovery'
+        if '--bluetooth-only' in sys.argv[2:]:
+            verify_bluetooth_fallback()
+            print('Headless Bluetooth screenshots and logs:', DEST)
+            sys.exit(0)
+
         assert Image.open(DEST / 'sound.png').getpixel((1250,80))[:3] != (0,0,0), 'Sound popup missing'
         sound_image=Image.open(DEST / 'sound.png').convert('RGB')
         assert sound_image.crop((1180,180,1530,520)).getbbox(), 'Per-application audio controls missing'
@@ -545,6 +618,7 @@ while True:
             assert 'Keyboard map:' not in (DEST/log).read_text(), f'Keyboard map failed on {log}'
         assert second.poll() is None, 'Second bar exited'
         assert bar.poll() is None, 'egui bar exited'
+        verify_bluetooth_fallback()
         # A real XDG config changes geometry, palette, timing, and typography.
         # The desktop user's settings never enter this private session.
         second.terminate();second.wait()

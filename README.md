@@ -42,7 +42,8 @@ bundled fallbacks. SF Mono is selected automatically when installed;
 
 At runtime, use Sway. Audio requires `pactl` and `parec` (usually
 `pulseaudio-utils`, or `libpulse` on Arch), with PulseAudio or PipeWire-Pulse.
-Wi-Fi uses iwd over D-Bus or NetworkManager through `nmcli`. Apps uses `gio launch`.
+Wi-Fi uses iwd over D-Bus or NetworkManager through `nmcli`. Bluetooth uses
+BlueZ over D-Bus directly from Rust, with no `bluetoothctl` dependency. Apps uses `gio launch`.
 The PNG sample exporter uses installed fonts or `--font`.
 
 ```sway
@@ -128,11 +129,19 @@ clicking again closes it until the pointer leaves that control.
   scan, connect/disconnect, saved credentials, and a password
   field with reveal and clipboard paste. Enterprise and hidden networks can be
   provisioned in system network settings.
+- Bluetooth: connected, saved, and discovered devices through BlueZ, plus
+  wireless USB receivers and Bluetooth input devices reported by Linux sysfs.
+  Receivers remain visible when BlueZ is absent; their presence does not claim
+  that a paired mouse or keyboard is awake. Bluetooth scanning uses BlueZ and a
+  powered adapter. Scan updates live for 12 seconds; Stop scan, closing the menu,
+  or switching menus releases discovery. `bharta --check-bluetooth` reports both
+  sources without starting a scan or changing hardware settings. No input device
+  is opened and no packages are installed by the bar.
 - CPU: a compact icon and filled usage sparkline updated once a second, colored
   from green at 0% to red at 100%. Hover or click
   for total usage and the busiest processes with PID, CPU usage, and resident
   memory. Type to search all running processes by name or PID.
-  Process scanning runs only while the drawer is open. Sound and Wi-Fi use
+  Process scanning runs only while the drawer is open. Sound, Wi-Fi, and Bluetooth use
   icon-only bar controls with consistent spacing.
 - Apps: immediately focused search, desktop-entry filtering, arrow-key selection,
   Enter to launch, or clickable rows. egui handles editing and selection; Wayland

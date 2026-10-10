@@ -2,8 +2,8 @@ mod keyboard;
 mod services;
 mod wayland;
 use crate::{
-    audio_meter, config, icons::Icon, launcher, media, network, popup_motion::Dismissal, status,
-    volume, workspace_preview,
+    audio_meter, bluetooth, config, icons::Icon, launcher, media, network, popup_motion::Dismissal,
+    status, volume, workspace_preview,
 };
 use egui::{Color32, Pos2, Rect, pos2, vec2};
 use services::{Event, Job, Services};
@@ -19,6 +19,7 @@ enum Menu {
     Apps,
     Sound,
     Wifi,
+    Bluetooth,
     Session,
     Cpu,
     Workspace(String),
@@ -44,6 +45,7 @@ struct Ui {
     cpu: crate::cpu::Snapshot,
     cpu_history: VecDeque<f32>,
     network: Option<network::Snapshot>,
+    bluetooth: Option<bluetooth::Snapshot>,
     apps: Vec<launcher::Entry>,
     panel: Option<Panel>,
     preview: Option<workspace_preview::Snapshot>,
@@ -136,6 +138,7 @@ impl Ui {
             cpu: crate::cpu::Snapshot::default(),
             cpu_history: VecDeque::with_capacity(32),
             network: None,
+            bluetooth: None,
             apps: vec![],
             panel: None,
             preview: None,
@@ -167,6 +170,7 @@ impl Ui {
             self.blocked_hover = Some(p.kind.clone());
             p.closing.get_or_insert(Instant::now());
         }
+        let _ = self.services.bluetooth.send(bluetooth::Request::Close);
         self.meters.clear();
         let _ = self.services.cpu.send(false);
         let _ = self.services.preview.send(None);
@@ -242,6 +246,13 @@ impl Ui {
                 let _ = self.services.media.send(media::Request::Refresh);
             }
             Menu::Wifi => self.services.network(self.serial, Job::Scan(false)),
+            Menu::Bluetooth => {
+                self.bluetooth = None;
+                let _ = self
+                    .services
+                    .bluetooth
+                    .send(bluetooth::Request::Open(self.serial));
+            }
             Menu::Workspace(name) => {
                 let _ = self.services.preview.send(Some((
                     name.clone(),
@@ -376,6 +387,23 @@ impl Ui {
         }
         if audio_changed {
             self.state.update_audio();
+        }
+        while let Ok((id, result)) = self.services.bluetooth_events.try_recv() {
+            if id == self.serial
+                && self
+                    .panel
+                    .as_ref()
+                    .is_some_and(|p| p.kind == Menu::Bluetooth && p.closing.is_none())
+            {
+                match result {
+                    Ok(s) => {
+                        self.bluetooth = Some(s);
+                        self.error.clear();
+                    }
+                    Err(e) => self.error = e,
+                }
+                self.ctx.request_repaint();
+            }
         }
         while let Ok(event) = self.services.events.try_recv() {
             self.ctx.request_repaint();
@@ -515,6 +543,7 @@ impl Ui {
                         .unwrap_or(0),
                 Icon::Charging => 8,
                 Icon::Cpu => 9,
+                Icon::Bluetooth => 14,
             }
         );
         let ctx = &self.ctx;
@@ -881,7 +910,20 @@ impl Ui {
             Some(Icon::Volume(self.audio.active().is_some_and(|o| o.muted))),
             Menu::Sound,
         );
-        let cpu_x = sound_x - cpu_width - gap;
+        let bluetooth_x = sound_x - slot - gap;
+        button(
+            &mut targets,
+            self,
+            ui,
+            Rect::from_min_size(
+                pos2(bluetooth_x, 0.),
+                vec2(slot, config::get().number("layout.bar_height")),
+            ),
+            "",
+            Some(Icon::Bluetooth),
+            Menu::Bluetooth,
+        );
+        let cpu_x = bluetooth_x - cpu_width - gap;
         button(
             &mut targets,
             self,
@@ -947,6 +989,7 @@ impl Ui {
         }
         for separator in [
             cpu_x + cpu_width + gap / 2.,
+            bluetooth_x + slot + gap / 2.,
             sound_x + slot + gap / 2.,
             wifi_x + slot + gap / 2.,
             right + gap / 2.,
@@ -1094,6 +1137,26 @@ impl Ui {
             ctx.request_repaint_after(config::get().duration("animation.frame_ms"));
         }
         let min_height = match &kind {
+            Menu::Bluetooth => {
+                let row = config::get().number("layout.control_height");
+                self.bluetooth.as_ref().map_or(3. * row, |s| {
+                    let groups = [
+                        s.devices.iter().any(|d| d.connected),
+                        s.devices.iter().any(|d| !d.connected && d.paired),
+                        s.devices.iter().any(|d| !d.connected && !d.paired),
+                    ]
+                    .into_iter()
+                    .filter(|present| *present)
+                    .count();
+                    (2 + groups
+                        + s.devices.len()
+                        + s.receivers.len()
+                        + usize::from(!s.receivers.is_empty())
+                        + usize::from(!s.bluez)
+                        + usize::from(s.scanning)) as f32
+                        * row
+                })
+            }
             Menu::Cpu => {
                 let query = self.query.trim().to_lowercase();
                 2. * config::get().number("layout.row_height")
@@ -1160,6 +1223,7 @@ impl Ui {
                                     Menu::Sound => self.sound(ui),
                                     Menu::Apps => self.launcher(ui),
                                     Menu::Wifi => self.wifi(ui),
+                                    Menu::Bluetooth => self.bluetooth(ui),
                                     Menu::Session => self.session(ui),
                                     Menu::Cpu => self.processes(ui),
                                     Menu::Workspace(_) => self.workspace(ui),
@@ -1209,6 +1273,33 @@ impl Ui {
                     || p.clicked)
         })
     }
+}
+
+fn wireless_row(ui: &mut egui::Ui, name: &str, detail: &str, tooltip: &str) {
+    let (rect, response) = ui.allocate_exact_size(
+        vec2(
+            ui.available_width(),
+            config::get().number("layout.control_height"),
+        ),
+        egui::Sense::hover(),
+    );
+    response.on_hover_text(tooltip);
+    ui.scope_builder(
+        egui::UiBuilder::new().max_rect(Rect::from_min_max(
+            rect.min + vec2(4., 3.),
+            rect.max - vec2(90., 0.),
+        )),
+        |ui| {
+            ui.add(egui::Label::new(name).truncate());
+        },
+    );
+    ui.painter().text(
+        pos2(rect.right() - 4., rect.center().y),
+        egui::Align2::RIGHT_CENTER,
+        detail,
+        egui::FontId::proportional(config::get().number("appearance.font_size")),
+        ui.visuals().weak_text_color(),
+    );
 }
 
 fn flat(ui: &mut egui::Ui, text: impl Into<egui::WidgetText>) -> egui::Response {
@@ -1425,6 +1516,101 @@ impl Ui {
             }
         } else {
             ui.label("Scanning…");
+        }
+    }
+    fn bluetooth(&mut self, ui: &mut egui::Ui) {
+        let snapshot = self.bluetooth.clone();
+        ui.horizontal(|ui| {
+            ui.label("Bluetooth");
+            let scanning = snapshot.as_ref().is_some_and(|s| s.scanning);
+            if ui
+                .add_enabled(
+                    snapshot.as_ref().is_some_and(|s| s.enabled()),
+                    egui::Button::new(if scanning { "Stop scan" } else { "Scan" }).frame(false),
+                )
+                .clicked()
+            {
+                let _ = self.services.bluetooth.send(if scanning {
+                    bluetooth::Request::Stop
+                } else {
+                    bluetooth::Request::Scan
+                });
+            }
+        });
+        let Some(s) = snapshot else {
+            if self.error.is_empty() {
+                ui.weak("Loading devices…");
+            }
+            return;
+        };
+        for (title, group) in [
+            (
+                if s.bluez {
+                    "Connected"
+                } else {
+                    "Bluetooth inputs"
+                },
+                0,
+            ),
+            ("Saved devices", 1),
+            ("Other devices", 2),
+        ] {
+            let devices: Vec<_> = s
+                .devices
+                .iter()
+                .filter(|d| {
+                    if d.connected {
+                        group == 0
+                    } else if d.paired {
+                        group == 1
+                    } else {
+                        group == 2
+                    }
+                })
+                .collect();
+            if devices.is_empty() {
+                continue;
+            }
+            ui.weak(title);
+            for device in devices {
+                let detail = if !s.bluez {
+                    "Present".into()
+                } else if device.connected {
+                    "Connected".into()
+                } else {
+                    device.rssi.map(|r| format!("{r} dBm")).unwrap_or_default()
+                };
+                wireless_row(ui, &device.name, &detail, &device.address);
+            }
+        }
+        if !s.receivers.is_empty() {
+            ui.weak("Wireless receivers");
+            for receiver in &s.receivers {
+                wireless_row(
+                    ui,
+                    &receiver.name,
+                    "USB",
+                    &format!(
+                        "{}\n{}\nReceiver present; paired-device connection state is unavailable",
+                        receiver.id, receiver.path
+                    ),
+                );
+            }
+        }
+        if !s.bluez {
+            ui.weak("Bluetooth scan unavailable").on_hover_text(
+                s.notice
+                    .as_deref()
+                    .unwrap_or("Bluetooth discovery service is unavailable"),
+            );
+        } else if s.adapters.is_empty() {
+            ui.weak("No Bluetooth adapter");
+        } else if !s.enabled() {
+            ui.weak("Bluetooth is off");
+        } else if s.scanning {
+            ui.weak("Scanning…");
+        } else if s.devices.is_empty() && s.receivers.is_empty() {
+            ui.weak("No devices found");
         }
     }
     fn session(&mut self, ui: &mut egui::Ui) {

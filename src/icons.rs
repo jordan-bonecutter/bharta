@@ -4,6 +4,7 @@ use tiny_skia::{Color, Paint, PathBuilder, Pixmap, Rect, Stroke, Transform};
 pub enum Icon {
     Charging,
     Cpu,
+    Bluetooth,
     Volume(bool),
     Music,
     Play,
@@ -40,6 +41,27 @@ pub fn draw(pix: &mut Pixmap, icon: Icon, x: f32, y: f32, size: f32, scale: f32,
         fill(pix, p);
     };
     match icon {
+        Icon::Bluetooth => {
+            let mut p = PathBuilder::new();
+            p.move_to(6., 6.);
+            p.line_to(18., 17.);
+            p.line_to(12., 22.);
+            p.line_to(12., 2.);
+            p.line_to(18., 7.);
+            p.line_to(6., 18.);
+            pix.stroke_path(
+                &p.finish().unwrap(),
+                &paint,
+                &Stroke {
+                    width: 1.8,
+                    line_cap: tiny_skia::LineCap::Round,
+                    line_join: tiny_skia::LineJoin::Round,
+                    ..Default::default()
+                },
+                transform,
+                None,
+            );
+        }
         Icon::Cpu => {
             for (x, y, w, h) in [
                 (6., 6., 12., 2.),

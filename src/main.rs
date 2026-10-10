@@ -1,5 +1,6 @@
 mod artwork;
 mod audio_meter;
+mod bluetooth;
 mod capture;
 mod config;
 mod cpu;
@@ -30,6 +31,7 @@ struct Options {
     preview: Option<String>,
     smoke: bool,
     check_network: bool,
+    check_bluetooth: bool,
     check_media: bool,
     config: Option<String>,
 }
@@ -60,10 +62,11 @@ fn options() -> Result<Options> {
             }
             "--smoke-test" => options.smoke = true,
             "--check-network" => options.check_network = true,
+            "--check-bluetooth" => options.check_bluetooth = true,
             "--check-media" => options.check_media = true,
             "--help" | "-h" => {
                 println!(
-                    "bharta — native Sway menu bar\n\nUsage: bharta [--dark] [--all-outputs | --output NAME] [--font PATH]\n       bharta [--dark] --preview FILE.png\n       bharta --smoke-test\n\nClick workspaces to switch. Default: all active outputs. Default settings: ~/.config/bharta/config.json (or XDG_CONFIG_HOME).\n--config PATH selects a configuration file; --print-config prints all defaults.\n--dark / --light and --font override configuration.\n--preview renders sample data without connecting to Wayland.\n--smoke-test connects, renders a frame, then exits."
+                    "bharta — native Sway menu bar\n\nUsage: bharta [--dark] [--all-outputs | --output NAME] [--font PATH]\n       bharta [--dark] --preview FILE.png\n       bharta --smoke-test\n\nClick workspaces to switch. Default: all active outputs. Default settings: ~/.config/bharta/config.json (or XDG_CONFIG_HOME).\n--config PATH selects a configuration file; --print-config prints all defaults.\n--dark / --light and --font override configuration.\n--preview renders sample data without connecting to Wayland.\n--smoke-test connects, renders a frame, then exits.\n--check-bluetooth checks BlueZ and lists devices without changing Bluetooth settings."
                 );
                 std::process::exit(0);
             }
@@ -88,6 +91,39 @@ fn main() -> Result<()> {
         .map(|pair| std::path::PathBuf::from(&pair[1]));
     config::init(path)?;
     let options = options()?;
+    if options.check_bluetooth {
+        let snapshot = bluetooth::snapshot()?;
+        println!(
+            "BlueZ: {}; Bluetooth adapters: {}; Bluetooth devices: {}; wireless receivers: {}",
+            snapshot.bluez,
+            snapshot.adapters.len(),
+            snapshot.devices.len(),
+            snapshot.receivers.len()
+        );
+        if let Some(notice) = &snapshot.notice {
+            println!("{notice}");
+        }
+        for receiver in &snapshot.receivers {
+            println!("{} ({}) — USB receiver present", receiver.name, receiver.id);
+        }
+        for device in snapshot.devices {
+            println!(
+                "{} ({}) — {}",
+                device.name,
+                device.address,
+                if !snapshot.bluez {
+                    "kernel input present"
+                } else if device.connected {
+                    "connected"
+                } else if device.paired {
+                    "saved"
+                } else {
+                    "discovered"
+                }
+            );
+        }
+        return Ok(());
+    }
     if options.check_network {
         let snapshot = network::scan(false)?;
         println!(
