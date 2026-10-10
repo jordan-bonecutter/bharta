@@ -1154,16 +1154,14 @@ impl Ui {
                 let row = config::get().number("layout.control_height");
                 self.bluetooth.as_ref().map_or(3. * row, |s| {
                     let groups = [
-                        s.devices.iter().any(|d| d.connected),
-                        s.devices.iter().any(|d| !d.connected && d.paired),
+                        s.devices.iter().any(|d| d.connected || d.paired),
                         s.devices.iter().any(|d| !d.connected && !d.paired),
                     ]
                     .into_iter()
                     .filter(|present| *present)
                     .count();
-                    (2 + groups
+                    (1 + groups
                         + s.devices.len()
-                        + usize::from(s.scanning)
                         + 3 * usize::from(s.prompt.is_some())
                         + 2 * usize::from(s.action_error.is_some())
                         + usize::from(s.busy.is_some())) as f32
@@ -1228,9 +1226,15 @@ impl Ui {
                             // when streams/devices arrive, rather than scrolling at that size.
                             ui.set_max_height(max_height);
                         }
+                        let content_max_height = if kind == Menu::Bluetooth {
+                            (max_height - 2. * config::get().number("layout.control_height") - 16.)
+                                .max(1.)
+                        } else {
+                            max_height
+                        };
                         egui::ScrollArea::vertical()
-                            .min_scrolled_height(min_height.min(max_height))
-                            .max_height(max_height)
+                            .min_scrolled_height(min_height.min(content_max_height))
+                            .max_height(content_max_height)
                             .show(ui, |ui| {
                                 match kind {
                                     Menu::Sound => self.sound(ui),
@@ -1245,6 +1249,9 @@ impl Ui {
                                     ui.add(egui::Label::new(&self.error).wrap());
                                 }
                             });
+                        if kind == Menu::Bluetooth {
+                            self.bluetooth_scan(ui);
+                        }
                     });
             });
         self.panel_rect = shown.response.rect;
@@ -1506,25 +1513,7 @@ impl Ui {
     }
     fn bluetooth(&mut self, ui: &mut egui::Ui) {
         let snapshot = self.bluetooth.clone();
-        ui.horizontal(|ui| {
-            ui.label("Bluetooth");
-            let scanning = snapshot.as_ref().is_some_and(|s| s.scanning);
-            if ui
-                .add_enabled(
-                    snapshot
-                        .as_ref()
-                        .is_some_and(|s| s.enabled() && s.busy.is_none()),
-                    egui::Button::new(if scanning { "Stop scan" } else { "Scan" }).frame(false),
-                )
-                .clicked()
-            {
-                let _ = self.services.bluetooth.send(if scanning {
-                    bluetooth::Request::Stop
-                } else {
-                    bluetooth::Request::Scan
-                });
-            }
-        });
+        ui.label("Bluetooth");
         let Some(s) = snapshot else {
             if self.error.is_empty() {
                 ui.weak("Loading devices…");
@@ -1604,19 +1593,11 @@ impl Ui {
         if let Some(error) = &s.action_error {
             ui.label(error);
         }
-        for (title, group) in [("Connected", 0), ("Saved devices", 1), ("Other devices", 2)] {
+        for (title, paired) in [("Paired devices", true), ("Nearby devices", false)] {
             let devices: Vec<_> = s
                 .devices
                 .iter()
-                .filter(|d| {
-                    if d.connected {
-                        group == 0
-                    } else if d.paired {
-                        group == 1
-                    } else {
-                        group == 2
-                    }
-                })
+                .filter(|d| (d.connected || d.paired) == paired)
                 .collect();
             if devices.is_empty() {
                 continue;
@@ -1684,10 +1665,46 @@ impl Ui {
                 }
             }
         }
-        if s.scanning {
-            ui.weak("Scanning…");
-        } else if s.devices.is_empty() {
+        if s.devices.is_empty() {
             ui.weak("No devices found");
+        }
+    }
+    fn bluetooth_scan(&mut self, ui: &mut egui::Ui) {
+        ui.separator();
+        let snapshot = self.bluetooth.as_ref();
+        let scanning = snapshot.is_some_and(|s| s.scanning);
+        let owned = snapshot.is_some_and(|s| s.scan_owned);
+        ui.weak(if scanning {
+            "Bluetooth radio scanning…"
+        } else {
+            "Bluetooth radio idle"
+        });
+        if ui
+            .add_enabled_ui(
+                snapshot.is_some_and(|s| s.enabled() && s.busy.is_none()),
+                |ui| {
+                    ui.add_sized(
+                        vec2(
+                            ui.available_width(),
+                            config::get().number("layout.control_height") + 4.,
+                        ),
+                        egui::Button::new(if owned {
+                            "Stop Bluetooth scan"
+                        } else {
+                            "Bluetooth scan"
+                        })
+                        .frame(true),
+                    )
+                },
+            )
+            .inner
+            .clicked()
+        {
+            let _ = self.services.bluetooth.send(if owned {
+                bluetooth::Request::Stop
+            } else {
+                bluetooth::Request::Scan
+            });
         }
     }
     fn session(&mut self, ui: &mut egui::Ui) {

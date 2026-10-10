@@ -24,6 +24,10 @@ impl Adapter {
         self.record("stop");
     }
     #[zbus(property)]
+    fn discovering(&self) -> bool {
+        self.scanning.load(Ordering::SeqCst)
+    }
+    #[zbus(property)]
     fn powered(&self) -> bool {
         true
     }

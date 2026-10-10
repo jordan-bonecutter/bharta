@@ -130,7 +130,10 @@ clicking again closes it until the pointer leaves that control.
   field with reveal and clipboard paste. Enterprise and hidden networks can be
   provisioned in system network settings.
 - Bluetooth: connected, saved, and discovered devices through BlueZ with names,
-  signal strength, and battery percentages when available. Pair new devices with
+  signal strength, and battery percentages when available. Paired devices stay
+  at the top; nearby devices sort by strongest signal first. The bottom Bluetooth
+  scan button starts discovery, and the radio status shows active scanning.
+  Pair new devices with
   confirmation/PIN prompts, reconnect saved devices, or disconnect devices.
   Requires the system BlueZ service and a powered adapter. Closing or switching
   menus cancels pending pairing.

@@ -221,7 +221,13 @@ while True:
         bt_image=Image.open(DEST/'bluetooth-connected.png').convert('RGB')
         bt_left=max(8,min(bluetooth_x-160,1600-328))
         assert bt_image.getpixel((bt_left+30,80)) != (0,0,0), 'Bluetooth devices popup missing'
-        scan=probe(bt_left+100,50,'--click-hold',2200)
+        def bluetooth_scan_button(duration):
+            shot('bluetooth-controls')
+            image=Image.open(DEST/'bluetooth-controls.png').convert('RGB')
+            bounds=image.crop((bt_left,28,bt_left+320,900)).getbbox()
+            assert bounds, 'Bluetooth popup missing'
+            return probe(bt_left+120,28+bounds[3]-20,'--click-hold',duration)
+        scan=bluetooth_scan_button(2200)
         time.sleep(1.6);shot('bluetooth-scan');scan.wait()
         bt_log=DEST/'bluetooth-discovery.txt'
         assert 'start' in bt_log.read_text().splitlines(), 'Scan did not call BlueZ StartDiscovery'
@@ -229,15 +235,15 @@ while True:
         leave_bt=probe(700,700,'--hover',1300);leave_bt.wait();time.sleep(.4)
         assert bt_log.read_text().splitlines() == ['start','stop'], 'Closing Bluetooth did not release its discovery session'
         reopen_bt=probe(bluetooth_x,14,'--click-hold',1200);time.sleep(.8);shot('bluetooth-reopened');reopen_bt.wait()
-        scan_again=probe(bt_left+100,50,'--click-hold',1200);time.sleep(.8);shot('bluetooth-scan-again');scan_again.wait()
+        scan_again=bluetooth_scan_button(1200);time.sleep(.8);shot('bluetooth-scan-again');scan_again.wait()
         assert bt_log.read_text().splitlines() == ['start','stop','start'], 'Second scan did not start'
-        stop_scan=probe(bt_left+100,50,'--click-hold',1200);time.sleep(.8);shot('bluetooth-stop');stop_scan.wait()
+        stop_scan=bluetooth_scan_button(1200);time.sleep(.8);shot('bluetooth-stop');stop_scan.wait()
         assert bt_log.read_text().splitlines() == ['start','stop','start','stop'], 'Stop scan did not release discovery'
-        bounded_scan=probe(bt_left+100,50,'--click-hold',14000)
+        bounded_scan=bluetooth_scan_button(14000)
         time.sleep(13);shot('bluetooth-scan-complete');bounded_scan.wait()
         assert bt_log.read_text().splitlines() == ['start','stop']*3, 'Discovery exceeded its 12 second deadline'
 
-        switch_scan=probe(bt_left+100,50,'--click-hold',1200);switch_scan.wait()
+        switch_scan=bluetooth_scan_button(1200);switch_scan.wait()
         assert bt_log.read_text().splitlines() == ['start','stop']*3+['start'], 'Scan before menu switch did not start'
         holder = probe(sound_x, 14, '--click-hold', 6000)
         time.sleep(1)
@@ -252,19 +258,19 @@ while True:
             raise AssertionError(diagnostic)
         assert 'battery 73%' in bluetooth_status('Studio headphones')
         reopen=probe(bluetooth_x,14,'--hover',1800);time.sleep(1.2);reopen.wait()
-        pair=probe(bt_left+240,178,'--click-hold',2200);time.sleep(1.5);shot('bluetooth-pair-confirmation');pair.wait()
+        pair=probe(bt_left+240,160,'--click-hold',2200);time.sleep(1.5);shot('bluetooth-pair-confirmation');pair.wait()
         actions=Path(str(bt_log)+'.actions')
         assert actions.exists() and 'confirmation' in actions.read_text(), 'Pair did not register and invoke its agent'
         cancel=probe(bt_left+95,96,'--click-hold',1600);cancel.wait()
         bluetooth_status('Nearby speaker (AA:BB:CC:DD:EE:FF) — discovered')
         assert 'paired' not in actions.read_text(), 'Cancel accepted Bluetooth pairing'
-        pair=probe(bt_left+240,178,'--click-hold',2200);time.sleep(1.5);pair.wait()
+        pair=probe(bt_left+240,160,'--click-hold',2200);time.sleep(1.5);pair.wait()
         confirm=probe(bt_left+30,96,'--click-hold',1800);confirm.wait()
         bluetooth_status('Nearby speaker (AA:BB:CC:DD:EE:FF) — connected')
         shot('bluetooth-paired')
         disconnect=probe(bt_left+240,96,'--click-hold',1800);disconnect.wait()
         bluetooth_status('Nearby speaker (AA:BB:CC:DD:EE:FF) — saved')
-        reconnect=probe(bt_left+240,158,'--click-hold',1800);reconnect.wait()
+        reconnect=probe(bt_left+240,140,'--click-hold',1800);reconnect.wait()
         bluetooth_status('Nearby speaker (AA:BB:CC:DD:EE:FF) — connected')
         assert actions.read_text().splitlines()==['confirmation','confirmation','paired','connected','disconnected','connected'], actions.read_text()
         shot('bluetooth-reconnected')

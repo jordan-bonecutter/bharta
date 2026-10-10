@@ -37,6 +37,7 @@ pub struct Snapshot {
     pub adapters: Vec<(String, bool)>,
     pub devices: Vec<Device>,
     pub scanning: bool,
+    pub scan_owned: bool,
     pub busy: Option<String>,
     pub prompt: Option<Prompt>,
     pub action_error: Option<String>,
@@ -67,6 +68,7 @@ fn parse(objects: Objects) -> Snapshot {
     let mut snapshot = Snapshot::default();
     for (path, interfaces) in objects {
         if let Some(props) = interfaces.get(ADAPTER) {
+            snapshot.scanning |= boolean(props, "Discovering");
             snapshot
                 .adapters
                 .push((path.to_string(), boolean(props, "Powered")));
@@ -96,6 +98,13 @@ fn parse(objects: Objects) -> Snapshot {
         b.connected
             .cmp(&a.connected)
             .then(b.paired.cmp(&a.paired))
+            .then_with(|| {
+                if !a.connected && !a.paired && !b.connected && !b.paired {
+                    b.rssi.cmp(&a.rssi)
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            })
             .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
             .then(a.path.cmp(&b.path))
     });
@@ -170,7 +179,8 @@ impl Session {
             .get_managed_objects()
             .map_err(bluez_error)?;
         let mut snapshot = parse(objects);
-        snapshot.scanning = !self.discovery.is_empty();
+        snapshot.scan_owned = !self.discovery.is_empty();
+        snapshot.scanning |= snapshot.scan_owned;
         snapshot.busy = self.job.as_ref().map(|j| j.path.clone());
         snapshot.prompt = self.agent.lock().unwrap().prompt.clone();
         snapshot.action_error = self.action_error.clone();
@@ -430,6 +440,46 @@ mod tests {
             props.insert("Alias".into(), zbus::zvariant::Str::from(name).into());
         }
         props
+    }
+    #[test]
+    fn nearby_signals_are_strongest_first_after_paired_devices() {
+        let mut objects = Objects::new();
+        for (path, name, paired, rssi) in [
+            ("/org/bluez/hci0/dev_saved", "Saved", true, Some(-90)),
+            ("/org/bluez/hci0/dev_weak", "A weak", false, Some(-60)),
+            ("/org/bluez/hci0/dev_strong", "Z strong", false, Some(-50)),
+            ("/org/bluez/hci0/dev_unknown", "Unknown", false, None),
+        ] {
+            let mut props = device(Some(name), false, paired);
+            if let Some(rssi) = rssi {
+                props.insert("RSSI".into(), OwnedValue::from(rssi as i16));
+            }
+            objects.insert(
+                path.try_into().unwrap(),
+                HashMap::from([(DEVICE.try_into().unwrap(), props)]),
+            );
+        }
+        objects.insert(
+            "/org/bluez/hci0".try_into().unwrap(),
+            HashMap::from([(
+                ADAPTER.try_into().unwrap(),
+                HashMap::from([("Discovering".into(), OwnedValue::from(true))]),
+            )]),
+        );
+        let snapshot = parse(objects);
+        assert_eq!(
+            snapshot
+                .devices
+                .iter()
+                .map(|d| d.name.as_str())
+                .collect::<Vec<_>>(),
+            ["Saved", "Z strong", "A weak", "Unknown"]
+        );
+        assert!(
+            snapshot.scanning,
+            "Discovery by another client must be visible"
+        );
+        assert!(!snapshot.scan_owned);
     }
     #[test]
     fn handles_multiple_adapters_and_unnamed_devices() {
