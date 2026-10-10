@@ -12,6 +12,11 @@ pub struct Process {
     pub percent: f32,
     pub memory: u64,
 }
+impl Process {
+    pub fn matches_query(&self, query: &str) -> bool {
+        self.name.to_lowercase().contains(query) || self.pid.to_string().contains(query)
+    }
+}
 #[derive(Default)]
 struct Sample {
     total: u64,
@@ -101,9 +106,6 @@ fn sample(previous: &mut Sample, monitor: bool) -> Snapshot {
                 .then(b.memory.cmp(&a.memory))
                 .then(a.pid.cmp(&b.pid))
         });
-        result
-            .processes
-            .truncate(crate::config::get().number("processes.rows") as usize);
     }
     *previous = next;
     result
@@ -150,6 +152,19 @@ pub fn watch() -> (mpsc::Sender<bool>, mpsc::Receiver<Snapshot>) {
 mod tests {
     use super::*;
     use std::time::Duration;
+    #[test]
+    fn process_search_matches_names_and_pids() {
+        let process = Process {
+            pid: 12345,
+            name: "Firefox".into(),
+            percent: 0.,
+            memory: 0,
+        };
+        assert!(process.matches_query(""));
+        assert!(process.matches_query("fire"));
+        assert!(process.matches_query("234"));
+        assert!(!process.matches_query("spotify"));
+    }
     #[test]
     fn monitor_samples_running_processes() {
         let mut previous = Sample::default();

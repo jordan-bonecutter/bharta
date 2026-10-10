@@ -42,6 +42,7 @@ struct Ui {
     state: status::Status,
     audio: volume::Snapshot,
     cpu: crate::cpu::Snapshot,
+    cpu_history: VecDeque<f32>,
     network: Option<network::Snapshot>,
     apps: Vec<launcher::Entry>,
     panel: Option<Panel>,
@@ -133,6 +134,7 @@ impl Ui {
             state: status::Status::default(),
             audio: volume::Snapshot::default(),
             cpu: crate::cpu::Snapshot::default(),
+            cpu_history: VecDeque::with_capacity(32),
             network: None,
             apps: vec![],
             panel: None,
@@ -232,7 +234,7 @@ impl Ui {
         self.password.clear();
         self.selected_network = None;
         self.confirm_logout = false;
-        self.focus_search = kind == Menu::Apps;
+        self.focus_search = matches!(kind, Menu::Apps | Menu::Cpu);
         match &kind {
             Menu::Apps => self.services.apps(self.serial),
             Menu::Sound => {
@@ -305,6 +307,12 @@ impl Ui {
     }
     fn poll(&mut self) {
         while let Ok(s) = self.services.cpu_events.try_recv() {
+            if let Some(percent) = s.percent {
+                if self.cpu_history.len() == 32 {
+                    self.cpu_history.pop_front();
+                }
+                self.cpu_history.push_back(percent);
+            }
             self.cpu = s;
             self.ctx.request_repaint();
         }
@@ -643,14 +651,7 @@ impl Ui {
                 job.wrap.max_rows = 1;
                 job.wrap.break_anywhere = true;
                 let galley = ui.painter().layout_job(job);
-                let position = if kind == Menu::Cpu {
-                    pos2(
-                        text_rect.left(),
-                        text_rect.center().y - galley.size().y / 2.,
-                    )
-                } else {
-                    text_rect.center() - galley.size() / 2.
-                };
+                let position = text_rect.center() - galley.size() / 2.;
                 ui.painter()
                     .galley(position, galley, ui.visuals().text_color());
             }
@@ -881,11 +882,6 @@ impl Ui {
             Menu::Sound,
         );
         let cpu_x = sound_x - cpu_width - gap;
-        let percent = self
-            .cpu
-            .percent
-            .map(|v| format!("{v:.0}%"))
-            .unwrap_or_else(|| "—".into());
         button(
             &mut targets,
             self,
@@ -894,10 +890,39 @@ impl Ui {
                 pos2(cpu_x, 0.),
                 vec2(cpu_width, config::get().number("layout.bar_height")),
             ),
-            &percent,
+            "",
             Some(Icon::Cpu),
             Menu::Cpu,
         );
+        let chart = Rect::from_min_max(
+            pos2(cpu_x + slot, center_y - 7.),
+            pos2(cpu_x + cpu_width - 4., center_y + 7.),
+        );
+        if chart.width() > 0. {
+            let color = ui.visuals().text_color();
+            ui.painter().line_segment(
+                [chart.left_bottom(), chart.right_bottom()],
+                egui::Stroke::new(1_f32, color.gamma_multiply(0.2)),
+            );
+            let points: Vec<_> = self
+                .cpu_history
+                .iter()
+                .enumerate()
+                .map(|(i, percent)| {
+                    pos2(
+                        chart.right()
+                            - (self.cpu_history.len() - 1 - i) as f32 * chart.width() / 31.,
+                        chart.bottom() - percent.clamp(0., 100.) / 100. * chart.height(),
+                    )
+                })
+                .collect();
+            if points.len() > 1 {
+                ui.painter()
+                    .add(egui::Shape::line(points, egui::Stroke::new(1_f32, color)));
+            } else if let Some(point) = points.first() {
+                ui.painter().circle_filled(*point, 1., color);
+            }
+        }
         for separator in [
             cpu_x + cpu_width + gap / 2.,
             sound_x + slot + gap / 2.,
@@ -1048,9 +1073,18 @@ impl Ui {
         }
         let min_height = match &kind {
             Menu::Cpu => {
-                config::get().number("layout.row_height")
-                    + (self.cpu.processes.len() + 1) as f32
-                        * config::get().number("layout.row_height")
+                let query = self.query.trim().to_lowercase();
+                2. * config::get().number("layout.row_height")
+                    + (self
+                        .cpu
+                        .processes
+                        .iter()
+                        .filter(|p| p.matches_query(&query))
+                        .count()
+                        .min(config::get().number("processes.rows") as usize)
+                        + 1) as f32
+                        * (config::get().number("layout.process_row_height")
+                            + config::get().number("layout.item_gap_y"))
             }
             Menu::Apps => {
                 let query = self.query.to_lowercase();
@@ -1143,7 +1177,9 @@ impl Ui {
     fn keyboard(&self) -> bool {
         self.panel.as_ref().is_some_and(|p| {
             p.closing.is_none()
-                && (p.kind == Menu::Apps || self.selected_network.is_some() || p.clicked)
+                && (matches!(p.kind, Menu::Apps | Menu::Cpu)
+                    || self.selected_network.is_some()
+                    || p.clicked)
         })
     }
 }
@@ -1589,18 +1625,38 @@ impl Ui {
         }
     }
     fn processes(&mut self, ui: &mut egui::Ui) {
-        ui.label("CPU");
+        ui.label(
+            self.cpu
+                .percent
+                .map(|v| format!("CPU  {v:.0}%"))
+                .unwrap_or_else(|| "CPU".into()),
+        );
+        let search = ui.add(
+            egui::TextEdit::singleline(&mut self.query)
+                .hint_text("Search processes")
+                .desired_width(f32::INFINITY),
+        );
+        if self.focus_search {
+            search.request_focus();
+            self.focus_search = false;
+        }
+        let query = self.query.trim().to_lowercase();
         let width = ui.available_width();
         for (name, pid, cpu, memory) in
             std::iter::once(("Process".into(), "PID".into(), "CPU".into(), "RAM".into())).chain(
-                self.cpu.processes.iter().map(|p| {
-                    (
-                        p.name.clone(),
-                        p.pid.to_string(),
-                        format!("{:.1}%", p.percent),
-                        format!("{}M", p.memory / 1_048_576),
-                    )
-                }),
+                self.cpu
+                    .processes
+                    .iter()
+                    .filter(|p| p.matches_query(&query))
+                    .take(config::get().number("processes.rows") as usize)
+                    .map(|p| {
+                        (
+                            p.name.clone(),
+                            p.pid.to_string(),
+                            format!("{:.1}%", p.percent),
+                            format!("{}M", p.memory / 1_048_576),
+                        )
+                    }),
             )
         {
             let (r, _) = ui.allocate_exact_size(
@@ -1634,6 +1690,13 @@ impl Ui {
                     ui.visuals().text_color(),
                 );
             }
+        }
+        if !self.cpu.processes.iter().any(|p| p.matches_query(&query)) {
+            ui.label(if query.is_empty() {
+                "Loading…"
+            } else {
+                "No matching processes"
+            });
         }
     }
     fn workspace(&mut self, ui: &mut egui::Ui) {
