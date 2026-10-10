@@ -5,7 +5,6 @@ use std::{
     os::unix::process::CommandExt,
     process::{Child, Command},
     sync::atomic::{AtomicBool, Ordering},
-    time::Duration,
 };
 static STOP: AtomicBool = AtomicBool::new(false);
 extern "C" fn stop(_: libc::c_int) {
@@ -83,8 +82,9 @@ pub fn run(options: &crate::Options) -> Result<()> {
                 children.reconcile(&outputs, |name| {
                     let mut command = Command::new(&binary);
                     command.args(["--output", name]);
-                    if options.dark {
-                        command.arg("--dark");
+                    command.arg(if options.dark { "--dark" } else { "--light" });
+                    if let Some(path) = &options.config {
+                        command.args(["--config", path]);
                     }
                     if let Some(font) = &options.font {
                         command.args(["--font", font]);
@@ -113,7 +113,7 @@ pub fn run(options: &crate::Options) -> Result<()> {
                 }
             }
         }
-        std::thread::sleep(Duration::from_secs(1));
+        std::thread::sleep(crate::config::get().duration("intervals.supervisor_ms"));
     }
     Ok(())
 }

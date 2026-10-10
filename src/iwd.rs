@@ -46,10 +46,11 @@ pub fn scan(rescan: bool) -> Result<Snapshot> {
         }
         if rescan {
             let _: () = station.call("Scan", &())?;
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(12);
+            let deadline =
+                std::time::Instant::now() + crate::config::get().duration("timeouts.wifi_ms");
             while station.get_property::<bool>("Scanning")? && std::time::Instant::now() < deadline
             {
-                std::thread::sleep(std::time::Duration::from_millis(150));
+                std::thread::sleep(crate::config::get().duration("timeouts.wifi_poll_ms"));
             }
         }
         let state: String = station.get_property("State")?;

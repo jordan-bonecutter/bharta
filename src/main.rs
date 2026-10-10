@@ -1,6 +1,8 @@
 mod artwork;
 mod audio_meter;
 mod capture;
+mod config;
+mod cpu;
 mod icons;
 mod iwd;
 mod launcher;
@@ -29,14 +31,26 @@ struct Options {
     smoke: bool,
     check_network: bool,
     check_media: bool,
+    config: Option<String>,
 }
 fn options() -> Result<Options> {
-    let mut options = Options::default();
+    let mut options = Options {
+        dark: config::get().dark(),
+        font: (!config::get().text("appearance.font").is_empty())
+            .then(|| config::get().text("appearance.font").into()),
+        ..Options::default()
+    };
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--all-outputs" => options.all_outputs = true,
             "--dark" => options.dark = true,
+            "--light" => options.dark = false,
+            "--config" => options.config = Some(args.next().context("--config needs a path")?),
+            "--print-config" => {
+                print!("{}", config::DEFAULT);
+                std::process::exit(0);
+            }
             "--output" => {
                 options.output = Some(args.next().context("--output needs an output name")?)
             }
@@ -49,7 +63,7 @@ fn options() -> Result<Options> {
             "--check-media" => options.check_media = true,
             "--help" | "-h" => {
                 println!(
-                    "bharta — native Sway menu bar\n\nUsage: bharta [--dark] [--all-outputs | --output NAME] [--font PATH]\n       bharta [--dark] --preview FILE.png\n       bharta --smoke-test\n\nClick workspaces to switch. Default: all active outputs. Default theme: light. Height: 28 logical pixels.\n--preview renders sample data without connecting to Wayland.\n--smoke-test connects, renders a frame, then exits."
+                    "bharta — native Sway menu bar\n\nUsage: bharta [--dark] [--all-outputs | --output NAME] [--font PATH]\n       bharta [--dark] --preview FILE.png\n       bharta --smoke-test\n\nClick workspaces to switch. Default: all active outputs. Default settings: ~/.config/bharta/config.json (or XDG_CONFIG_HOME).\n--config PATH selects a configuration file; --print-config prints all defaults.\n--dark / --light and --font override configuration.\n--preview renders sample data without connecting to Wayland.\n--smoke-test connects, renders a frame, then exits."
                 );
                 std::process::exit(0);
             }
@@ -63,6 +77,16 @@ fn options() -> Result<Options> {
     Ok(options)
 }
 fn main() -> Result<()> {
+    let args: Vec<_> = std::env::args().collect();
+    if args.iter().any(|a| a == "--print-config") {
+        print!("{}", config::DEFAULT);
+        return Ok(());
+    }
+    let path = args
+        .windows(2)
+        .rfind(|pair| pair[0] == "--config")
+        .map(|pair| std::path::PathBuf::from(&pair[1]));
+    config::init(path)?;
     let options = options()?;
     if options.check_network {
         let snapshot = network::scan(false)?;

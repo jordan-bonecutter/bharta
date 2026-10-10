@@ -3,6 +3,7 @@ use tiny_skia::{Color, Paint, PathBuilder, Pixmap, Rect, Stroke, Transform};
 #[allow(dead_code)] // Also used by the headless sample renderer.
 pub enum Icon {
     Charging,
+    Cpu,
     Volume(bool),
     Music,
     Play,
@@ -39,6 +40,23 @@ pub fn draw(pix: &mut Pixmap, icon: Icon, x: f32, y: f32, size: f32, scale: f32,
         fill(pix, p);
     };
     match icon {
+        Icon::Cpu => {
+            for (x, y, w, h) in [
+                (6., 6., 12., 2.),
+                (6., 16., 12., 2.),
+                (6., 8., 2., 8.),
+                (16., 8., 2., 8.),
+                (10., 10., 4., 4.),
+            ] {
+                rect(pix, x, y, w, h);
+            }
+            for p in [8., 12., 16.] {
+                rect(pix, p, 2., 1., 4.);
+                rect(pix, p, 18., 1., 4.);
+                rect(pix, 2., p, 4., 1.);
+                rect(pix, 18., p, 4., 1.);
+            }
+        }
         Icon::Charging => {
             let mut p = PathBuilder::new();
             p.move_to(14., 1.);

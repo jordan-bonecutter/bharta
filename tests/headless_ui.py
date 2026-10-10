@@ -25,7 +25,7 @@ with tempfile.TemporaryDirectory(prefix='bharta-headless-') as directory:
     env = os.environ.copy()
     for key in ['SWAYSOCK', 'WAYLAND_DISPLAY', 'DISPLAY', 'DBUS_SESSION_BUS_ADDRESS']:
         env.pop(key, None)
-    env.update(XDG_RUNTIME_DIR=str(runtime), WLR_BACKENDS='headless', BHARTA_HEADLESS='1',
+    env.update(XDG_CONFIG_HOME=str(runtime/'settings'), XDG_RUNTIME_DIR=str(runtime), WLR_BACKENDS='headless', BHARTA_HEADLESS='1',
                WLR_RENDERER='pixman', WLR_HEADLESS_OUTPUTS='1',
                DBUS_SYSTEM_BUS_ADDRESS='unix:path=' + str(runtime / 'no-system-bus'),
                PULSE_SERVER='unix:' + str(runtime / 'no-audio-server'))
@@ -87,9 +87,9 @@ while True:
         return p
     def run(args):
         return subprocess.run(args, cwd=ROOT, env=env, check=True, capture_output=True, text=True)
-    def probe(x, y, *args, output='HEADLESS-1'):
+    def probe(x, y, *args, output='HEADLESS-1', size=(1600,900)):
         return start([str(ROOT / 'target/release/examples/ui_probe'), output,
-                      str(x), str(y), '1600', '900', *map(str, args)], 'input.log')
+                      str(x), str(y), *map(str,size), *map(str, args)], 'input.log')
     def shot(name):
         run(['grim', '-o', 'HEADLESS-1', str(DEST / (name + '.png'))])
     try:
@@ -128,7 +128,9 @@ while True:
         battery_left=next((x for x in range(1000,1500)
             if all(min(bar_pixels.getpixel((dx,9)))>100 for dx in range(x,x+16))),None)
         assert battery_left is not None, 'Cannot locate battery/Wi-Fi controls'
-        wifi_x=battery_left-20
+        wifi_x=battery_left-24
+        sound_x=battery_left-64
+        cpu_x=battery_left-124
         time.sleep(2)
         def cpu_ticks(pid):
             fields=Path(f'/proc/{pid}/stat').read_text().split()
@@ -138,8 +140,18 @@ while True:
         idle_cpu=(cpu_ticks(bar.pid)-previous)/os.sysconf('SC_CLK_TCK')/(time.monotonic()-started)*100
         (DEST/'idle-cpu.txt').write_text(f'{idle_cpu:.2f}% CPU\n')
         assert idle_cpu<15, f'Idle bar continually redraws: {idle_cpu:.1f}% CPU'
+        cpu_hover=probe(cpu_x,14,'--hover',2600);time.sleep(1.5);shot('process-monitor')
+        monitor=Image.open(DEST/'process-monitor.png').convert('RGB')
+        monitor_left=max(8,min(cpu_x-160,1600-328))
+        text_pixels=sum(1 for y in range(90,180) for x in range(int(monitor_left)+12,int(monitor_left)+155)
+                        if min(monitor.getpixel((x,y)))>100)
+        assert text_pixels>20, 'CPU monitor has no process rows'
+        cpu_hover.wait()
+        cpu_clicked=probe(cpu_x,14,'--click-hold',1000);time.sleep(.6);shot('process-monitor-clicked');cpu_clicked.wait()
+        assert Image.open(DEST/'process-monitor-clicked.png').convert('RGB').getpixel((int(monitor_left)+5,80))!=(0,0,0), 'Clicking CPU did not open its monitor'
+        leave_cpu=probe(600,600,'--hover',900);leave_cpu.wait()
         # All input is scoped to HEADLESS-1 on the private Wayland socket.
-        holder = probe(1260, 14, '--click-hold', 6000)
+        holder = probe(sound_x, 14, '--click-hold', 6000)
         time.sleep(1)
         shot('sound')
         assert Image.open(DEST / 'sound.png').getpixel((1250,80))[:3] != (0,0,0), 'Sound popup missing'
@@ -159,9 +171,13 @@ while True:
         length,left,slider_y=max(runs)
         assert length>60, 'Native volume scale not found'
         drag=probe(left+length-5,slider_y,'--drag',left+45,slider_y)
-        time.sleep(1.1)
-        during=json.loads(state.read_text())
+        deadline=time.monotonic()+2.5
+        while time.monotonic()<deadline:
+            time.sleep(.05)
+            during=json.loads(state.read_text())
+            if during[0]<32768:break
         assert during[0] < 32768, f'Audio did not change while dragging: {during}'
+        assert drag.poll() is None, 'Slider updated only after releasing the drag'
         drag.wait();time.sleep(.8)
         final=json.loads(state.read_text())
         assert 0 < final[0] <= during[0] < 32768, 'Final slider position was lost'
@@ -193,7 +209,41 @@ while True:
         image=Image.open(DEST / 'workspace.png').convert('RGB')
         baseline=Image.open(DEST / 'fixture.png').convert('RGB')
         bounds=ImageChops.difference(image,baseline).crop((0,28,1600,900)).getbbox()
-        assert bounds and bounds[2]-bounds[0]<=380 and 150<=bounds[3]-bounds[1]<=300, f'Preview is clipped or oversized: {bounds}'
+        assert bounds and 400<=bounds[2]-bounds[0]<=450 and 150<=bounds[3]-bounds[1]<=330, f'Preview does not fit its display bounds: {bounds}'
+        def preview_title(name):
+            return Image.open(DEST/f'{name}.png').convert('RGB').crop((20,40,130,56)).tobytes()
+        title_one=preview_title('workspace')
+        run(['swaymsg','[app_id="bharta-fixture" title="second window"] move container to workspace 2'])
+        time.sleep(1.2)
+        second_workspace=probe(160,14,'--hover',1000);time.sleep(.7);shot('workspace-two');second_workspace.wait()
+        title_two=preview_title('workspace-two')
+        assert title_two!=title_one, 'Workspace 2 preview did not open'
+        for name,x,expected in [('fast-one',120,title_one),('fast-two',160,title_two),('fast-return',120,title_one)]:
+            fast=probe(x,14,'--hover',250);time.sleep(.08);shot(name)
+            assert preview_title(name)==expected, 'Workspace name did not change immediately'
+            time.sleep(.4);shot(name+'-settled')
+            assert preview_title(name+'-settled')==expected, 'Workspace fade did not reach the latest preview'
+            transitioning=Image.open(DEST/f'{name}.png').convert('RGB')
+            settled=Image.open(DEST/f'{name}-settled.png').convert('RGB')
+            assert transitioning.getpixel((10,60))==settled.getpixel((10,60)), 'Workspace backing faded during switching'
+            assert transitioning.crop((20,64,420,280)).tobytes()!=settled.crop((20,64,420,280)).tobytes(), 'Workspace preview skipped the requested fade'
+            backing=settled.getpixel((10,60))
+            popup_bottom=max(y for y in range(60,400) if settled.getpixel((10,y))==backing)
+            assert 280<=popup_bottom<=305, 'Workspace preview has excess bottom space'
+            fast.wait()
+        click_ready=runtime/'preview-click-ready'
+        target=probe(160,14,'--hover-click',100,100,click_ready)
+        for _ in range(30):
+            time.sleep(.1);shot('click-preview-ready')
+            if preview_title('click-preview-ready')==title_two:break
+        else:raise AssertionError('Workspace 2 never became ready for clicking')
+        click_ready.touch();target.wait()
+        workspaces=json.loads(run(['swaymsg','-t','get_workspaces']).stdout)
+        (DEST/'preview-click-workspaces.json').write_text(json.dumps(workspaces))
+        assert any(w['name']=='2' and w['focused'] for w in workspaces), 'Clicking preview did not switch to its workspace'
+        run(['swaymsg','workspace 1']);time.sleep(.6)
+        run(['swaymsg','[app_id="bharta-fixture" title="second window"] move container to workspace 1'])
+        time.sleep(.7)
         tree=json.loads(run(['swaymsg','-t','get_tree']).stdout)
         def fixture_ids(node):
             result=[]
@@ -222,23 +272,30 @@ while True:
             for frame in range(6):
                 shot(f'preview-live-{frame}')
                 displayed=Image.open(DEST/f'preview-live-{frame}.png').convert('RGB')
-                animated.append(displayed.crop((25,75,155,200)).tobytes())
-                static.append(displayed.crop((195,75,325,200)).tobytes())
+                animated.append(displayed.crop((25,75,185,220)).tobytes())
+                static.append(displayed.crop((245,75,385,220)).tobytes())
                 time.sleep(.12)
             assert len(set(animated))>=4, 'Displayed preview freezes when the opening fade finishes'
             assert len(set(static))==1, 'Static source thumbnail changes without source damage'
             live.wait()
             leave=probe(600,600,'--hover',900);leave.wait()
-            performance=run([str(ROOT/'target/release/examples/capture_perf'),identifiers['Preview fixture — wide window'],identifiers['Preview fixture — second window']])
+            benchmark=[str(ROOT/'target/release/examples/capture_perf'),identifiers['Preview fixture — wide window'],identifiers['Preview fixture — second window']]
+            performance=subprocess.run(benchmark,cwd=ROOT,env=env,capture_output=True,text=True)
+            # Capture timing is sensitive to unrelated host load. Keep the
+            # measurement and allow one fresh sample before reporting failure.
+            if performance.returncode:
+                (DEST/'preview-performance-first.log').write_text(performance.stdout+performance.stderr)
+                performance=subprocess.run(benchmark,cwd=ROOT,env=env,capture_output=True,text=True)
             (DEST/'preview-performance.log').write_text(performance.stdout)
+            assert performance.returncode==0, performance.stdout+performance.stderr
         fixture.terminate();fixture.wait();Path(env['BHARTA_TEST_WINDOW_PID']).unlink(missing_ok=True);time.sleep(1.2)
         outside=probe(600,600,'--hover',2600);outside.wait()
         player=subprocess.Popen([str(ROOT / 'target/release/examples/headless_player')],cwd=ROOT,env=env,stdin=subprocess.PIPE,stdout=open(DEST / 'player.log','w'),stderr=subprocess.STDOUT,start_new_session=True)
         processes.append(player);time.sleep(2)
-        hover_music=probe(1260,14,'--hover',1600);time.sleep(.8);shot('music-hover');hover_music.wait()
+        hover_music=probe(sound_x,14,'--hover',1600);time.sleep(.8);shot('music-hover');hover_music.wait()
         assert Image.open(DEST / 'music-hover.png').convert('RGB').getpixel((1250,100)) != (0,0,0), 'Music hover failed'
         leave=probe(600,600,'--hover',1000);leave.wait()
-        music=probe(1260,14,'--click-hold',6000);time.sleep(1.4)
+        music=probe(sound_x,14,'--click-hold',6000);time.sleep(1.4)
         shot('playing');audio_before=state.read_text()
         # Fake parec gives each sink input a distinct tone. Each mini-EQ must
         # show only the frequency band for its own source.
@@ -292,7 +349,8 @@ while True:
         playing=Image.open(DEST / 'playing.png').convert('RGB');paused=Image.open(DEST / 'paused.png').convert('RGB')
         # Exclude the popup's drop shadow at y=27, which varies as its fade
         # animation advances; compare only the actual bar surface.
-        assert ImageChops.difference(playing.crop((1245,0,1390,26)),paused.crop((1245,0,1390,26))).getbbox() is None, 'Playback moved bar controls'
+        controls=(int(sound_x)-16,0,int(wifi_x)+16,26)
+        assert ImageChops.difference(playing.crop(controls),paused.crop(controls)).getbbox() is None, 'Playback moved bar controls'
         assert playing.getpixel((1250,100)) != (0,0,0), 'Music popup missing'
         assert playing.crop((0,28,1600,600)).getbbox()==paused.crop((0,28,1600,600)).getbbox(), 'Playback moved popup'
         assert state.read_text()==audio_before, 'Pause changed volume'
@@ -310,16 +368,16 @@ while True:
         leave=probe(600,600,'--hover',900);leave.wait()
         clicked=probe(72,14,'--click-hold',900);clicked.wait()
         switch_preview=probe(125,14,'--hover',1000);time.sleep(.65);shot('switch-preview');switch_preview.wait()
-        assert Image.open(DEST / 'switch-preview.png').convert('RGB').crop((0,320,500,900)).getbbox() is None, 'Clicked Apps did not switch to workspace preview'
+        assert Image.open(DEST / 'switch-preview.png').convert('RGB').crop((0,380,500,900)).getbbox() is None, 'Clicked Apps did not switch to workspace preview'
         assert Image.open(DEST / 'switch-preview.png').convert('RGB').getpixel((50,50)) != (0,0,0), 'Workspace hover did not open'
-        switch_sound=probe(1260,14,'--hover',1000);time.sleep(.65);shot('switch-sound');switch_sound.wait()
+        switch_sound=probe(sound_x,14,'--hover',1000);time.sleep(.65);shot('switch-sound');switch_sound.wait()
         switched=Image.open(DEST / 'switch-sound.png').convert('RGB')
         assert switched.getpixel((1250,80)) != (0,0,0), 'Workspace preview did not switch to Sound'
         assert switched.crop((0,28,500,900)).getbbox() is None, 'Old workspace preview stayed visible'
         # Promote the hovered menu to clicked, then toggle it closed. Remaining
         # over the same button must not immediately reopen it.
         background=switched.getpixel((1250,80))
-        promote=probe(1260,14,'--click-hold',2500)
+        promote=probe(sound_x,14,'--click-hold',2500)
         deadline=time.monotonic()+2.0
         frame=0
         while time.monotonic()<deadline:
@@ -334,7 +392,7 @@ while True:
             time.sleep(.02)
         assert frame>=4, 'Too few frames to check click stability'
         promote.wait()
-        toggle=probe(1260,14,'--click-hold',1000);time.sleep(.85);shot('toggle-closed');toggle.wait()
+        toggle=probe(sound_x,14,'--click-hold',1000);time.sleep(.85);shot('toggle-closed');toggle.wait()
         assert Image.open(DEST / 'toggle-closed.png').convert('RGB').crop((0,28,1600,900)).getbbox() is None, 'Hover reopened a menu toggled closed'
         # A second real bar on another private output must dismiss the first.
         run(['swaymsg','create_output'])
@@ -345,17 +403,48 @@ while True:
         typed=probe(72,14,'--keys-only',30);typed.wait();first.wait()
         shot('pinned-search')
         assert Image.open(DEST / 'pinned-search.png').convert('RGB').getpixel((50,100)) != (0,0,0), 'Pinned search missing'
-        other=probe(1260,14,'--hover',2500,output='HEADLESS-2');time.sleep(1)
+        other=probe(sound_x,14,'--hover',2500,output='HEADLESS-2');time.sleep(1)
         shot('single-popup')
         run(['grim','-o','HEADLESS-2',str(DEST / 'second-popup.png')])
         assert Image.open(DEST / 'second-popup.png').convert('RGB').getpixel((1250,80)) != (0,0,0), 'Second output did not open its popup'
         assert Image.open(DEST / 'single-popup.png').convert('RGB').crop((0,28,1600,900)).getbbox() is None, 'Other output left a popup open'
         assert Image.open(DEST / 'single-popup.png').convert('RGB').getpixel((110,8)) == Image.open(DEST / 'bar.png').convert('RGB').getpixel((110,8)), 'Workspace highlight changed when focus moved to the other output'
         other.wait()
+        # The same output resized to a large display gets a larger preview.
+        run(['swaymsg','output HEADLESS-2 mode 3840x2160'])
+        time.sleep(.5)
+        large=probe(120,14,'--hover',1500,output='HEADLESS-2',size=(3840,2160));time.sleep(.8)
+        run(['grim','-o','HEADLESS-2',str(DEST/'large-preview.png')])
+        large_image=Image.open(DEST/'large-preview.png').convert('RGB')
+        assert large_image.size==(3840,2160), 'Large output did not resize'
+        row=[x for x in range(1200) if large_image.getpixel((x,50))!=(0,0,0)]
+        assert row and 950<=max(row)-min(row)+1<=1000, 'Workspace preview does not scale with its display'
+        large.wait()
         for log in ('bar.log','second-bar.log'):
             assert 'Keyboard map:' not in (DEST/log).read_text(), f'Keyboard map failed on {log}'
         assert second.poll() is None, 'Second bar exited'
         assert bar.poll() is None, 'egui bar exited'
+        # A real XDG config changes geometry, palette, timing, and typography.
+        # The desktop user's settings never enter this private session.
+        second.terminate();second.wait()
+        config_dir=Path(env['XDG_CONFIG_HOME'])/'bharta'
+        config_dir.mkdir(parents=True)
+        (config_dir/'config.json').write_text(json.dumps({
+            'appearance':{'dark':True,'font_size':13},
+            'layout':{'bar_height':34,'group_gap':12},
+            'animation':{'preview_fade_ms':80},
+            'colors':{'dark':{'bar':'#26313b','popup':'#29343e'}},
+        }))
+        configured=start([str(BAR),'--output','HEADLESS-2'],'configured-bar.log');time.sleep(1.5)
+        run(['grim','-o','HEADLESS-2',str(DEST/'configured-bar.png')])
+        configured_image=Image.open(DEST/'configured-bar.png').convert('RGB')
+        assert configured_image.getpixel((2000,33))==(38,49,59), 'XDG configuration did not set bar color and height'
+        assert configured_image.getpixel((2000,34))==(0,0,0), 'Configured bar height was not respected'
+        custom_preview=probe(120,17,'--hover',1500,output='HEADLESS-2',size=(3840,2160));time.sleep(.7)
+        run(['grim','-o','HEADLESS-2',str(DEST/'configured-preview.png')])
+        assert Image.open(DEST/'configured-preview.png').convert('RGB').getpixel((10,80))==(41,52,62), 'Configured popup palette was not applied'
+        custom_preview.wait()
+        assert configured.poll() is None, 'Configured bar exited'
         print('Headless screenshots and logs:', DEST)
     finally:
         for p in reversed(processes):

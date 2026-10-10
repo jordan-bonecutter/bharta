@@ -96,6 +96,7 @@ impl WindowHandler for Fixture {
 }
 impl Fixture {
     fn draw(&mut self, window: &Window) {
+        let second = self.windows.get(1) == Some(window);
         let (w, h) = self.sizes[window.wl_surface()];
         let (buffer, pixels) = self
             .pool
@@ -109,6 +110,9 @@ impl Fixture {
             } else {
                 [60, 45, 30, 255]
             };
+            if second {
+                pixel.swap(0, 1);
+            }
         }
         window.wl_surface().damage_buffer(0, 0, w, h);
         buffer.attach_to(window.wl_surface()).unwrap();

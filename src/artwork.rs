@@ -3,7 +3,6 @@ use std::{
     collections::VecDeque,
     io::Read,
     sync::{Arc, mpsc},
-    time::Duration,
 };
 
 #[derive(Debug)]
@@ -61,7 +60,7 @@ fn load(location: &str) -> Result<Artwork> {
         }
         "https" | "http" => Box::new(
             ureq::AgentBuilder::new()
-                .timeout(Duration::from_secs(5))
+                .timeout(crate::config::get().duration("timeouts.artwork_ms"))
                 .build()
                 .get(location)
                 .call()?

@@ -1,5 +1,5 @@
 use crate::{launcher, media, network, status, volume, workspace_preview};
-use std::{sync::mpsc, time::Duration};
+use std::sync::mpsc;
 
 pub enum Job {
     Scan(bool),
@@ -13,6 +13,8 @@ pub enum Event {
     Launched(u64, Result<(), String>),
 }
 pub struct Services {
+    pub cpu: mpsc::Sender<bool>,
+    pub cpu_events: mpsc::Receiver<crate::cpu::Snapshot>,
     pub statuses: mpsc::Receiver<status::Status>,
     pub popup_events: mpsc::Receiver<u128>,
     pub status: mpsc::Sender<status::Update>,
@@ -20,13 +22,14 @@ pub struct Services {
     pub media_events: mpsc::Receiver<media::Update>,
     pub volume: mpsc::Sender<volume::Request>,
     pub volume_events: mpsc::Receiver<volume::Update>,
-    pub preview: mpsc::Sender<Option<(String, f32)>>,
+    pub preview: mpsc::Sender<Option<workspace_preview::Request>>,
     pub preview_events: mpsc::Receiver<workspace_preview::Snapshot>,
     pub events: mpsc::Receiver<Event>,
     events_tx: mpsc::Sender<Event>,
 }
 impl Services {
     pub fn new(output: Option<String>) -> Self {
+        let (cpu, cpu_events) = crate::cpu::watch();
         let (status_tx, statuses) = mpsc::channel();
         let (status, requests) = mpsc::channel();
         status::watch(status.clone());
@@ -39,7 +42,7 @@ impl Services {
                 {
                     break;
                 }
-                match requests.recv_timeout(Duration::from_secs(1)) {
+                match requests.recv_timeout(crate::config::get().duration("intervals.status_ms")) {
                     Ok(status::Update::Focus(name)) => {
                         if let Err(e) = status::focus(&name) {
                             eprintln!("{e}");
@@ -64,6 +67,8 @@ impl Services {
         let preview = workspace_preview::watch(tx);
         let (events_tx, events) = mpsc::channel();
         Self {
+            cpu,
+            cpu_events,
             statuses,
             popup_events,
             status,

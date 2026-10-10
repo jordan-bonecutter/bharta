@@ -1,6 +1,5 @@
 use std::time::{Duration, Instant};
-const GRACE: Duration = Duration::from_millis(500);
-const FADE: Duration = Duration::from_millis(140);
+
 #[derive(Default)]
 pub struct Dismissal {
     outside: Option<Instant>,
@@ -44,9 +43,11 @@ impl Dismissal {
         self.outside
             .map(|at| {
                 now.saturating_duration_since(at)
-                    .saturating_sub(GRACE)
+                    .saturating_sub(crate::config::get().duration("animation.dismiss_delay_ms"))
                     .as_secs_f32()
-                    / FADE.as_secs_f32()
+                    / crate::config::get()
+                        .duration("animation.popup_fade_ms")
+                        .as_secs_f32()
             })
             .unwrap_or(0.0)
             .clamp(0.0, 1.0)
@@ -56,9 +57,9 @@ impl Dismissal {
             return None;
         }
         self.outside.map(|at| {
-            (at + GRACE)
+            (at + crate::config::get().duration("animation.dismiss_delay_ms"))
                 .saturating_duration_since(now)
-                .max(Duration::from_millis(16))
+                .max(crate::config::get().duration("animation.frame_ms"))
         })
     }
 }

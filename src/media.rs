@@ -3,7 +3,7 @@ use std::{
     collections::{HashMap, HashSet},
     io::Read,
     process::{Command, Stdio},
-    time::{Duration, Instant},
+    time::Instant,
 };
 use zbus::{
     blocking::{Connection, Proxy},
@@ -72,7 +72,7 @@ pub fn watch(sender: UiSender) -> std::sync::mpsc::Sender<Request> {
             {
                 break;
             }
-            std::thread::sleep(Duration::from_secs(5));
+            std::thread::sleep(crate::config::get().duration("intervals.media_ms"));
         }
     });
     let audio = sender.clone();
@@ -81,7 +81,7 @@ pub fn watch(sender: UiSender) -> std::sync::mpsc::Sender<Request> {
             if audio.send(Update::Audio(audio_sources())).is_err() {
                 break;
             }
-            std::thread::sleep(Duration::from_secs(1));
+            std::thread::sleep(crate::config::get().duration("intervals.media_retry_ms"));
         }
     });
     spawn_playback(sender, None)
@@ -106,18 +106,19 @@ fn spawn_playback(sender: UiSender, address: Option<String>) -> std::sync::mpsc:
             if result.is_ok() || events.send(Request::Refresh).is_err() {
                 break;
             }
-            std::thread::sleep(Duration::from_secs(1));
+            std::thread::sleep(crate::config::get().duration("intervals.media_retry_ms"));
         }
     });
     // A single producer owns playback snapshots and button commands. An old
     // polling result can no longer overwrite a newer command/signal update.
     std::thread::spawn(move || {
         loop {
-            let request = match receiver.recv_timeout(Duration::from_secs(5)) {
-                Ok(request) => request,
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Request::Refresh,
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
-            };
+            let request =
+                match receiver.recv_timeout(crate::config::get().duration("intervals.media_ms")) {
+                    Ok(request) => request,
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Request::Refresh,
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                };
             let connection = playback_connection(address.as_deref());
             let finished = if let Request::Control {
                 panel_id,
@@ -369,7 +370,7 @@ pub fn audio_sources() -> Vec<AudioProcess> {
         let _ = stdout.take(1024 * 1024).read_to_end(&mut data);
         data
     });
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + crate::config::get().duration("timeouts.command_ms");
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
@@ -382,7 +383,9 @@ pub fn audio_sources() -> Vec<AudioProcess> {
                     vec![]
                 };
             }
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(crate::config::get().duration("timeouts.command_poll_ms"))
+            }
             _ => {
                 let _ = child.kill();
                 let _ = child.wait();
@@ -664,6 +667,7 @@ mod event_tests {
         Arc,
         atomic::{AtomicBool, Ordering},
     };
+    use std::time::Duration;
     struct TestBus(std::process::Child);
     impl Drop for TestBus {
         fn drop(&mut self) {

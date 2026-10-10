@@ -4,7 +4,7 @@ use std::{
     io::Read,
     process::{Command, Stdio},
     sync::mpsc,
-    time::{Duration, Instant},
+    time::Instant,
 };
 #[derive(Clone, Debug)]
 pub struct Channel {
@@ -100,7 +100,7 @@ fn pactl(args: &[String]) -> Result<Vec<u8>> {
             .read_to_end(&mut bytes)
             .map(|_| bytes)
     });
-    let deadline = Instant::now() + Duration::from_secs(2);
+    let deadline = Instant::now() + crate::config::get().duration("timeouts.command_ms");
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
@@ -113,7 +113,9 @@ fn pactl(args: &[String]) -> Result<Vec<u8>> {
                 );
                 return Ok(bytes);
             }
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(crate::config::get().duration("timeouts.command_poll_ms"))
+            }
             _ => {
                 let _ = child.kill();
                 let _ = child.wait();
@@ -389,7 +391,7 @@ pub fn watch(sender: std::sync::mpsc::Sender<Update>) -> mpsc::Sender<Request> {
             {
                 break;
             }
-            request = match rx.recv_timeout(Duration::from_secs(2)) {
+            request = match rx.recv_timeout(crate::config::get().duration("intervals.volume_ms")) {
                 Ok(r) => r,
                 Err(mpsc::RecvTimeoutError::Timeout) => Request::Refresh,
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,

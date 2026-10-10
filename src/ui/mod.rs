@@ -2,8 +2,8 @@ mod keyboard;
 mod services;
 mod wayland;
 use crate::{
-    audio_meter, icons::Icon, launcher, media, network, popup_motion::Dismissal, status, volume,
-    workspace_preview,
+    audio_meter, config, icons::Icon, launcher, media, network, popup_motion::Dismissal, status,
+    volume, workspace_preview,
 };
 use egui::{Color32, Pos2, Rect, pos2, vec2};
 use services::{Event, Job, Services};
@@ -14,12 +14,13 @@ use std::{
 };
 pub use wayland::run;
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 enum Menu {
     Apps,
     Sound,
     Wifi,
     Session,
+    Cpu,
     Workspace(String),
 }
 struct Meter {
@@ -40,10 +41,15 @@ struct Ui {
     services: Services,
     state: status::Status,
     audio: volume::Snapshot,
+    cpu: crate::cpu::Snapshot,
     network: Option<network::Snapshot>,
     apps: Vec<launcher::Entry>,
     panel: Option<Panel>,
     preview: Option<workspace_preview::Snapshot>,
+    // Ready -> waiting for capture -> crossfading -> ready. Timestamps advance
+    // on repaint; the outgoing snapshot stays visible while capture is pending.
+    preview_previous: Option<(workspace_preview::Snapshot, Instant)>,
+    preview_pending: Option<workspace_preview::Snapshot>,
     textures: HashMap<String, egui::TextureHandle>,
     meters: HashMap<u32, Meter>,
     query: String,
@@ -60,6 +66,7 @@ struct Ui {
     claim: u128,
     hover: Option<(Menu, Instant)>,
     blocked_hover: Option<Menu>,
+    preview_size: [f32; 2],
     panel_rect: Rect,
     dark: bool,
 }
@@ -74,20 +81,31 @@ impl Ui {
         } else {
             egui::Visuals::light()
         };
-        style.visuals.widgets.active.bg_fill =
-            Color32::from_gray(if options.dark { 90 } else { 210 });
-        style.visuals.selection.bg_fill = Color32::from_gray(if options.dark { 190 } else { 110 });
+        style.visuals.widgets.active.bg_fill = config::get().color("active_widget", options.dark);
+        style.visuals.selection.bg_fill = config::get().color("selection", options.dark);
+        style.visuals.override_text_color = Some(config::get().color("text", options.dark));
         style.visuals.widgets.inactive.bg_stroke = egui::Stroke::NONE;
         style.visuals.widgets.noninteractive.bg_stroke = egui::Stroke::NONE;
-        style.spacing.item_spacing = vec2(6., 5.);
-        style.spacing.button_padding = vec2(5., 3.);
-        style.spacing.interact_size = vec2(24., 22.);
-        style
-            .text_styles
-            .insert(egui::TextStyle::Body, egui::FontId::proportional(12.));
-        style
-            .text_styles
-            .insert(egui::TextStyle::Button, egui::FontId::proportional(12.));
+        style.spacing.item_spacing = vec2(
+            config::get().number("layout.item_gap_x"),
+            config::get().number("layout.item_gap_y"),
+        );
+        style.spacing.button_padding = vec2(
+            config::get().number("layout.button_padding_x"),
+            config::get().number("layout.button_padding_y"),
+        );
+        style.spacing.interact_size = vec2(
+            config::get().number("layout.widget_min_width"),
+            config::get().number("layout.widget_min_height"),
+        );
+        style.text_styles.insert(
+            egui::TextStyle::Body,
+            egui::FontId::proportional(config::get().number("appearance.font_size")),
+        );
+        style.text_styles.insert(
+            egui::TextStyle::Button,
+            egui::FontId::proportional(config::get().number("appearance.font_size")),
+        );
         ctx.set_global_style(style);
         let font = options
             .font
@@ -114,10 +132,13 @@ impl Ui {
             services: Services::new(options.output.clone()),
             state: status::Status::default(),
             audio: volume::Snapshot::default(),
+            cpu: crate::cpu::Snapshot::default(),
             network: None,
             apps: vec![],
             panel: None,
             preview: None,
+            preview_previous: None,
+            preview_pending: None,
             textures: HashMap::new(),
             meters: HashMap::new(),
             query: String::new(),
@@ -134,6 +155,7 @@ impl Ui {
             claim: 0,
             hover: None,
             blocked_hover: None,
+            preview_size: [312., 220.],
             panel_rect: Rect::NOTHING,
             dark: options.dark,
         })
@@ -144,6 +166,7 @@ impl Ui {
             p.closing.get_or_insert(Instant::now());
         }
         self.meters.clear();
+        let _ = self.services.cpu.send(false);
         let _ = self.services.preview.send(None);
     }
     fn finish_close(&mut self) {
@@ -151,6 +174,8 @@ impl Ui {
         self.panel = None;
         self.panel_rect = Rect::NOTHING;
         self.preview = None;
+        self.preview_previous = None;
+        self.preview_pending = None;
         self.textures.retain(|k, _| k.starts_with("icon:"));
     }
     fn open(&mut self, kind: Menu, x: f32, clicked: bool) {
@@ -168,8 +193,31 @@ impl Ui {
             }
             return;
         }
-        self.finish_close();
-        self.serial += 1;
+        let opened = self
+            .panel
+            .as_ref()
+            .filter(|p| p.closing.is_none())
+            .map(|p| p.opened)
+            .unwrap_or_else(Instant::now);
+        let switching_preview = matches!(kind, Menu::Workspace(_))
+            && self
+                .panel
+                .as_ref()
+                .is_some_and(|p| matches!(p.kind, Menu::Workspace(_)) && p.closing.is_none());
+        let x = if switching_preview {
+            self.panel.as_ref().unwrap().x
+        } else {
+            x
+        };
+        if switching_preview {
+            self.preview_pending = None;
+        } else {
+            self.finish_close();
+        }
+        self.blocked_hover = None;
+        if !switching_preview {
+            self.serial += 1;
+        }
         self.claim = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -193,17 +241,21 @@ impl Ui {
             }
             Menu::Wifi => self.services.network(self.serial, Job::Scan(false)),
             Menu::Workspace(name) => {
-                let _ = self
-                    .services
-                    .preview
-                    .send(Some((name.clone(), self.ctx.pixels_per_point())));
+                let _ = self.services.preview.send(Some((
+                    name.clone(),
+                    self.ctx.pixels_per_point(),
+                    self.preview_size,
+                )));
             }
             Menu::Session => {}
+            Menu::Cpu => {
+                let _ = self.services.cpu.send(true);
+            }
         }
         self.panel = Some(Panel {
             kind,
             x,
-            opened: Instant::now(),
+            opened,
             closing: None,
             clicked,
             dismissal: Dismissal::opened(Instant::now()),
@@ -252,6 +304,10 @@ impl Ui {
         }
     }
     fn poll(&mut self) {
+        while let Ok(s) = self.services.cpu_events.try_recv() {
+            self.cpu = s;
+            self.ctx.request_repaint();
+        }
         let mut audio_changed = false;
         while let Ok(claim) = self.services.popup_events.try_recv() {
             if claim > self.claim {
@@ -338,12 +394,42 @@ impl Ui {
                 _ => {}
             }
         }
+        if self.preview_previous.as_ref().is_some_and(|(_, at)| {
+            at.elapsed() >= config::get().duration("animation.preview_fade_ms")
+        }) {
+            self.preview_previous = None;
+            self.textures
+                .retain(|key, _| !key.starts_with("preview-old:"));
+        }
+        let mut incoming = self.preview_pending.take();
         while let Ok(s) = self.services.preview_events.try_recv() {
             if self
                 .panel
                 .as_ref()
                 .is_some_and(|p| p.kind == Menu::Workspace(s.name.clone()))
             {
+                incoming = Some(s);
+            }
+        }
+        if let Some(s) = incoming {
+            let switching = self.preview.as_ref().is_some_and(|old| old.name != s.name);
+            if !s.ready() || switching && self.preview_previous.is_some() {
+                self.preview_pending = Some(s);
+            } else {
+                if self.preview.is_none()
+                    && let Some(panel) = &mut self.panel
+                {
+                    panel.opened = Instant::now();
+                }
+                if switching {
+                    let old = self.preview.take().unwrap();
+                    for i in 0..old.windows.len() {
+                        if let Some(texture) = self.textures.remove(&format!("preview:{i}")) {
+                            self.textures.insert(format!("preview-old:{i}"), texture);
+                        }
+                    }
+                    self.preview_previous = Some((old, Instant::now()));
+                }
                 for (i, w) in s.windows.iter().enumerate() {
                     if let Some(pixels) = &w.pixels {
                         if self
@@ -395,7 +481,8 @@ impl Ui {
                         meter.capture = None;
                     }
                     if meter.capture.is_none() && Instant::now() >= meter.retry {
-                        meter.retry = Instant::now() + Duration::from_secs(2);
+                        meter.retry =
+                            Instant::now() + config::get().duration("intervals.meter_retry_ms");
                         meter.capture =
                             audio_meter::Capture::start(meter.levels.clone(), stream.index).ok();
                     }
@@ -414,8 +501,12 @@ impl Ui {
                 Icon::Pause => 4,
                 Icon::Previous => 5,
                 Icon::Next => 6,
-                Icon::Wifi(_) => 7,
+                Icon::Wifi(signal) =>
+                    10 + signal
+                        .map(|v| [1, 33, 66].into_iter().filter(|n| v >= *n).count())
+                        .unwrap_or(0),
                 Icon::Charging => 8,
+                Icon::Cpu => 9,
             }
         );
         let ctx = &self.ctx;
@@ -423,7 +514,12 @@ impl Ui {
             .entry(key.clone())
             .or_insert_with(|| {
                 let mut p = tiny_skia::Pixmap::new(48, 48).unwrap();
-                let c = if self.dark { 0.92 } else { 0.16 };
+                let color_key = if self.dark {
+                    "appearance.icon_color_dark"
+                } else {
+                    "appearance.icon_color_light"
+                };
+                let c = u32::from_str_radix(&config::get().text(color_key)[1..], 16).unwrap();
                 crate::icons::draw(
                     &mut p,
                     icon,
@@ -431,7 +527,7 @@ impl Ui {
                     0.,
                     24.,
                     2.,
-                    tiny_skia::Color::from_rgba(c, c, c, 1.).unwrap(),
+                    tiny_skia::Color::from_rgba8((c >> 16) as u8, (c >> 8) as u8, c as u8, 255),
                 );
                 ctx.load_texture(
                     &key,
@@ -479,16 +575,32 @@ impl Ui {
         let image = egui::Image::new((self.icon(icon), vec2(14., 14.)));
         ui.add_enabled(
             enabled,
-            egui::Button::image(image)
-                .frame(false)
-                .min_size(vec2(24., 22.)),
+            egui::Button::image(image).frame(false).min_size(vec2(
+                config::get().number("layout.widget_min_width"),
+                config::get().number("layout.widget_min_height"),
+            )),
         )
         .clicked()
     }
     fn paint_bar(&mut self, ui: &mut egui::Ui, width: f32) -> Vec<(Rect, Menu)> {
-        let bg = Color32::from_gray(if self.dark { 30 } else { 242 });
-        ui.painter()
-            .rect_filled(Rect::from_min_size(Pos2::ZERO, vec2(width, 28.)), 0, bg);
+        let gap = config::get().number("layout.group_gap");
+        let margin = config::get().number("layout.bar_margin");
+        let slot = config::get().number("layout.icon_slot_width");
+        let cpu_width = config::get().number("layout.cpu_width");
+        let session_width = config::get().number("layout.session_width");
+        let apps_width = config::get().number("layout.apps_width");
+        let workspace_width = config::get().number("layout.workspace_width");
+        let workspace_gap = config::get().number("layout.workspace_gap");
+        let center_y = config::get().number("layout.bar_height") / 2.;
+        let bg = config::get().color("bar", self.dark);
+        ui.painter().rect_filled(
+            Rect::from_min_size(
+                Pos2::ZERO,
+                vec2(width, config::get().number("layout.bar_height")),
+            ),
+            0,
+            bg,
+        );
         let mut targets = vec![];
         let button = |targets: &mut Vec<(Rect, Menu)>,
                       this: &mut Self,
@@ -497,43 +609,50 @@ impl Ui {
                       text: &str,
                       icon: Option<Icon>,
                       kind: Menu| {
-            let response = ui.interact(
-                rect,
-                egui::Id::new(("bar", format!("{text}{:?}", rect.min))),
-                egui::Sense::click(),
-            );
+            let response = ui.interact(rect, egui::Id::new(("bar", &kind)), egui::Sense::click());
             if response.hovered() {
                 ui.painter().rect_filled(
                     rect.shrink2(vec2(0., 2.)),
-                    3,
-                    Color32::from_gray(if this.dark { 48 } else { 222 }),
+                    config::get().number("layout.workspace_corner_radius") as u8,
+                    config::get().color("hover", this.dark),
                 );
             }
             let mut text_rect = rect.shrink2(vec2(4., 0.));
             if let Some(icon) = icon {
                 ui.painter().image(
                     this.icon(icon),
-                    Rect::from_center_size(pos2(rect.left() + 16., 14.), vec2(15., 15.)),
+                    Rect::from_center_size(
+                        pos2(rect.left() + slot / 2., center_y),
+                        vec2(
+                            config::get().number("appearance.icon_size"),
+                            config::get().number("appearance.icon_size"),
+                        ),
+                    ),
                     Rect::from_min_max(Pos2::ZERO, pos2(1., 1.)),
                     Color32::WHITE,
                 );
-                text_rect.min.x = rect.left() + 30.;
+                text_rect.min.x = rect.left() + slot;
             }
             if !text.is_empty() {
                 let mut job = egui::text::LayoutJob::simple(
                     text.into(),
-                    egui::FontId::proportional(12.),
+                    egui::FontId::proportional(config::get().number("appearance.font_size")),
                     ui.visuals().text_color(),
                     text_rect.width(),
                 );
                 job.wrap.max_rows = 1;
                 job.wrap.break_anywhere = true;
                 let galley = ui.painter().layout_job(job);
-                ui.painter().galley(
-                    text_rect.center() - galley.size() / 2.,
-                    galley,
-                    ui.visuals().text_color(),
-                );
+                let position = if kind == Menu::Cpu {
+                    pos2(
+                        text_rect.left(),
+                        text_rect.center().y - galley.size().y / 2.,
+                    )
+                } else {
+                    text_rect.center() - galley.size() / 2.
+                };
+                ui.painter()
+                    .galley(position, galley, ui.visuals().text_color());
             }
             if response.clicked() {
                 this.open(kind.clone(), rect.center().x, true);
@@ -544,13 +663,19 @@ impl Ui {
             &mut targets,
             self,
             ui,
-            Rect::from_min_size(pos2(12., 0.), vec2(30., 28.)),
+            Rect::from_min_size(
+                pos2(margin, 0.),
+                vec2(session_width, config::get().number("layout.bar_height")),
+            ),
             "",
             None,
             Menu::Session,
         );
-        for y in [11., 15.] {
-            for x in [24., 28.] {
+        for y in [center_y - 3., center_y + 1.] {
+            for x in [
+                margin + session_width / 2. - 3.,
+                margin + session_width / 2. + 1.,
+            ] {
                 ui.painter().rect_filled(
                     Rect::from_min_size(pos2(x, y), vec2(3., 3.)),
                     0,
@@ -562,14 +687,20 @@ impl Ui {
             &mut targets,
             self,
             ui,
-            Rect::from_min_size(pos2(47., 0.), vec2(44., 28.)),
+            Rect::from_min_size(
+                pos2(margin + session_width + gap, 0.),
+                vec2(apps_width, config::get().number("layout.bar_height")),
+            ),
             "Apps",
             None,
             Menu::Apps,
         );
-        let mut x = 99.;
+        let mut x = margin + session_width + gap + apps_width + gap;
         for w in self.state.workspaces.clone() {
-            let r = Rect::from_min_size(pos2(x, 0.), vec2(40., 28.));
+            let r = Rect::from_min_size(
+                pos2(x, 0.),
+                vec2(workspace_width, config::get().number("layout.bar_height")),
+            );
             let response = ui.interact(
                 r,
                 egui::Id::new(("workspace", &w.name)),
@@ -577,47 +708,61 @@ impl Ui {
             );
             ui.painter().rect_stroke(
                 r.shrink2(vec2(1., 3.)),
-                3,
+                config::get().number("layout.workspace_corner_radius") as u8,
                 egui::Stroke::new(
-                    1.0_f32,
-                    Color32::from_gray(if self.dark { 66 } else { 205 }),
+                    config::get().number("layout.workspace_outline_width"),
+                    config::get().color("workspace_border", self.dark),
                 ),
                 egui::StrokeKind::Inside,
             );
             if w.focused || response.hovered() {
                 ui.painter().rect_filled(
                     r.shrink2(vec2(1., 3.)),
-                    3,
-                    Color32::from_gray(if self.dark { 52 } else { 220 }),
+                    config::get().number("layout.workspace_corner_radius") as u8,
+                    config::get().color("workspace_active", self.dark),
                 );
             }
             let color = if w.urgent {
-                Color32::from_rgb(200, 70, 70)
+                config::get().color("urgent", self.dark)
             } else {
                 ui.visuals().text_color()
             };
             ui.painter().text(
-                pos2(x + 12., 14.),
+                pos2(
+                    x + config::get().number("layout.workspace_number_offset"),
+                    center_y,
+                ),
                 egui::Align2::CENTER_CENTER,
                 &w.name,
-                egui::FontId::proportional(12.),
+                egui::FontId::proportional(config::get().number("appearance.font_size")),
                 color,
             );
             let amount = self.ctx.animate_bool_with_time(
                 egui::Id::new(("audible", &w.name)),
                 w.audible,
-                0.12,
+                config::get()
+                    .duration("animation.speaker_fade_ms")
+                    .as_secs_f32(),
             );
             if amount > 0. {
                 let r = Rect::from_center_size(
-                    pos2(x + 29., 14.),
-                    vec2(12., 12.) * (0.96 + 0.04 * amount),
+                    pos2(
+                        x + config::get().number("layout.workspace_audio_offset"),
+                        center_y,
+                    ),
+                    vec2(
+                        config::get().number("layout.workspace_audio_size"),
+                        config::get().number("layout.workspace_audio_size"),
+                    ) * (config::get().number("animation.speaker_min_scale")
+                        + (1. - config::get().number("animation.speaker_min_scale")) * amount),
                 );
                 ui.painter().image(
                     self.icon(Icon::Volume(false)),
                     r,
                     Rect::from_min_max(Pos2::ZERO, pos2(1., 1.)),
-                    Color32::from_rgba_unmultiplied(65, 190, 140, (255. * amount) as u8),
+                    config::get()
+                        .color("audio", self.dark)
+                        .gamma_multiply(amount),
                 );
             }
             if response.clicked() {
@@ -628,42 +773,54 @@ impl Ui {
                 self.close();
             }
             targets.push((r, Menu::Workspace(w.name)));
-            x += 42.;
+            x += workspace_width + workspace_gap;
         }
         let clock = chrono::Local::now()
-            .format("%a %b %-d   %-I:%M %p")
+            .format(config::get().text("appearance.clock_format"))
             .to_string();
         let clock_width = ui
             .painter()
             .layout_no_wrap(
                 clock.clone(),
-                egui::FontId::proportional(12.),
+                egui::FontId::proportional(config::get().number("appearance.font_size")),
                 ui.visuals().text_color(),
             )
             .size()
             .x;
         ui.painter().text(
-            pos2(width - 12., 14.),
+            pos2(width - margin, center_y),
             egui::Align2::RIGHT_CENTER,
             clock,
-            egui::FontId::proportional(12.),
+            egui::FontId::proportional(config::get().number("appearance.font_size")),
             ui.visuals().text_color(),
         );
-        let right = width - 12. - clock_width - 8.;
+        let right = width - margin - clock_width - gap;
         let battery = self
             .state
             .battery
             .map(|(p, _)| format!("{p}%"))
             .unwrap_or_default();
         ui.painter().text(
-            pos2(right, 14.),
-            egui::Align2::RIGHT_CENTER,
+            pos2(
+                right - config::get().number("layout.battery_text_offset"),
+                center_y,
+            ),
+            egui::Align2::LEFT_CENTER,
             battery,
-            egui::FontId::proportional(12.),
+            egui::FontId::proportional(config::get().number("appearance.font_size")),
             ui.visuals().text_color(),
         );
         if let Some((percent, charging)) = self.state.battery {
-            let rect = Rect::from_min_size(pos2(right - 59., 9.), vec2(21., 10.));
+            let rect = Rect::from_min_size(
+                pos2(
+                    right - config::get().number("layout.battery_width"),
+                    center_y - config::get().number("layout.battery_icon_height") / 2.,
+                ),
+                vec2(
+                    config::get().number("layout.battery_icon_width"),
+                    config::get().number("layout.battery_icon_height"),
+                ),
+            );
             let color = ui.visuals().text_color();
             ui.painter().rect_stroke(
                 rect,
@@ -672,7 +829,7 @@ impl Ui {
                 egui::StrokeKind::Inside,
             );
             ui.painter().rect_filled(
-                Rect::from_min_size(pos2(rect.right() + 1., 12.), vec2(2., 4.)),
+                Rect::from_min_size(pos2(rect.right() + 1., center_y - 2.), vec2(2., 4.)),
                 1,
                 color,
             );
@@ -687,104 +844,141 @@ impl Ui {
                 ui.painter().rect_filled(
                     Rect::from_min_size(
                         rect.min + vec2(2., 2.),
-                        vec2(17. * percent as f32 / 100., 6.),
+                        vec2(
+                            (rect.width() - 4.) * percent as f32 / 100.,
+                            rect.height() - 4.,
+                        ),
                     ),
                     1,
                     color,
                 );
             }
         }
-        let wifi_name = self.state.extras.wifi_name.clone().unwrap_or_default();
-        let wifi_width = 32.
-            + ui.painter()
-                .layout_no_wrap(
-                    wifi_name.clone(),
-                    egui::FontId::proportional(12.),
-                    ui.visuals().text_color(),
-                )
-                .size()
-                .x
-                .min(80.);
-        let wifi_x = right - 62. - wifi_width;
+        let wifi_x = right - config::get().number("layout.battery_width") - gap - slot;
         button(
             &mut targets,
             self,
             ui,
-            Rect::from_min_size(pos2(wifi_x, 0.), vec2(wifi_width, 28.)),
-            &wifi_name,
+            Rect::from_min_size(
+                pos2(wifi_x, 0.),
+                vec2(slot, config::get().number("layout.bar_height")),
+            ),
+            "",
             Some(Icon::Wifi(self.state.extras.wifi_signal)),
             Menu::Wifi,
         );
-        let sound_x = wifi_x - 36.;
-        let source = match self.audio.streams.as_slice() {
-            [s] => s.name.clone(),
-            [] => String::new(),
-            s => format!("{} sources", s.len()),
-        };
-        let r = Rect::from_min_max(pos2((sound_x - 160.).max(x), 0.), pos2(sound_x + 32., 28.));
-        button(&mut targets, self, ui, r, "", None, Menu::Sound);
-        ui.painter().image(
-            self.icon(Icon::Volume(self.audio.active().is_some_and(|o| o.muted))),
-            Rect::from_center_size(pos2(sound_x + 16., 14.), vec2(15., 15.)),
-            Rect::from_min_max(Pos2::ZERO, pos2(1., 1.)),
-            Color32::WHITE,
+        let sound_x = wifi_x - slot - gap;
+        button(
+            &mut targets,
+            self,
+            ui,
+            Rect::from_min_size(
+                pos2(sound_x, 0.),
+                vec2(slot, config::get().number("layout.bar_height")),
+            ),
+            "",
+            Some(Icon::Volume(self.audio.active().is_some_and(|o| o.muted))),
+            Menu::Sound,
         );
-        let text_rect = Rect::from_min_max(r.min + vec2(4., 0.), pos2(sound_x - 4., 28.));
-        let mut job = egui::text::LayoutJob::simple(
-            source,
-            egui::FontId::proportional(12.),
-            ui.visuals().text_color(),
-            text_rect.width(),
+        let cpu_x = sound_x - cpu_width - gap;
+        let percent = self
+            .cpu
+            .percent
+            .map(|v| format!("{v:.0}%"))
+            .unwrap_or_else(|| "—".into());
+        button(
+            &mut targets,
+            self,
+            ui,
+            Rect::from_min_size(
+                pos2(cpu_x, 0.),
+                vec2(cpu_width, config::get().number("layout.bar_height")),
+            ),
+            &percent,
+            Some(Icon::Cpu),
+            Menu::Cpu,
         );
-        job.wrap.max_rows = 1;
-        job.wrap.break_anywhere = true;
-        let galley = ui.painter().layout_job(job);
-        ui.painter().galley(
-            text_rect.center() - galley.size() / 2.,
-            galley,
-            ui.visuals().text_color(),
+        for separator in [
+            cpu_x + cpu_width + gap / 2.,
+            sound_x + slot + gap / 2.,
+            wifi_x + slot + gap / 2.,
+            right + gap / 2.,
+        ] {
+            ui.painter().line_segment(
+                [
+                    pos2(
+                        separator,
+                        center_y - config::get().number("layout.separator_height") / 2.,
+                    ),
+                    pos2(
+                        separator,
+                        center_y + config::get().number("layout.separator_height") / 2.,
+                    ),
+                ],
+                egui::Stroke::new(1_f32, config::get().color("separator", self.dark)),
+            );
+        }
+        let title_bounds = Rect::from_min_max(
+            pos2(x + 8., 0.),
+            pos2(cpu_x - gap, config::get().number("layout.bar_height")),
         );
-        let title_bounds = Rect::from_min_max(pos2(x + 8., 0.), pos2(r.min.x - 8., 28.));
         if title_bounds.width() > 60. {
             let painter = ui.painter().with_clip_rect(title_bounds);
             painter.text(
                 pos2(
                     (width / 2.).clamp(title_bounds.min.x, title_bounds.max.x),
-                    14.,
+                    center_y,
                 ),
                 egui::Align2::CENTER_CENTER,
                 &self.state.app,
-                egui::FontId::proportional(12.),
+                egui::FontId::proportional(config::get().number("appearance.font_size")),
                 ui.visuals().text_color(),
             );
         }
         targets
     }
     fn frame(&mut self, ctx: &egui::Context, width: f32, height: f32) {
+        let bounds = workspace_preview::preview_bounds([width, height]);
+        if self.preview_size != bounds {
+            self.preview_size = bounds;
+            if let Some(panel) = &self.panel
+                && panel.closing.is_none()
+                && let Menu::Workspace(name) = &panel.kind
+            {
+                let _ = self.services.preview.send(Some((
+                    name.clone(),
+                    ctx.pixels_per_point(),
+                    bounds,
+                )));
+            }
+        }
         let now = Instant::now();
         let mut targets = vec![];
         egui::Area::new(egui::Id::new("bar"))
             .fixed_pos(Pos2::ZERO)
             .show(ctx, |ui| {
-                ui.set_min_size(vec2(width, 28.));
+                ui.set_min_size(vec2(width, config::get().number("layout.bar_height")));
                 targets = self.paint_bar(ui, width);
             });
         let pointer = ctx.input(|i| i.pointer.hover_pos());
         let candidate = pointer.and_then(|p| targets.iter().find(|(r, _)| r.contains(p)).cloned());
         if let Some((rect, kind)) = candidate {
             if self.blocked_hover.as_ref() != Some(&kind) {
+                self.blocked_hover = None;
                 if self.hover.as_ref().is_none_or(|(k, _)| *k != kind) {
                     self.hover = Some((kind.clone(), now));
                 }
-                if self
-                    .hover
-                    .as_ref()
-                    .is_some_and(|(_, t)| now.duration_since(*t) >= Duration::from_millis(220))
+                if self.panel.as_ref().is_some_and(|p| p.kind != kind)
+                    || self.hover.as_ref().is_some_and(|(_, t)| {
+                        now.duration_since(*t) >= config::get().duration("animation.hover_ms")
+                    })
                 {
                     self.open(kind, rect.center().x, false);
                 } else if let Some((_, since)) = &self.hover {
                     ctx.request_repaint_after(
-                        Duration::from_millis(220).saturating_sub(now.duration_since(*since)),
+                        config::get()
+                            .duration("animation.hover_ms")
+                            .saturating_sub(now.duration_since(*since)),
                     );
                 }
             }
@@ -799,61 +993,114 @@ impl Ui {
             return;
         };
         let kind = panel.kind.clone();
-        let w = if matches!(kind, Menu::Sound | Menu::Workspace(_)) {
-            336.
-        } else {
-            320.
+        if matches!(kind, Menu::Workspace(_)) && self.preview.is_none() {
+            let panel = self.panel.as_mut().unwrap();
+            panel.dismissal.pointer_inside(
+                pointer.is_some_and(|p| p.y < config::get().number("layout.bar_height")),
+                now,
+            );
+            if panel.dismissal.progress(now) >= 1. {
+                self.finish_close();
+            } else if let Some(delay) = panel.dismissal.repaint_after(now) {
+                ctx.request_repaint_after(delay);
+            }
+            return;
+        }
+        let w = match kind {
+            Menu::Workspace(_) => {
+                self.preview_size[0] + 2. * config::get().number("layout.popup_padding")
+            }
+            Menu::Sound => config::get().number("layout.sound_width"),
+            _ => config::get().number("layout.popup_width"),
         };
-        let x = (panel.x - w / 2.).clamp(8., (width - w - 8.).max(8.));
+        let x = (panel.x - w / 2.).clamp(
+            config::get().number("layout.popup_screen_margin"),
+            (width - w - config::get().number("layout.popup_screen_margin"))
+                .max(config::get().number("layout.popup_screen_margin")),
+        );
         let opacity = panel
             .closing
-            .map(|t| 1. - now.duration_since(t).as_secs_f32() / 0.14)
-            .unwrap_or_else(|| (now.duration_since(panel.opened).as_secs_f32() / 0.14).min(1.));
+            .map(|t| {
+                1. - now.duration_since(t).as_secs_f32()
+                    / config::get()
+                        .duration("animation.popup_fade_ms")
+                        .as_secs_f32()
+            })
+            .unwrap_or_else(|| {
+                (now.duration_since(panel.opened).as_secs_f32()
+                    / if matches!(kind, Menu::Workspace(_)) {
+                        config::get()
+                            .duration("animation.preview_fade_ms")
+                            .as_secs_f32()
+                    } else {
+                        config::get()
+                            .duration("animation.popup_fade_ms")
+                            .as_secs_f32()
+                    })
+                .min(1.)
+            });
         if opacity <= 0. && panel.closing.is_some() {
             self.finish_close();
             return;
         }
         if opacity < 1. || panel.closing.is_some() || kind == Menu::Sound {
-            ctx.request_repaint_after(Duration::from_millis(16));
+            ctx.request_repaint_after(config::get().duration("animation.frame_ms"));
         }
         let min_height = match &kind {
+            Menu::Cpu => {
+                config::get().number("layout.row_height")
+                    + (self.cpu.processes.len() + 1) as f32
+                        * config::get().number("layout.row_height")
+            }
             Menu::Apps => {
                 let query = self.query.to_lowercase();
-                28. + (self
-                    .apps
-                    .iter()
-                    .filter(|a| a.search.contains(&query))
-                    .count() as f32
-                    * 29.)
-                    .min(420.)
+                config::get().number("layout.bar_height")
+                    + (self
+                        .apps
+                        .iter()
+                        .filter(|a| a.search.contains(&query))
+                        .count() as f32
+                        * config::get().number("layout.launcher_row_height"))
+                    .min(config::get().number("layout.launcher_max_height"))
             }
-            Menu::Workspace(_) => self
-                .preview
-                .as_ref()
-                .map(|s| 28. + (s.rect.h * workspace_preview::preview_scale(s.rect)).max(60.))
-                .unwrap_or(0.),
+            Menu::Workspace(_) => {
+                config::get().number("preview.title_height") + self.preview_size[1]
+            }
             _ => 0.,
         };
         let shown = egui::Area::new(egui::Id::new(("panel", self.serial)))
-            .fixed_pos(pos2(x, 28.))
+            .fixed_pos(pos2(x, config::get().number("layout.bar_height")))
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
                 ui.set_opacity(opacity);
                 ui.set_width(w);
                 egui::Frame::new()
-                    .fill(Color32::from_gray(if self.dark { 34 } else { 247 }))
-                    .inner_margin(12)
+                    .fill(config::get().color("popup", self.dark))
+                    .inner_margin(config::get().number("layout.popup_padding") as i8)
                     .show(ui, |ui| {
-                        ui.set_width(w - 24.);
+                        ui.set_width(w - 2. * config::get().number("layout.popup_padding"));
                         egui::ScrollArea::vertical()
-                            .min_scrolled_height(min_height.min((height - 58.).max(100.)))
-                            .max_height((height - 58.).max(100.))
+                            .min_scrolled_height(
+                                min_height.min(
+                                    (height
+                                        - config::get().number("layout.bar_height")
+                                        - config::get().number("layout.popup_bottom_margin"))
+                                    .max(config::get().number("layout.popup_min_height")),
+                                ),
+                            )
+                            .max_height(
+                                (height
+                                    - config::get().number("layout.bar_height")
+                                    - config::get().number("layout.popup_bottom_margin"))
+                                .max(config::get().number("layout.popup_min_height")),
+                            )
                             .show(ui, |ui| {
                                 match kind {
                                     Menu::Sound => self.sound(ui),
                                     Menu::Apps => self.launcher(ui),
                                     Menu::Wifi => self.wifi(ui),
                                     Menu::Session => self.session(ui),
+                                    Menu::Cpu => self.processes(ui),
                                     Menu::Workspace(_) => self.workspace(ui),
                                 }
                                 if !self.error.is_empty() {
@@ -863,7 +1110,9 @@ impl Ui {
                     });
             });
         self.panel_rect = shown.response.rect;
-        let inside = pointer.is_some_and(|p| p.y < 28. || self.panel_rect.contains(p));
+        let inside = pointer.is_some_and(|p| {
+            p.y < config::get().number("layout.bar_height") || self.panel_rect.contains(p)
+        });
         let pinned = !self.query.is_empty()
             || self.selected_network.is_some()
             || self.confirm_logout
@@ -881,7 +1130,10 @@ impl Ui {
             if panel.dismissal.progress(now) >= 1. {
                 self.finish_close();
             } else if panel.dismissal.progress(now) > 0. {
-                let elapsed = panel.dismissal.progress(now) * 0.14;
+                let elapsed = panel.dismissal.progress(now)
+                    * config::get()
+                        .duration("animation.popup_fade_ms")
+                        .as_secs_f32();
                 panel
                     .closing
                     .get_or_insert(now - Duration::from_secs_f32(elapsed));
@@ -901,7 +1153,10 @@ fn flat(ui: &mut egui::Ui, text: impl Into<egui::WidgetText>) -> egui::Response 
         egui::Button::new("")
             .left_text(text)
             .frame(false)
-            .min_size(vec2(ui.available_width(), 24.)),
+            .min_size(vec2(
+                ui.available_width(),
+                config::get().number("layout.control_height"),
+            )),
     )
 }
 impl Ui {
@@ -932,13 +1187,16 @@ impl Ui {
         }
         let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
         egui::ScrollArea::vertical()
-            .max_height(420.)
+            .max_height(config::get().number("layout.launcher_max_height"))
             .show(ui, |ui| {
                 for (i, app) in filtered.iter().enumerate() {
                     let response = ui.add(
                         egui::Button::new(&app.name)
                             .frame(i == self.selection)
-                            .min_size(vec2(ui.available_width(), 24.)),
+                            .min_size(vec2(
+                                ui.available_width(),
+                                config::get().number("layout.control_height"),
+                            )),
                     );
                     if response.clicked() || (enter && i == self.selection) {
                         self.services.launch(self.serial, app.path.clone());
@@ -1007,8 +1265,13 @@ impl Ui {
                 });
             }
             for n in s.networks.clone() {
-                let (rect, response) =
-                    ui.allocate_exact_size(vec2(ui.available_width(), 24.), egui::Sense::click());
+                let (rect, response) = ui.allocate_exact_size(
+                    vec2(
+                        ui.available_width(),
+                        config::get().number("layout.control_height"),
+                    ),
+                    egui::Sense::click(),
+                );
                 if response.hovered() {
                     ui.painter()
                         .rect_filled(rect, 2, ui.visuals().widgets.hovered.bg_fill);
@@ -1029,7 +1292,7 @@ impl Ui {
                     n.signal
                         .map(|signal| format!("{signal}%"))
                         .unwrap_or_else(|| "—".into()),
-                    egui::FontId::proportional(12.),
+                    egui::FontId::proportional(config::get().number("appearance.font_size")),
                     ui.visuals().weak_text_color(),
                 );
                 let clicked = response.clicked();
@@ -1107,7 +1370,13 @@ impl Ui {
                     .iter()
                     .find(|t| media::player_matches(&stream.application, &t.player))
                     .cloned();
-                let (r, _) = ui.allocate_exact_size(vec2(312., 30.), egui::Sense::hover());
+                let (r, _) = ui.allocate_exact_size(
+                    vec2(
+                        ui.available_width(),
+                        config::get().number("layout.audio_row_height"),
+                    ),
+                    egui::Sense::hover(),
+                );
                 if let Some(track) = &track
                     && let Some(art) =
                         self.state.extras.artworks.get(&track.art_url).or_else(|| {
@@ -1133,14 +1402,26 @@ impl Ui {
                         });
                     ui.painter().image(
                         texture.id(),
-                        Rect::from_min_size(r.min, vec2(28., 28.)),
+                        Rect::from_min_size(
+                            r.min,
+                            vec2(
+                                config::get().number("layout.artwork_size"),
+                                config::get().number("layout.artwork_size"),
+                            ),
+                        ),
                         Rect::from_min_max(Pos2::ZERO, pos2(1., 1.)),
                         Color32::WHITE,
                     );
                 } else {
                     ui.painter().image(
                         self.app_icon(&stream.icon),
-                        Rect::from_min_size(r.min, vec2(28., 28.)),
+                        Rect::from_min_size(
+                            r.min,
+                            vec2(
+                                config::get().number("layout.artwork_size"),
+                                config::get().number("layout.artwork_size"),
+                            ),
+                        ),
                         Rect::from_min_max(Pos2::ZERO, pos2(1., 1.)),
                         Color32::WHITE,
                     );
@@ -1149,8 +1430,13 @@ impl Ui {
                     .as_ref()
                     .map(|t| t.title.as_str())
                     .unwrap_or(&stream.name);
-                let text_rect =
-                    Rect::from_min_max(r.min + vec2(36., 0.), pos2(r.right() - 88., r.bottom()));
+                let text_rect = Rect::from_min_max(
+                    r.min + vec2(config::get().number("layout.audio_summary_offset"), 0.),
+                    pos2(
+                        r.right() - config::get().number("layout.audio_controls_width"),
+                        r.bottom(),
+                    ),
+                );
                 ui.scope_builder(egui::UiBuilder::new().max_rect(text_rect), |ui| {
                     ui.add(egui::Label::new(name).truncate())
                         .on_hover_text(format!("{} · {}", stream.application, name));
@@ -1162,11 +1448,17 @@ impl Ui {
                     .map(|l| *l)
                     .unwrap_or([0.; 7]);
                 for (i, level) in levels.iter().enumerate() {
-                    let h = (level * 19.).max(2.) as f32;
+                    let h = (level * config::get().number("layout.meter_height") as f64)
+                        .max(config::get().number("layout.meter_min_height") as f64)
+                        as f32;
                     ui.painter().rect_filled(
                         Rect::from_min_size(
-                            pos2(r.right() - 80. + i as f32 * 7., r.center().y + 10. - h),
-                            vec2(2., h),
+                            pos2(
+                                r.right() - config::get().number("layout.meter_offset")
+                                    + i as f32 * config::get().number("layout.meter_bar_gap"),
+                                r.center().y + 10. - h,
+                            ),
+                            vec2(config::get().number("layout.meter_bar_width"), h),
                         ),
                         0,
                         ui.visuals().text_color(),
@@ -1174,8 +1466,14 @@ impl Ui {
                 }
                 ui.scope_builder(
                     egui::UiBuilder::new().max_rect(Rect::from_min_size(
-                        pos2(r.right() - 24., r.top()),
-                        vec2(24., 28.),
+                        pos2(
+                            r.right() - config::get().number("layout.media_button_width"),
+                            r.top(),
+                        ),
+                        vec2(
+                            config::get().number("layout.media_button_width"),
+                            config::get().number("layout.artwork_size"),
+                        ),
                     )),
                     |ui| {
                         if self.icon_button(ui, Icon::Volume(stream.muted), true) {
@@ -1186,10 +1484,18 @@ impl Ui {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 0.;
                     let mut v = stream.percent as f32;
-                    if volume_slider(ui, &mut v, 224.).changed() {
+                    if volume_slider(
+                        ui,
+                        &mut v,
+                        (ui.available_width()
+                            - config::get().number("layout.audio_controls_width"))
+                        .max(1.),
+                    )
+                    .changed()
+                    {
                         self.control(volume::Control::StreamVolume(stream.index, v.round() as u8));
                     }
-                    ui.add_space(4.);
+                    ui.add_space(config::get().number("layout.media_button_gap"));
                     for (icon, control, enabled) in [
                         (
                             Icon::Previous,
@@ -1282,48 +1588,159 @@ impl Ui {
             }
         }
     }
+    fn processes(&mut self, ui: &mut egui::Ui) {
+        ui.label("CPU");
+        let width = ui.available_width();
+        for (name, pid, cpu, memory) in
+            std::iter::once(("Process".into(), "PID".into(), "CPU".into(), "RAM".into())).chain(
+                self.cpu.processes.iter().map(|p| {
+                    (
+                        p.name.clone(),
+                        p.pid.to_string(),
+                        format!("{:.1}%", p.percent),
+                        format!("{}M", p.memory / 1_048_576),
+                    )
+                }),
+            )
+        {
+            let (r, _) = ui.allocate_exact_size(
+                vec2(width, config::get().number("layout.process_row_height")),
+                egui::Sense::hover(),
+            );
+            let mut job = egui::text::LayoutJob::simple(
+                name,
+                egui::FontId::proportional(config::get().number("appearance.font_size")),
+                ui.visuals().text_color(),
+                (width - config::get().number("layout.process_columns_width")).max(1.),
+            );
+            job.wrap.max_rows = 1;
+            job.wrap.break_anywhere = true;
+            let text = ui.painter().layout_job(job);
+            ui.painter().galley(
+                pos2(r.left(), r.center().y - text.size().y / 2.),
+                text,
+                ui.visuals().text_color(),
+            );
+            for (value, offset) in [
+                (pid, config::get().number("layout.pid_column_offset")),
+                (cpu, config::get().number("layout.cpu_column_offset")),
+                (memory, 0.),
+            ] {
+                ui.painter().text(
+                    pos2(r.right() - offset, r.center().y),
+                    egui::Align2::RIGHT_CENTER,
+                    value,
+                    egui::FontId::monospace(config::get().number("appearance.small_font_size")),
+                    ui.visuals().text_color(),
+                );
+            }
+        }
+    }
     fn workspace(&mut self, ui: &mut egui::Ui) {
         let Some(s) = &self.preview else {
             ui.label("Loading…");
             return;
         };
-        ui.label(format!("Workspace {}", s.name));
-        let scale = workspace_preview::preview_scale(s.rect);
-        let (canvas, _) = ui.allocate_exact_size(
-            vec2(312., (s.rect.h * scale).max(60.)),
-            egui::Sense::hover(),
+        let (rect, response) = ui.allocate_exact_size(
+            vec2(
+                self.preview_size[0],
+                self.preview_size[1] + config::get().number("preview.title_height"),
+            ),
+            egui::Sense::click(),
         );
-        let painter = ui.painter().with_clip_rect(canvas);
-        painter.rect_filled(canvas, 0, Color32::from_gray(48));
+        let name = match self.panel.as_ref().map(|p| &p.kind) {
+            Some(Menu::Workspace(name)) => name,
+            _ => &s.name,
+        };
+        ui.painter().text(
+            rect.min,
+            egui::Align2::LEFT_TOP,
+            format!("Workspace {name}"),
+            egui::FontId::proportional(config::get().number("appearance.font_size")),
+            ui.visuals().text_color(),
+        );
+        let canvas = Rect::from_min_max(
+            rect.min + vec2(0., config::get().number("preview.title_height")),
+            rect.max,
+        );
+        let amount = self
+            .preview_previous
+            .as_ref()
+            .map(|(_, at)| {
+                (at.elapsed().as_secs_f32()
+                    / config::get()
+                        .duration("animation.preview_fade_ms")
+                        .as_secs_f32())
+                .min(1.)
+            })
+            .unwrap_or(1.);
+        if let Some((old, _)) = &self.preview_previous {
+            self.paint_workspace(ui, canvas, old, "preview-old:", 1.);
+            if amount < 1. {
+                self.ctx
+                    .request_repaint_after(config::get().duration("animation.frame_ms"));
+            }
+        }
+        self.paint_workspace(ui, canvas, s, "preview:", amount);
+        if response.clicked() {
+            let _ = self
+                .services
+                .status
+                .send(status::Update::Focus(name.clone()));
+            self.close();
+        }
+    }
+    fn paint_workspace(
+        &self,
+        ui: &egui::Ui,
+        canvas: Rect,
+        s: &workspace_preview::Snapshot,
+        prefix: &str,
+        opacity: f32,
+    ) {
+        let mut painter = ui.painter().with_clip_rect(canvas);
+        painter.multiply_opacity(opacity);
+        let scale = workspace_preview::preview_scale(s.rect, self.preview_size);
+        painter.rect_filled(canvas, 0, config::get().color("preview_canvas", self.dark));
         for (i, w) in s.windows.iter().enumerate() {
             let rect = Rect::from_min_size(
                 canvas.min + vec2((w.rect.x - s.rect.x) * scale, (w.rect.y - s.rect.y) * scale),
                 vec2(w.rect.w * scale, w.rect.h * scale),
             );
-            painter.rect_filled(rect.shrink(1.), 0, Color32::from_gray(72));
+            painter.rect_filled(
+                rect.shrink(1.),
+                0,
+                config::get().color("preview_window", self.dark),
+            );
             if w.pixels.is_some() {
-                let key = format!("preview:{i}");
-                let Some(texture) = self.textures.get(&key) else {
-                    continue;
-                };
-                painter.image(
-                    texture.id(),
-                    rect,
-                    Rect::from_min_max(Pos2::ZERO, pos2(1., 1.)),
-                    Color32::WHITE,
-                );
+                if let Some(texture) = self.textures.get(&format!("{prefix}{i}")) {
+                    painter.image(
+                        texture.id(),
+                        rect,
+                        Rect::from_min_max(Pos2::ZERO, pos2(1., 1.)),
+                        Color32::WHITE,
+                    );
+                }
             } else {
                 painter.with_clip_rect(rect.intersect(canvas)).text(
                     rect.left_bottom() + vec2(3., -4.),
                     egui::Align2::LEFT_BOTTOM,
                     &w.title,
-                    egui::FontId::proportional(10.),
+                    egui::FontId::proportional(
+                        config::get().number("appearance.small_font_size") - 1.,
+                    ),
                     Color32::WHITE,
                 );
             }
         }
         if !s.message.is_empty() {
-            ui.label(&s.message);
+            painter.text(
+                canvas.left_bottom() + vec2(3., -3.),
+                egui::Align2::LEFT_BOTTOM,
+                &s.message,
+                egui::FontId::proportional(config::get().number("appearance.small_font_size") - 1.),
+                Color32::WHITE,
+            );
         }
     }
 }
@@ -1367,17 +1784,17 @@ fn sf_mono() -> Option<std::path::PathBuf> {
 fn volume_slider(ui: &mut egui::Ui, value: &mut f32, width: f32) -> egui::Response {
     ui.scope(|ui| {
         ui.spacing_mut().slider_width = width;
-        ui.spacing_mut().slider_rail_height = 3.;
-        ui.spacing_mut().interact_size.y = 18.;
+        ui.spacing_mut().slider_rail_height = config::get().number("layout.slider_rail_height");
+        ui.spacing_mut().interact_size.y = config::get().number("layout.slider_height");
         ui.visuals_mut().widgets.inactive.bg_fill =
-            Color32::from_gray(if ui.visuals().dark_mode { 65 } else { 215 });
+            config::get().color("slider_rail", ui.visuals().dark_mode);
         let response = ui.add(
             egui::Slider::new(value, 0.0..=150.)
                 .show_value(false)
                 .trailing_fill(true)
                 .handle_shape(egui::style::HandleShape::Circle),
         );
-        let radius = response.rect.height() / 2.5;
+        let radius = response.rect.height() / config::get().number("layout.slider_handle_ratio");
         let range = response.rect.x_range().shrink(radius);
         let center = pos2(
             egui::lerp(range, (*value / 150.).clamp(0., 1.)),
@@ -1386,14 +1803,14 @@ fn volume_slider(ui: &mut egui::Ui, value: &mut f32, width: f32) -> egui::Respon
         ui.painter().circle_filled(
             center,
             radius,
-            Color32::from_gray(if ui.visuals().dark_mode { 225 } else { 252 }),
+            config::get().color("slider_handle", ui.visuals().dark_mode),
         );
         ui.painter().circle_stroke(
             center,
             radius,
             egui::Stroke::new(
-                0.7_f32,
-                Color32::from_gray(if ui.visuals().dark_mode { 110 } else { 160 }),
+                config::get().number("layout.slider_border_width"),
+                config::get().color("slider_border", ui.visuals().dark_mode),
             ),
         );
         response

@@ -83,11 +83,11 @@ pub fn run(options: crate::Options) -> Result<()> {
         input: egui::RawInput::default(),
         renderer: EguiSoftwareRender::new(ColorFieldOrder::Bgra),
         width: 1,
-        height: 28,
+        height: crate::config::get().number("layout.bar_height") as u32,
         output_height: 900,
         output: None,
         scale: 1,
-        requested_height: 28,
+        requested_height: crate::config::get().number("layout.bar_height") as u32,
         keyboard_interactive: false,
         compositor,
         repaint_at: Arc::new(Mutex::new(Some(Instant::now()))),
@@ -135,8 +135,8 @@ pub fn run(options: crate::Options) -> Result<()> {
     let surface = app.compositor.create_surface(&qh);
     let layer = shell.create_layer_surface(&qh, surface, Layer::Top, Some("bharta"), Some(&output));
     layer.set_anchor(Anchor::TOP | Anchor::LEFT | Anchor::RIGHT);
-    layer.set_size(0, 28);
-    layer.set_exclusive_zone(28);
+    layer.set_size(0, crate::config::get().number("layout.bar_height") as u32);
+    layer.set_exclusive_zone(crate::config::get().number("layout.bar_height") as i32);
     layer.set_keyboard_interactivity(KeyboardInteractivity::None);
     layer.commit();
     app.layer = Some(layer);
@@ -147,7 +147,11 @@ pub fn run(options: crate::Options) -> Result<()> {
     let mut last = Instant::now();
     while !app.exit && (!options.smoke || app.start.elapsed() < Duration::from_secs(3)) {
         let now = Instant::now();
-        let mut wait = Duration::from_millis(if app.ui.preview.is_some() { 4 } else { 50 });
+        let mut wait = crate::config::get().duration(if app.ui.preview.is_some() {
+            "intervals.preview_poll_ms"
+        } else {
+            "intervals.idle_poll_ms"
+        });
         if app.frame_ready {
             let at = if app.dirty {
                 Some(now)
@@ -156,7 +160,7 @@ pub fn run(options: crate::Options) -> Result<()> {
             };
             if let Some(at) = at {
                 wait = wait.min(
-                    at.max(last + Duration::from_millis(16))
+                    at.max(last + crate::config::get().duration("animation.frame_ms"))
                         .saturating_duration_since(now),
                 );
             }
@@ -183,14 +187,14 @@ pub fn run(options: crate::Options) -> Result<()> {
         }
         if app.configured
             && app.frame_ready
-            && last.elapsed() >= Duration::from_millis(16)
+            && last.elapsed() >= crate::config::get().duration("animation.frame_ms")
             && (app.dirty
                 || app
                     .repaint_at
                     .lock()
                     .unwrap()
                     .is_some_and(|at| Instant::now() >= at)
-                || last.elapsed() >= Duration::from_secs(1))
+                || last.elapsed() >= crate::config::get().duration("intervals.status_ms"))
         {
             app.draw(&qh)?;
             last = Instant::now();
@@ -287,9 +291,14 @@ impl App {
             });
         }
         let height = if self.ui.panel.is_some() {
-            self.ui.panel_rect.max.y.ceil().max(28.) as u32
+            self.ui
+                .panel_rect
+                .max
+                .y
+                .ceil()
+                .max(crate::config::get().number("layout.bar_height")) as u32
         } else {
-            28
+            crate::config::get().number("layout.bar_height") as u32
         }
         .min(self.output_height);
         if self.requested_height != height {
@@ -299,8 +308,13 @@ impl App {
         }
         // Transparent popup margins must pass pointer input to the desktop.
         let region = Region::new(&self.compositor)?;
-        region.add(0, 0, self.width as i32, 28);
-        if self.ui.panel.is_some() {
+        region.add(
+            0,
+            0,
+            self.width as i32,
+            crate::config::get().number("layout.bar_height") as i32,
+        );
+        if self.ui.panel.is_some() && self.ui.panel_rect.is_positive() {
             let r = self.ui.panel_rect;
             region.add(
                 r.min.x.floor() as i32,
@@ -393,7 +407,8 @@ impl App {
                                 events: libc::POLLIN,
                                 revents: 0,
                             };
-                            let end = Instant::now() + Duration::from_secs(2);
+                            let end = Instant::now()
+                                + crate::config::get().duration("timeouts.clipboard_ms");
                             while Instant::now() < end && bytes.len() < 1024 * 1024 {
                                 if unsafe { libc::poll(&mut poll, 1, 100) } <= 0 {
                                     continue;
@@ -475,11 +490,11 @@ impl CompositorHandler for App {
         if let Some(panel) = &self.ui.panel
             && let super::Menu::Workspace(name) = &panel.kind
         {
-            let _ = self
-                .ui
-                .services
-                .preview
-                .send(Some((name.clone(), self.scale as f32)));
+            let _ = self.ui.services.preview.send(Some((
+                name.clone(),
+                self.scale as f32,
+                self.ui.preview_size,
+            )));
         }
         self.dirty = true;
     }
@@ -523,7 +538,12 @@ impl LayerShellHandler for App {
         c: LayerSurfaceConfigure,
         _: u32,
     ) {
-        let (width, height) = (c.new_size.0.max(1), c.new_size.1.max(28));
+        let (width, height) = (
+            c.new_size.0.max(1),
+            c.new_size
+                .1
+                .max(crate::config::get().number("layout.bar_height") as u32),
+        );
         if !self.configured || (self.width, self.height) != (width, height) {
             self.width = width;
             self.height = height;
@@ -543,7 +563,8 @@ impl OutputHandler for App {
             && let Some(info) = self.outputs.info(&o)
             && let Some((_, h)) = info.logical_size
         {
-            self.output_height = h.max(28) as u32;
+            self.output_height =
+                h.max(crate::config::get().number("layout.bar_height") as i32) as u32;
             self.dirty = true;
         }
     }
@@ -623,7 +644,7 @@ impl PointerHandler for App {
                 | PointerEventKind::Release { button, serial, .. } => {
                     self.serial = serial;
                     if matches!(event.kind, PointerEventKind::Press { .. })
-                        && p.y >= 28.
+                        && p.y >= crate::config::get().number("layout.bar_height")
                         && self.ui.panel.is_some()
                         && !self.ui.panel_rect.contains(p)
                     {

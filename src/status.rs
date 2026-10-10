@@ -30,8 +30,8 @@ fn connect() -> Result<UnixStream> {
     let socket = UnixStream::connect(
         std::env::var("SWAYSOCK").context("SWAYSOCK is missing; run inside Sway")?,
     )?;
-    socket.set_read_timeout(Some(Duration::from_millis(150)))?;
-    socket.set_write_timeout(Some(Duration::from_millis(150)))?;
+    socket.set_read_timeout(Some(crate::config::get().duration("timeouts.ipc_ms")))?;
+    socket.set_write_timeout(Some(crate::config::get().duration("timeouts.ipc_ms")))?;
     Ok(socket)
 }
 fn request(socket: &mut UnixStream, kind: u32, payload: &str) -> Result<()> {

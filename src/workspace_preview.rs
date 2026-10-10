@@ -3,7 +3,7 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 use std::{
     sync::{Arc, mpsc},
-    time::{Duration, Instant},
+    time::Instant,
 };
 use tiny_skia::Pixmap;
 
@@ -37,6 +37,15 @@ pub struct Snapshot {
     pub rect: Geometry,
     pub windows: Vec<Window>,
     pub message: String,
+}
+impl Snapshot {
+    pub fn ready(&self) -> bool {
+        !self.message.is_empty()
+            || self
+                .windows
+                .iter()
+                .all(|w| w.id.is_none() || w.pixels.is_some())
+    }
 }
 fn workspace<'a>(v: &'a Value, name: &str) -> Option<&'a Value> {
     if v["type"] == "workspace" && v["name"] == name {
@@ -109,8 +118,9 @@ fn snapshot(name: &str) -> Result<Snapshot> {
         message: String::new(),
     })
 }
-pub fn watch(sender: mpsc::SyncSender<Snapshot>) -> mpsc::Sender<Option<(String, f32)>> {
-    let (tx, rx) = mpsc::channel::<Option<(String, f32)>>();
+pub type Request = (String, f32, [f32; 2]);
+pub fn watch(sender: mpsc::SyncSender<Snapshot>) -> mpsc::Sender<Option<Request>> {
+    let (tx, rx) = mpsc::channel::<Option<Request>>();
     std::thread::spawn(move || {
         let mut capture = None;
         let mut target = None;
@@ -120,7 +130,7 @@ pub fn watch(sender: mpsc::SyncSender<Snapshot>) -> mpsc::Sender<Option<(String,
         let mut retry = Instant::now();
         loop {
             let request = if target.is_some() {
-                rx.recv_timeout(Duration::from_millis(4))
+                rx.recv_timeout(crate::config::get().duration("intervals.preview_poll_ms"))
             } else {
                 rx.recv().map_err(|_| mpsc::RecvTimeoutError::Disconnected)
             };
@@ -137,7 +147,7 @@ pub fn watch(sender: mpsc::SyncSender<Snapshot>) -> mpsc::Sender<Option<(String,
                 changed |= target != value;
                 target = value;
             }
-            let Some((name, scale)) = &target else {
+            let Some((name, scale, bounds)) = &target else {
                 capture = None;
                 layout = None;
                 pixels.clear();
@@ -163,10 +173,11 @@ pub fn watch(sender: mpsc::SyncSender<Snapshot>) -> mpsc::Sender<Option<(String,
                     windows: vec![],
                     message: "Workspace unavailable".into(),
                 }));
-                refresh = Instant::now() + Duration::from_millis(500);
+                refresh =
+                    Instant::now() + crate::config::get().duration("intervals.preview_layout_ms");
             }
             let shot = layout.as_mut().unwrap();
-            let factor = preview_scale(shot.rect) * scale.max(1.);
+            let factor = preview_scale(shot.rect, *bounds) * scale.max(1.);
             let targets: Vec<_> = shot
                 .windows
                 .iter()
@@ -184,7 +195,8 @@ pub fn watch(sender: mpsc::SyncSender<Snapshot>) -> mpsc::Sender<Option<(String,
                     Ok(c) => capture = Some(c),
                     Err(e) => {
                         eprintln!("Workspace capture unavailable: {e:#}");
-                        retry = Instant::now() + Duration::from_secs(5);
+                        retry = Instant::now()
+                            + crate::config::get().duration("intervals.preview_retry_ms");
                     }
                 }
             }
@@ -200,7 +212,8 @@ pub fn watch(sender: mpsc::SyncSender<Snapshot>) -> mpsc::Sender<Option<(String,
                     Err(e) => {
                         eprintln!("Workspace capture failed: {e:#}");
                         capture = None;
-                        retry = Instant::now() + Duration::from_secs(1);
+                        retry = Instant::now()
+                            + crate::config::get().duration("intervals.preview_error_retry_ms");
                     }
                 }
             }
@@ -224,8 +237,19 @@ pub fn watch(sender: mpsc::SyncSender<Snapshot>) -> mpsc::Sender<Option<(String,
     });
     tx
 }
-pub fn preview_scale(rect: Geometry) -> f32 {
-    (312. / rect.w.max(1.)).min(220. / rect.h.max(1.))
+pub fn preview_bounds(screen: [f32; 2]) -> [f32; 2] {
+    let width = (screen[0] * crate::config::get().number("preview.width_fraction"))
+        .max(crate::config::get().number("preview.minimum_width"))
+        .min((screen[0] - crate::config::get().number("preview.horizontal_margin")).max(1.));
+    let height = (screen[1] - crate::config::get().number("layout.bar_height")).max(1.) * width
+        / screen[0].max(1.);
+    let scale = ((screen[1] - crate::config::get().number("preview.vertical_margin")).max(1.)
+        / height)
+        .min(1.);
+    [width * scale, height * scale]
+}
+pub fn preview_scale(rect: Geometry, bounds: [f32; 2]) -> f32 {
+    (bounds[0] / rect.w.max(1.)).min(bounds[1] / rect.h.max(1.))
 }
 #[cfg(test)]
 mod tests {
@@ -280,8 +304,18 @@ mod bounds_tests {
     #[test]
     fn previews_are_bounded_independently_of_capture_size() {
         for (w, h) in [(7680., 2160.), (3840., 2160.), (1080., 1920.)] {
-            let factor = preview_scale(Geometry { x: 0., y: 0., w, h });
-            assert!(w * factor <= 312.001 && h * factor <= 220.001);
+            for screen in [[1600., 900.], [3840., 2160.], [1080., 1920.]] {
+                let bounds = preview_bounds(screen);
+                assert!(
+                    (bounds[1] / bounds[0]
+                        - (screen[1] - crate::config::get().number("layout.bar_height"))
+                            / screen[0])
+                        .abs()
+                        < 0.001
+                );
+                let factor = preview_scale(Geometry { x: 0., y: 0., w, h }, bounds);
+                assert!(w * factor <= bounds[0] + 0.001 && h * factor <= bounds[1] + 0.001);
+            }
         }
     }
 }

@@ -54,6 +54,42 @@ By default a supervisor manages all active outputs, handles hotplug, and restart
 bars. `--output DP-1` selects one output. Only one supervisor runs per Sway session.
 The default theme is light; `--dark` selects neutral charcoal.
 
+## Configuration
+
+Settings are read at startup from `~/.config/bharta/config.json`, or
+`$XDG_CONFIG_HOME/bharta/config.json`. A missing file uses the current defaults.
+Use `--config /path/to/config.json` for a separate configuration. `--dark`,
+`--light`, and `--font` override file settings, including across all outputs.
+Restart bharta after editing.
+
+You can include only the settings you want to change:
+
+```json
+{
+  "appearance": { "dark": true, "font_size": 12 },
+  "animation": { "hover_ms": 180, "preview_fade_ms": 100, "dismiss_delay_ms": 500 },
+  "layout": { "group_gap": 8 },
+  "intervals": { "cpu_ms": 1000 },
+  "colors": { "dark": { "bar": "#1e1e1e", "audio": "#41be8c" } }
+}
+```
+
+[config.default.json](config.default.json) lists every setting and its default.
+`bharta --print-config` also prints that file, even if your configuration is invalid.
+Timings use milliseconds, geometry uses logical pixels, fractions range from
+zero to one (exclusive of zero), and colors use `#RRGGBB`. Unknown keys, invalid
+types, unsupported colors, and invalid numeric ranges produce an error naming
+the setting. JSON needs double quotes and does not allow comments or trailing commas.
+
+Appearance includes a font path (empty selects installed SF Mono or the bundled
+fallback), clock format, and font/icon sizes. Layout covers bar and popup dimensions,
+spacing, source rows, sliders, meters, and process columns. Preview controls its
+display-relative bounds. Animation controls hover/dismiss delays, fades, speaker
+scale, and frame interval. Intervals control sampling/retries; timeouts cover IPC,
+commands, artwork, Wi-Fi, and clipboard transfers. Both light and dark palettes
+can be edited independently. Protocol identifiers, pixel formats, audio sample
+formats, and safety limits remain implementation details.
+
 ## Controls
 
 Menus open after a 220ms hover or a click. Only one menu opens across all outputs.
@@ -62,7 +98,10 @@ Moving to another bar control switches menus. Leaving the bar and panel starts a
 Escape or an outside click dismisses menus. Clicking a hovered menu retains it;
 clicking again closes it until the pointer leaves that control.
 
-- Workspaces: click to switch, hover for a bounded miniature layout. Active,
+- Workspaces: click a number or its preview to switch, hover for a miniature
+  layout sized for the display. Switching keeps the previous preview visible
+  until the next capture is ready, then fades only its content over 150ms. The
+  popup stays stationary and its workspace name changes immediately. Active,
   urgent, and audible workspaces have distinct accents and a reserved speaker
   slot. Live window captures require Sway 1.12+ and its capture protocols; older
   Sway shows positions and titles. Hidden tabs and fullscreen windows are
@@ -83,6 +122,10 @@ clicking again closes it until the pointer leaves that control.
   scan, connect/disconnect, saved credentials, and a password
   field with reveal and clipboard paste. Enterprise and hidden networks can be
   provisioned in system network settings.
+- CPU: a compact icon and total usage percentage updated once a second. Hover or
+  click for the busiest processes with PID, CPU usage, and resident memory.
+  Process scanning runs only while the drawer is open. Sound and Wi-Fi use
+  icon-only bar controls with consistent spacing.
 - Apps: immediately focused search, desktop-entry filtering, arrow-key selection,
   Enter to launch, or clickable rows. egui handles editing and selection; Wayland
   handles clipboard transfer and keyboard layout/repeat.

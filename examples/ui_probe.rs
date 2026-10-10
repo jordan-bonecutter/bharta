@@ -121,6 +121,37 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     let keys_only = a.get(5).is_some_and(|arg| arg == "--keys-only");
+    let hover_click = a.get(5).is_some_and(|arg| arg == "--hover-click");
+    if hover_click {
+        anyhow::ensure!(a.len() == 9, "--hover-click needs X Y READY_FILE");
+        let started = std::time::Instant::now();
+        while !std::path::Path::new(&a[8]).exists() {
+            anyhow::ensure!(
+                started.elapsed() < Duration::from_secs(10),
+                "Preview readiness timed out"
+            );
+            pointer.motion_absolute(
+                timestamp(),
+                a[1].parse()?,
+                a[2].parse()?,
+                a[3].parse()?,
+                a[4].parse()?,
+            );
+            pointer.frame();
+            c.flush()?;
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        pointer.motion_absolute(
+            timestamp(),
+            a[6].parse()?,
+            a[7].parse()?,
+            a[3].parse()?,
+            a[4].parse()?,
+        );
+        pointer.frame();
+        q.roundtrip(&mut s)?;
+        std::thread::sleep(Duration::from_millis(150));
+    }
     if !keys_only {
         pointer.button(timestamp(), 0x110, wl_pointer::ButtonState::Pressed);
         pointer.frame();
@@ -157,7 +188,7 @@ fn main() -> anyhow::Result<()> {
         std::thread::sleep(Duration::from_millis(
             a.get(6).map(|v| v.parse()).transpose()?.unwrap_or(2000),
         ));
-    } else if a.len() > 5 && !dragging {
+    } else if a.len() > 5 && !dragging && !hover_click {
         std::thread::sleep(Duration::from_millis(500));
         let text = concat!(include_str!("../tests/fixtures/us.xkb"), "\0");
         let mut file = tempfile::tempfile()?;
