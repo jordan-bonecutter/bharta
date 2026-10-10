@@ -197,6 +197,15 @@ testing, with no repeated captures of the static source). Inspect its screenshot
 and logs.
 It never sends input to the desktop or changes real audio levels.
 
+For CPU measurements, run
+`python3 tests/headless_ui.py /tmp/bharta-performance --performance-only`.
+It saves `cpu.json` and screenshots for steady audio, changing audio, and an
+open Sound drawer. Percentages measure the bar process (including its threads)
+as a fraction of one core; fixture and compositor processes are excluded.
+Compare release builds on the same machine using `BHARTA_BINARY`.
+The spectrum calculation can also be compared with its original implementation
+using `cargo test --release spectrum_benchmark -- --ignored --nocapture`.
+
 For bar layout changes, run
 `python3 tests/headless_ui.py /tmp/bharta-alignment --alignment-only`.
 This shorter check measures rendered icon positions in both

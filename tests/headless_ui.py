@@ -3,6 +3,7 @@
 Build first: cargo build --release --examples && cargo build --release
 Run: python3 tests/headless_ui.py /tmp/bharta-headless
 Add --audio-only to check audio controls, event updates, and drawer height.
+Add --performance-only to measure steady/changing audio and Sound drawer CPU.
 Add --launcher-only to check the default and external app launchers.
 Add --alignment-only to check bar icons across themes, geometry, states, and scale.
 Requires sway, grim, dbus-daemon, and Python 3. Screenshots/logs go to the argument.
@@ -93,18 +94,23 @@ elif 'list' in a:print('[]')
 import math,os,struct,sys,time
 from pathlib import Path
 phase=0.0
+frame=0
 rate=24000
 args=sys.argv[1:]
 frequency=750 if '--monitor-stream=11' in args else 1600
 while True:
  if not any(a.startswith('--monitor-stream=') for a in args):
-  frequency=float(Path(os.environ['BHARTA_TEST_TRAY_TONE']).read_text().strip() or frequency)
+  tone=Path(os.environ['BHARTA_TEST_TRAY_TONE']).read_text().strip()
+  frequency=375 if tone=='music' else float(tone or frequency)
+ dynamic=Path(os.environ['BHARTA_TEST_TRAY_TONE']).read_text().strip()=='music'
+ amplitude=10000 * (.55 + .45*math.sin(frame*.37)) if dynamic else 10000
  values=[]
  for _ in range(1024):
-  values.append(int(10000*math.sin(phase)) if frequency else 0)
+  values.append(int(amplitude*math.sin(phase)) if frequency else 0)
   phase += 2*math.pi*frequency/rate
   if phase > 2*math.pi: phase -= 2*math.pi
  sys.stdout.buffer.write(struct.pack('<1024h',*values));sys.stdout.buffer.flush()
+ frame += 1
  time.sleep(1024/rate)
 ''')
     fake_capture.chmod(0o755)
@@ -231,6 +237,27 @@ while True:
         tray_tone.write_text('0');time.sleep(.4);shot('tray-silent')
         assert max(tray_heights(Image.open(DEST/'tray-silent.png').convert('RGB')))<=1, 'Tray fabricated activity during silence'
         tray_tone.write_text('375')
+        if '--performance-only' in sys.argv[2:]:
+            def cpu_ticks():
+                # Fields after comm begin with state (field 3).
+                fields=Path(f'/proc/{bar.pid}/stat').read_text().rsplit(') ',1)[1].split()
+                return int(fields[11])+int(fields[12])
+            def measure_cpu(label):
+                time.sleep(.8)
+                previous=cpu_ticks();started=time.monotonic()
+                time.sleep(5)
+                percent=(cpu_ticks()-previous)/os.sysconf('SC_CLK_TCK')/(time.monotonic()-started)*100
+                shot('performance-'+label)
+                return round(percent,2)
+            results={'steady_audio':measure_cpu('steady')}
+            tray_tone.write_text('music')
+            results['changing_audio']=measure_cpu('changing')
+            holder=probe(sound_x,14,'--hover',8000)
+            results['sound_drawer']=measure_cpu('sound')
+            holder.wait()
+            (DEST/'cpu.json').write_text(json.dumps(results,indent=2)+'\n')
+            print('Bar CPU (% of one core):',results)
+            sys.exit(0)
         # Live spectrum values must never move or paint over either icon.
         slots=[]
         for name in ('tray-low', 'tray-high', 'tray-silent'):

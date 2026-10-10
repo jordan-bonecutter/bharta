@@ -29,6 +29,22 @@ struct Meter {
     levels: Arc<Mutex<[f64; 7]>>,
     capture: Option<audio_meter::Capture>,
     retry: Instant,
+    displayed: [f64; 7],
+}
+impl Meter {
+    fn update(&mut self) -> bool {
+        // Ignore sub-pixel noise and repaint only when a visible level changes.
+        let levels = self
+            .levels
+            .lock()
+            .unwrap()
+            .map(|v| (v * 100.).round() / 100.);
+        if levels == self.displayed {
+            return false;
+        }
+        self.displayed = levels;
+        true
+    }
 }
 fn plot_color(level: f32) -> Color32 {
     Color32::from(egui::ecolor::Hsva::new((1. - level) / 3., 0.65, 0.85, 1.))
@@ -61,7 +77,6 @@ struct Ui {
     textures: HashMap<String, egui::TextureHandle>,
     meters: HashMap<u32, Meter>,
     tray_meter: Meter,
-    tray_levels: [f64; 7],
     tray_output: Option<String>,
     query: String,
     selection: usize,
@@ -159,8 +174,8 @@ impl Ui {
                 levels: Arc::new(Mutex::new([0.; 7])),
                 capture: None,
                 retry: Instant::now(),
+                displayed: [0.; 7],
             },
-            tray_levels: [0.; 7],
             tray_output: None,
             query: String::new(),
             selection: 0,
@@ -566,15 +581,7 @@ impl Ui {
             self.tray_meter.capture =
                 audio_meter::Capture::start_output(self.tray_meter.levels.clone()).ok();
         }
-        // Ignore sub-pixel noise so a steady tone doesn't repaint the whole bar.
-        let levels = self
-            .tray_meter
-            .levels
-            .lock()
-            .unwrap()
-            .map(|v| (v * 100.).round() / 100.);
-        if self.tray_levels != levels {
-            self.tray_levels = levels;
+        if self.tray_meter.update() {
             self.ctx.request_repaint();
         }
         if self
@@ -594,6 +601,7 @@ impl Ui {
                         levels: Arc::new(Mutex::new([0.; 7])),
                         capture: None,
                         retry: Instant::now(),
+                        displayed: [0.; 7],
                     });
                     if meter.capture.as_mut().is_some_and(|c| !c.is_running()) {
                         meter.capture = None;
@@ -603,6 +611,9 @@ impl Ui {
                             Instant::now() + config::get().duration("intervals.meter_retry_ms");
                         meter.capture =
                             audio_meter::Capture::start(meter.levels.clone(), stream.index).ok();
+                    }
+                    if meter.update() {
+                        self.ctx.request_repaint();
                     }
                 }
             }
@@ -963,8 +974,8 @@ impl Ui {
             Menu::Sound,
         );
         if let Some((painter, spectrum)) = sound_layout.plot(ui.painter()) {
-            let step = spectrum.width() / self.tray_levels.len() as f32;
-            for (i, level) in self.tray_levels.iter().enumerate() {
+            let step = spectrum.width() / self.tray_meter.displayed.len() as f32;
+            for (i, level) in self.tray_meter.displayed.iter().enumerate() {
                 let level = *level as f32;
                 painter.rect_filled(
                     Rect::from_min_size(
@@ -1199,7 +1210,7 @@ impl Ui {
             self.finish_close();
             return;
         }
-        if opacity < 1. || panel.closing.is_some() || kind == Menu::Sound {
+        if opacity < 1. || panel.closing.is_some() {
             ctx.request_repaint_after(config::get().duration("animation.frame_ms"));
         }
         let min_height = match &kind {
@@ -1896,14 +1907,30 @@ impl Ui {
                 let levels = self
                     .meters
                     .get(&stream.index)
-                    .and_then(|m| m.levels.lock().ok())
-                    .map(|l| *l)
+                    .map(|m| m.displayed)
                     .unwrap_or([0.; 7]);
+                // Keep changing bars in a separate clipped mesh so the software
+                // renderer can reuse the surrounding row and popup raster cache.
+                let meter_height = config::get()
+                    .number("layout.meter_height")
+                    .max(config::get().number("layout.meter_min_height"));
+                let meter_rect = Rect::from_min_size(
+                    pos2(
+                        r.right() - config::get().number("layout.meter_offset"),
+                        r.center().y + 10. - meter_height,
+                    ),
+                    vec2(
+                        6. * config::get().number("layout.meter_bar_gap")
+                            + config::get().number("layout.meter_bar_width"),
+                        meter_height,
+                    ),
+                );
+                let meter_painter = ui.painter().with_clip_rect(meter_rect.expand(1.));
                 for (i, level) in levels.iter().enumerate() {
                     let h = (level * config::get().number("layout.meter_height") as f64)
                         .max(config::get().number("layout.meter_min_height") as f64)
                         as f32;
-                    ui.painter().rect_filled(
+                    meter_painter.rect_filled(
                         Rect::from_min_size(
                             pos2(
                                 r.right() - config::get().number("layout.meter_offset")
