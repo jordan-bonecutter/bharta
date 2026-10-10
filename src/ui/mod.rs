@@ -187,6 +187,20 @@ impl Ui {
         self.textures.retain(|k, _| k.starts_with("icon:"));
     }
     fn open(&mut self, kind: Menu, x: f32, clicked: bool) {
+        let executable = config::get().text("launcher.executable");
+        if kind == Menu::Apps && !executable.is_empty() {
+            if !clicked {
+                return;
+            }
+            match launcher::launch_executable(executable) {
+                Ok(()) => {
+                    self.finish_close();
+                    self.blocked_hover = Some(Menu::Apps);
+                    return;
+                }
+                Err(error) => eprintln!("Could not start launcher {executable:?}: {error}"),
+            }
+        }
         if let Some(panel) = &mut self.panel
             && panel.kind == kind
             && panel.closing.is_none()
@@ -557,6 +571,8 @@ impl Ui {
                 Icon::Charging => 8,
                 Icon::Cpu => 9,
                 Icon::Bluetooth => 14,
+                Icon::Apps => 15,
+                Icon::Logout => 16,
             }
         );
         let ctx = &self.ctx;
@@ -672,7 +688,14 @@ impl Ui {
                 ui.painter().image(
                     this.icon(icon),
                     Rect::from_center_size(
-                        pos2(rect.left() + slot / 2., center_y),
+                        pos2(
+                            if text.is_empty() {
+                                rect.center().x
+                            } else {
+                                rect.left() + slot / 2.
+                            },
+                            center_y,
+                        ),
                         vec2(
                             config::get().number("appearance.icon_size"),
                             config::get().number("appearance.icon_size"),
@@ -711,21 +734,9 @@ impl Ui {
                 vec2(session_width, config::get().number("layout.bar_height")),
             ),
             "",
-            None,
+            Some(Icon::Logout),
             Menu::Session,
         );
-        for y in [center_y - 3., center_y + 1.] {
-            for x in [
-                margin + session_width / 2. - 3.,
-                margin + session_width / 2. + 1.,
-            ] {
-                ui.painter().rect_filled(
-                    Rect::from_min_size(pos2(x, y), vec2(3., 3.)),
-                    0,
-                    ui.visuals().text_color(),
-                );
-            }
-        }
         button(
             &mut targets,
             self,
@@ -734,8 +745,8 @@ impl Ui {
                 pos2(margin + session_width + gap, 0.),
                 vec2(apps_width, config::get().number("layout.bar_height")),
             ),
-            "Apps",
-            None,
+            "",
+            Some(Icon::Apps),
             Menu::Apps,
         );
         let mut x = margin + session_width + gap + apps_width + gap;

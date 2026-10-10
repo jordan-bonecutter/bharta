@@ -3,6 +3,7 @@
 Build first: cargo build --release --examples && cargo build --release
 Run: python3 tests/headless_ui.py /tmp/bharta-headless
 Add --audio-only to check audio controls, event updates, and drawer height.
+Add --launcher-only to check the default and external app launchers.
 Requires sway, grim, dbus-daemon, and Python 3. Screenshots/logs go to the argument.
 """
 import json
@@ -121,6 +122,29 @@ while True:
                       str(x), str(y), *map(str,size), *map(str, args)], 'input.log')
     def shot(name):
         run(['grim', '-o', 'HEADLESS-1', str(DEST / (name + '.png'))])
+    def check_external_launcher(output, size):
+        # External launchers require a click and never take over the desktop session.
+        marker=runtime/'launcher-started'
+        external_launcher=runtime/'external launcher'
+        external_launcher.write_text('#!/bin/sh\nprintf started > "'+str(marker)+'"\n')
+        external_launcher.chmod(0o755)
+        settings={'launcher':{'executable':str(external_launcher)}}
+        (initial_settings/'config.json').write_text(json.dumps(settings))
+        external=start([str(BAR),'--dark','--output',output],'external-launcher.log');time.sleep(1.2)
+        probe(72,14,'--hover',700,output=output,size=size).wait()
+        assert not marker.exists(), 'Hover started the external launcher'
+        probe(72,14,'--click-hold',500,output=output,size=size).wait()
+        assert marker.read_text()=='started', 'Click did not run the configured executable path'
+        run(['grim','-o',output,str(DEST/'external-launcher.png')])
+        assert Image.open(DEST/'external-launcher.png').convert('RGB').crop((0,28,*size)).getbbox() is None, 'External launcher opened the built-in menu'
+        external.terminate();external.wait()
+        settings['launcher']['executable']=str(runtime/'missing-launcher')
+        (initial_settings/'config.json').write_text(json.dumps(settings))
+        fallback=start([str(BAR),'--dark','--output',output],'launcher-fallback.log');time.sleep(1.2)
+        probe(72,14,'--click-hold',700,output=output,size=size).wait()
+        run(['grim','-o',output,str(DEST/'launcher-fallback.png')])
+        assert Image.open(DEST/'launcher-fallback.png').convert('RGB').getpixel((20,60))!=(0,0,0), 'Missing external executable did not open the built-in launcher'
+        assert fallback.poll() is None, 'Launcher fallback bar exited'
     try:
         bus_config=runtime / 'bus.conf'
         bus_config.write_text('<busconfig><type>session</type><listen>unix:tmpdir=' + str(runtime) + '</listen><policy context="default"><allow send_destination="*"/><allow receive_sender="*"/><allow own="*"/></policy></busconfig>')
@@ -156,6 +180,14 @@ while True:
             time.sleep(.2)
         else:
             raise AssertionError('egui bar did not map; see bar.log')
+        if '--launcher-only' in sys.argv[2:]:
+            probe(72,14,'--hover',700).wait();shot('launcher')
+            assert Image.open(DEST/'launcher.png').convert('RGB').getpixel((20,60))!=(0,0,0), 'Default launcher did not open on hover'
+            probe(72,14,'--keys-only',1).wait()
+            bar.terminate();bar.wait()
+            check_external_launcher('HEADLESS-1', (1600,900))
+            print('Headless launcher screenshots and logs:', DEST)
+            sys.exit(0)
         # The installed font changes the clock width. Locate the battery's
         # fixed-width outline, then use the adjacent Wi-Fi slot.
         bar_pixels=Image.open(DEST/'bar.png').convert('RGB')
@@ -642,6 +674,8 @@ while True:
         assert drawer_bounds and 220<=drawer_bounds[3]<=224, f'Configured Sound height not applied: {drawer_bounds}'
         custom_sound.wait()
         assert configured.poll() is None, 'Configured bar exited'
+        configured.terminate();configured.wait()
+        check_external_launcher('HEADLESS-2', (3840,2160))
         print('Headless screenshots and logs:', DEST)
     finally:
         for p in reversed(processes):

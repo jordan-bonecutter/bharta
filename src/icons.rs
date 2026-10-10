@@ -2,6 +2,8 @@ use tiny_skia::{Color, Paint, PathBuilder, Pixmap, Rect, Stroke, Transform};
 #[derive(Clone, Copy)]
 #[allow(dead_code)] // Also used by the headless sample renderer.
 pub enum Icon {
+    Apps,
+    Logout,
     Charging,
     Cpu,
     Bluetooth,
@@ -41,6 +43,37 @@ pub fn draw(pix: &mut Pixmap, icon: Icon, x: f32, y: f32, size: f32, scale: f32,
         fill(pix, p);
     };
     match icon {
+        Icon::Apps => {
+            for y in [6., 13.] {
+                for x in [6., 13.] {
+                    rect(pix, x, y, 5., 5.);
+                }
+            }
+        }
+        Icon::Logout => {
+            let mut p = PathBuilder::new();
+            p.move_to(10., 3.);
+            p.line_to(4., 3.);
+            p.line_to(4., 21.);
+            p.line_to(10., 21.);
+            p.move_to(10., 12.);
+            p.line_to(22., 12.);
+            p.move_to(17., 7.);
+            p.line_to(22., 12.);
+            p.line_to(17., 17.);
+            pix.stroke_path(
+                &p.finish().unwrap(),
+                &paint,
+                &Stroke {
+                    width: 1.8,
+                    line_cap: tiny_skia::LineCap::Round,
+                    line_join: tiny_skia::LineJoin::Round,
+                    ..Default::default()
+                },
+                transform,
+                None,
+            );
+        }
         Icon::Bluetooth => {
             let mut p = PathBuilder::new();
             p.move_to(6., 6.);

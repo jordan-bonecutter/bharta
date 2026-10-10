@@ -145,10 +145,7 @@ impl Renderer {
             1.0,
             Color::from_rgba8(100, 100, 110, 40),
         );
-        // Small original four-pane mark; no icon-font dependency.
-        for (x, y) in [(15.0, 8.0), (22.0, 8.0), (15.0, 15.0), (22.0, 15.0)] {
-            rect(&mut pix, x, y, 5.0, 5.0, fg);
-        }
+        crate::icons::draw(&mut pix, crate::icons::Icon::Logout, 13., 6., 16., s, fg);
         let compact_clock = clock
             .split_whitespace()
             .rev()
@@ -291,7 +288,7 @@ impl Renderer {
             action: Action::Session,
         }];
         if x + 40.0 < net_x - 12.0 {
-            self.text(&mut pix, "Apps", x, s, muted);
+            crate::icons::draw(&mut pix, crate::icons::Icon::Apps, x + 10., 6., 16., s, fg);
             hits.push(Hit {
                 start: x - 4.0,
                 end: x + 36.0,

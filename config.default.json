@@ -105,6 +105,9 @@
     "wifi_poll_ms": 150,
     "clipboard_ms": 2000
   },
+  "launcher": {
+    "executable": ""
+  },
   "processes": {
     "rows": 12
   },
