@@ -338,8 +338,9 @@ while True:
         time.sleep(.4);shot('process-search-empty')
         assert Image.open(DEST/'process-search-empty.png').convert('RGB').getpixel((int(monitor_left)+20,210))==(0,0,0), 'Unmatched process search retained rows'
         assert ImageChops.difference(name_result,Image.open(DEST/'process-search-empty.png').convert('RGB').crop(name_bounds)).getbbox(), 'Unmatched search still shows the matching process'
-        typed=probe(cpu_x,14,'--keys-only',14,14,14,14);typed.wait()
-        leave_cpu=probe(600,600,'--hover',900);leave_cpu.wait()
+        leave_cpu=probe(600,600,'--click-hold',900);leave_cpu.wait()
+        shot('process-search-dismissed')
+        assert Image.open(DEST/'process-search-dismissed.png').convert('RGB').getpixel((int(monitor_left)+5,80))==(0,0,0), 'Outside click did not dismiss process search with text'
         cpu_clicked=probe(cpu_x,14,'--click-hold',1000);time.sleep(.6);shot('process-monitor-clicked');cpu_clicked.wait()
         assert Image.open(DEST/'process-monitor-clicked.png').convert('RGB').getpixel((int(monitor_left)+5,80))!=(0,0,0), 'Clicking CPU did not open its monitor'
         leave_cpu=probe(600,600,'--hover',900);leave_cpu.wait()

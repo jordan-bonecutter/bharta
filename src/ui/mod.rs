@@ -1322,7 +1322,7 @@ impl Ui {
         let inside = pointer.is_some_and(|p| {
             p.y < config::get().number("layout.bar_height") || self.panel_rect.contains(p)
         });
-        let pinned = !self.query.is_empty()
+        let pinned = (!self.query.is_empty() && kind != Menu::Cpu)
             || self.selected_network.is_some()
             || self.confirm_logout
             || self.busy
