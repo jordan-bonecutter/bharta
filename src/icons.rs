@@ -2,6 +2,9 @@ use tiny_skia::{Color, Paint, PathBuilder, Pixmap, Rect, Stroke, Transform};
 #[derive(Clone, Copy)]
 #[allow(dead_code)] // Also used by the headless sample renderer.
 pub enum Icon {
+    Link,
+    Unlink,
+    Back,
     Apps,
     Logout,
     Charging,
@@ -15,12 +18,47 @@ pub enum Icon {
     Next,
     Wifi(Option<u8>),
 }
+// Average a supersampled premultiplied raster at the actual display pixel size.
+// Bilinear minification alone misses thin strokes when icons shrink to 14–16px.
+pub fn rasterize(icon: Icon, pixels: u32, color: Color) -> Pixmap {
+    const SAMPLES: u32 = 4;
+    let mut large = Pixmap::new(pixels * SAMPLES, pixels * SAMPLES).unwrap();
+    draw(
+        &mut large,
+        icon,
+        0.,
+        0.,
+        pixels as f32,
+        SAMPLES as f32,
+        color,
+    );
+    let mut result = Pixmap::new(pixels, pixels).unwrap();
+    for y in 0..pixels {
+        for x in 0..pixels {
+            let mut sum = [0u32; 4];
+            for sy in y * SAMPLES..(y + 1) * SAMPLES {
+                for sx in x * SAMPLES..(x + 1) * SAMPLES {
+                    let offset = ((sy * large.width() + sx) * 4) as usize;
+                    for (sum, pixel) in sum.iter_mut().zip(&large.data()[offset..offset + 4]) {
+                        *sum += u32::from(*pixel);
+                    }
+                }
+            }
+            let offset = ((y * pixels + x) * 4) as usize;
+            for (pixel, sum) in result.data_mut()[offset..offset + 4].iter_mut().zip(sum) {
+                *pixel = ((sum + SAMPLES * SAMPLES / 2) / (SAMPLES * SAMPLES)) as u8;
+            }
+        }
+    }
+    result
+}
 // All symbols are vector geometry in a 24×24 grid, independent of installed fonts.
 pub fn draw(pix: &mut Pixmap, icon: Icon, x: f32, y: f32, size: f32, scale: f32, color: Color) {
     let transform = Transform::from_scale(size / 24.0 * scale, size / 24.0 * scale)
         .post_translate(x * scale, y * scale);
     let mut paint = Paint::default();
     paint.set_color(color);
+    paint.anti_alias = true;
     let fill = |pix: &mut Pixmap, p: PathBuilder| {
         if let Some(path) = p.finish() {
             pix.fill_path(&path, &paint, tiny_skia::FillRule::Winding, transform, None);
@@ -43,6 +81,62 @@ pub fn draw(pix: &mut Pixmap, icon: Icon, x: f32, y: f32, size: f32, scale: f32,
         fill(pix, p);
     };
     match icon {
+        // Lucide link, unlink and arrow-left; see third_party/lucide.
+        Icon::Link | Icon::Unlink | Icon::Back => {
+            let mut p = PathBuilder::new();
+            if matches!(icon, Icon::Back) {
+                p.move_to(12., 19.);
+                p.line_to(5., 12.);
+                p.line_to(12., 5.);
+                p.move_to(19., 12.);
+                p.line_to(5., 12.);
+            } else if matches!(icon, Icon::Link) {
+                p.move_to(10., 13.);
+                p.cubic_to(11.84, 15.45, 15.41, 15.71, 17.54, 13.54);
+                p.line_to(20.54, 10.54);
+                p.cubic_to(22.49, 8.59, 22.49, 5.42, 20.54, 3.47);
+                p.cubic_to(18.59, 1.52, 15.42, 1.52, 13.47, 3.47);
+                p.line_to(11.75, 5.18);
+                p.move_to(14., 11.);
+                p.cubic_to(12.16, 8.55, 8.59, 8.29, 6.46, 10.46);
+                p.line_to(3.46, 13.46);
+                p.cubic_to(1.51, 15.41, 1.51, 18.58, 3.46, 20.53);
+                p.cubic_to(5.41, 22.48, 8.58, 22.48, 10.53, 20.53);
+                p.line_to(12.24, 18.82);
+            } else {
+                p.move_to(18.84, 12.25);
+                p.line_to(20.54, 10.54);
+                p.cubic_to(22.49, 8.57, 22.44, 5.44, 20.42, 3.47);
+                p.cubic_to(18.5, 1.55, 15.42, 1.55, 13.47, 3.47);
+                p.line_to(11.75, 5.18);
+                p.move_to(5.17, 11.75);
+                p.line_to(3.46, 13.46);
+                p.cubic_to(1.51, 15.43, 1.56, 18.56, 3.58, 20.53);
+                p.cubic_to(5.5, 22.45, 8.58, 22.45, 10.53, 20.53);
+                p.line_to(12.24, 18.82);
+                for (x, y, end_x, end_y) in [
+                    (8., 2., 8., 5.),
+                    (2., 8., 5., 8.),
+                    (16., 19., 16., 22.),
+                    (19., 16., 22., 16.),
+                ] {
+                    p.move_to(x, y);
+                    p.line_to(end_x, end_y);
+                }
+            }
+            pix.stroke_path(
+                &p.finish().unwrap(),
+                &paint,
+                &Stroke {
+                    width: 2.,
+                    line_cap: tiny_skia::LineCap::Round,
+                    line_join: tiny_skia::LineJoin::Round,
+                    ..Default::default()
+                },
+                transform,
+                None,
+            );
+        }
         Icon::Apps => {
             for y in [6., 13.] {
                 for x in [6., 13.] {

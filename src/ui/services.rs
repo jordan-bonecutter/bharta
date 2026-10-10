@@ -8,7 +8,7 @@ pub enum Job {
     Disconnect(String),
 }
 pub enum Event {
-    Network(u64, Result<network::Snapshot, String>),
+    Network(u64, bool, Result<network::Snapshot, String>),
     Apps(u64, Vec<launcher::Entry>),
     Launched(u64, Result<(), String>),
 }
@@ -90,6 +90,7 @@ impl Services {
     pub fn network(&self, id: u64, job: Job) {
         let tx = self.events_tx.clone();
         std::thread::spawn(move || {
+            let completed_action = !matches!(job, Job::Scan(_));
             let result = match job {
                 Job::Scan(rescan) => network::scan(rescan),
                 Job::Radio(on) => network::radio(on),
@@ -97,7 +98,7 @@ impl Services {
                 Job::Disconnect(device) => network::disconnect(&device),
             }
             .map_err(|e| e.to_string());
-            let _ = tx.send(Event::Network(id, result));
+            let _ = tx.send(Event::Network(id, completed_action, result));
         });
     }
     pub fn apps(&self, id: u64) {

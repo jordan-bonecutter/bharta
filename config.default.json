@@ -107,7 +107,8 @@
     "clipboard_ms": 2000
   },
   "launcher": {
-    "executable": ""
+    "executable": "",
+    "args": []
   },
   "processes": {
     "rows": 12

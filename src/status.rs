@@ -136,6 +136,28 @@ fn focused_app(v: &Value) -> Option<String> {
         .find_map(focused_app)
 }
 
+// Peripheral batteries (mice, headsets, etc.) share this directory with the
+// laptop battery. Never let directory order choose the bar's power indicator.
+fn system_battery(root: &std::path::Path) -> Option<(u8, bool)> {
+    let mut supplies: Vec<_> = fs::read_dir(root)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .collect();
+    supplies.sort();
+    supplies.into_iter().find_map(|path| {
+        let read = |name: &str| fs::read_to_string(path.join(name)).unwrap_or_default();
+        if read("type").trim() != "Battery"
+            || read("scope").trim() == "Device"
+            || read("present").trim() == "0"
+        {
+            return None;
+        }
+        let capacity = read("capacity").trim().parse::<u8>().ok()?;
+        Some((capacity.min(100), read("status").trim() == "Charging"))
+    })
+}
+
 impl Status {
     pub fn read(output: Option<&str>) -> Self {
         let mut s = Self {
@@ -166,22 +188,7 @@ impl Status {
             crate::media::window_details(&v, None, &mut s.window_details);
             s.app = focused_app(&v).unwrap_or_else(|| "Desktop".into());
         }
-        if let Ok(entries) = fs::read_dir("/sys/class/power_supply") {
-            for entry in entries.flatten() {
-                let p = entry.path();
-                if fs::read_to_string(p.join("type")).is_ok_and(|t| t.trim() == "Battery")
-                    && let Ok(n) = fs::read_to_string(p.join("capacity"))
-                        .unwrap_or_default()
-                        .trim()
-                        .parse::<u8>()
-                {
-                    let charging =
-                        fs::read_to_string(p.join("status")).is_ok_and(|t| t.trim() == "Charging");
-                    s.battery = Some((n.min(100), charging));
-                    break;
-                }
-            }
-        }
+        s.battery = system_battery(std::path::Path::new("/sys/class/power_supply"));
         s.network = fs::read_dir("/sys/class/net")
             .into_iter()
             .flatten()
@@ -242,6 +249,40 @@ impl Status {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn main_battery_ignores_peripherals_and_tracks_charging() {
+        let root = tempfile::tempdir().unwrap();
+        let write = |device: &str, values: &[(&str, &str)]| {
+            let path = root.path().join(device);
+            fs::create_dir_all(&path).unwrap();
+            for (name, value) in values {
+                fs::write(path.join(name), value).unwrap();
+            }
+        };
+        write(
+            "AAA_mouse",
+            &[
+                ("type", "Battery"),
+                ("scope", "Device"),
+                ("capacity", "50"),
+                ("status", "Discharging"),
+            ],
+        );
+        write(
+            "BAT1",
+            &[
+                ("type", "Battery"),
+                ("capacity", "88"),
+                ("status", "Charging"),
+            ],
+        );
+        assert_eq!(system_battery(root.path()), Some((88, true)));
+        write("BAT1", &[("status", "Discharging")]);
+        assert_eq!(system_battery(root.path()), Some((88, false)));
+        write("BAT1", &[("present", "0")]);
+        assert_eq!(system_battery(root.path()), None);
+    }
+
     #[test]
     fn workspace_events_wake_sampler_without_poll_delay() {
         let (mut client, mut server) = UnixStream::pair().unwrap();

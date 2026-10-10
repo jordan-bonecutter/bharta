@@ -29,6 +29,14 @@ impl Config {
     pub fn text(&self, key: &str) -> &str {
         self.value(key).as_str().expect("validated string setting")
     }
+    pub fn strings(&self, key: &str) -> Vec<&str> {
+        self.value(key)
+            .as_array()
+            .expect("validated array setting")
+            .iter()
+            .map(|value| value.as_str().expect("validated string argument"))
+            .collect()
+    }
     pub fn dark(&self) -> bool {
         self.value("appearance.dark").as_bool().unwrap()
     }
@@ -98,6 +106,15 @@ fn merge(default: &mut Value, override_value: &Value, key: &str) -> Result<()> {
             }
             *target = Value::String(value.clone());
         }
+        (target @ Value::Array(_), Value::Array(values)) => {
+            ensure!(
+                values
+                    .iter()
+                    .all(|value| value.as_str().is_some_and(|s| !s.contains('\0'))),
+                "{key} must contain strings without NUL characters"
+            );
+            *target = Value::Array(values.clone());
+        }
         (target @ Value::Bool(_), Value::Bool(value)) => *target = Value::Bool(*value),
         _ => bail!("Wrong value type for {key}"),
     }
@@ -131,6 +148,18 @@ pub fn get() -> &'static Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn launcher_arguments_are_strings_and_preserve_spaces() {
+        let c =
+            Config::parse(r#"{"launcher":{"args":["--prompt","Find apps", "$(literal)", ""]}}"#)
+                .unwrap();
+        assert_eq!(
+            c.strings("launcher.args"),
+            ["--prompt", "Find apps", "$(literal)", ""]
+        );
+        assert!(Config::parse(r#"{"launcher":{"args":[1]}}"#).is_err());
+        assert!(Config::parse(r#"{"launcher":{"args":["\u0000"]}}"#).is_err());
+    }
     #[test]
     fn complete_example_passes_validation() {
         assert!(Config::parse(DEFAULT).is_ok());

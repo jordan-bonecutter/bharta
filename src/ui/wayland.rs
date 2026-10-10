@@ -290,7 +290,24 @@ impl App {
                 KeyboardInteractivity::None
             });
         }
-        let height = if self.ui.panel.is_some() {
+        let capture_outside = self.ui.credential_entry();
+        // Tooltips can extend below the popup. Size the transparent surface to
+        // include all painted content, without enlarging its input region.
+        let painted_bottom = out
+            .shapes
+            .iter()
+            .map(|shape| {
+                shape
+                    .shape
+                    .visual_bounding_rect()
+                    .intersect(shape.clip_rect)
+                    .bottom()
+            })
+            .filter(|bottom| bottom.is_finite())
+            .fold(0_f32, f32::max);
+        let height = if capture_outside {
+            self.output_height
+        } else if self.ui.panel.is_some() {
             self.ui
                 .panel_rect
                 .max
@@ -300,28 +317,34 @@ impl App {
         } else {
             crate::config::get().number("layout.bar_height") as u32
         }
+        .max(painted_bottom.ceil() as u32)
         .min(self.output_height);
         if self.requested_height != height {
             self.requested_height = height;
             layer.set_size(0, height);
             layer.commit();
         }
-        // Transparent popup margins must pass pointer input to the desktop.
+        // Credential entry behaves like a modal popup: receive one outside
+        // click to dismiss it. Other popups keep transparent margins pass-through.
         let region = Region::new(&self.compositor)?;
-        region.add(
-            0,
-            0,
-            self.width as i32,
-            crate::config::get().number("layout.bar_height") as i32,
-        );
-        if self.ui.panel.is_some() && self.ui.panel_rect.is_positive() {
-            let r = self.ui.panel_rect;
+        if capture_outside {
+            region.add(0, 0, self.width as i32, self.output_height as i32);
+        } else {
             region.add(
-                r.min.x.floor() as i32,
-                r.min.y.floor() as i32,
-                r.width().ceil() as i32,
-                r.height().ceil() as i32,
+                0,
+                0,
+                self.width as i32,
+                crate::config::get().number("layout.bar_height") as i32,
             );
+            if self.ui.panel.is_some() && self.ui.panel_rect.is_positive() {
+                let r = self.ui.panel_rect;
+                region.add(
+                    r.min.x.floor() as i32,
+                    r.min.y.floor() as i32,
+                    r.width().ceil() as i32,
+                    r.height().ceil() as i32,
+                );
+            }
         }
         layer
             .wl_surface()
@@ -644,7 +667,8 @@ impl PointerHandler for App {
                 | PointerEventKind::Release { button, serial, .. } => {
                     self.serial = serial;
                     if matches!(event.kind, PointerEventKind::Press { .. })
-                        && p.y >= crate::config::get().number("layout.bar_height")
+                        && (p.y >= crate::config::get().number("layout.bar_height")
+                            || self.ui.credential_entry())
                         && self.ui.panel.is_some()
                         && !self.ui.panel_rect.contains(p)
                     {
@@ -655,6 +679,8 @@ impl PointerHandler for App {
                         0x110 => PointerButton::Primary,
                         0x111 => PointerButton::Secondary,
                         0x112 => PointerButton::Middle,
+                        0x113 | 0x116 => PointerButton::Extra1,
+                        0x114 | 0x115 => PointerButton::Extra2,
                         _ => continue,
                     };
                     self.input.events.push(Event::PointerButton {

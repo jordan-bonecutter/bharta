@@ -11,6 +11,7 @@ use zbus::blocking::{Connection, connection::Builder};
 
 struct Adapter {
     scanning: Arc<AtomicBool>,
+    powered: AtomicBool,
     log: String,
 }
 #[zbus::interface(name = "org.bluez.Adapter1")]
@@ -29,7 +30,11 @@ impl Adapter {
     }
     #[zbus(property)]
     fn powered(&self) -> bool {
-        true
+        self.powered.load(Ordering::SeqCst)
+    }
+    #[zbus(property)]
+    fn set_powered(&self, value: bool) {
+        self.powered.store(value, Ordering::SeqCst);
     }
 }
 impl Adapter {
@@ -81,10 +86,30 @@ impl Device {
         .await?;
         let device =
             zbus::zvariant::OwnedObjectPath::try_from(header.path().unwrap().as_str()).unwrap();
-        self.record("confirmation");
-        proxy
-            .call::<_, _, ()>("RequestConfirmation", &(device, 123456u32))
-            .await?;
+        let mode = std::env::var("BHARTA_TEST_BLUETOOTH_LOG").unwrap() + ".mode";
+        match std::fs::read_to_string(mode).unwrap_or_default().trim() {
+            "pin" => {
+                self.record("pin");
+                let pin: String = proxy.call("RequestPinCode", &(device,)).await?;
+                if pin != "1234" {
+                    return Err(zbus::fdo::Error::Failed("Wrong PIN".into()));
+                }
+            }
+            "passkey" => {
+                self.record("passkey");
+                let pin: u32 = proxy.call("RequestPasskey", &(device,)).await?;
+                if pin != 123456 {
+                    return Err(zbus::fdo::Error::Failed("Wrong passkey".into()));
+                }
+            }
+            "none" => self.record("automatic"),
+            _ => {
+                self.record("confirmation");
+                proxy
+                    .call::<_, _, ()>("RequestConfirmation", &(device, 123456u32))
+                    .await?;
+            }
+        }
         self.paired.store(true, Ordering::SeqCst);
         self.record("paired");
         Ok(())
@@ -127,6 +152,12 @@ impl Device {
     }
     #[zbus(property)]
     fn paired(&self) -> bool {
+        if self.name == "Desk keyboard" && !self.connected.load(Ordering::SeqCst) {
+            let mode = std::env::var("BHARTA_TEST_BLUETOOTH_LOG").unwrap() + ".mode";
+            if std::fs::read_to_string(mode).is_ok_and(|s| !s.is_empty()) {
+                return false;
+            }
+        }
         self.paired.load(Ordering::SeqCst)
     }
     #[zbus(property, name = "RSSI")]
@@ -181,6 +212,7 @@ fn main() -> anyhow::Result<()> {
             "/org/bluez/hci0",
             Adapter {
                 scanning: scanning.clone(),
+                powered: AtomicBool::new(true),
                 log: std::env::var("BHARTA_TEST_BLUETOOTH_LOG")?,
             },
         )?

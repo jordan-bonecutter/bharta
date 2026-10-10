@@ -65,8 +65,10 @@ Restart bharta after editing.
 
 To use an external app launcher, set `"launcher": { "executable": "fuzzel" }`.
 Use a program name from `PATH` or an executable path. It runs on clicking the
-four-square Apps icon; hovering does not start external programs. For arguments,
-point this setting at an executable wrapper script. An empty setting (the default)
+four-square Apps icon; hovering does not start external programs. Supply arguments
+as separate strings: `"launcher": { "executable": "fuzzel", "args": ["--width", "40"] }`.
+Arguments are passed directly, preserving spaces without shell expansion.
+An empty executable setting (the default)
 or a failure to start the program falls back to the built-in Apps menu.
 
 The Sound drawer grows with its contents up to `layout.sound_max_height`

@@ -114,8 +114,8 @@ pub fn launch(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 /// Start an external launcher without waiting for its window to close.
-pub fn launch_executable(executable: &str) -> std::io::Result<()> {
-    let mut child = std::process::Command::new(executable).spawn()?;
+pub fn launch_executable(executable: &str, args: &[&str]) -> std::io::Result<()> {
+    let mut child = std::process::Command::new(executable).args(args).spawn()?;
     std::thread::spawn(move || {
         let _ = child.wait();
     });

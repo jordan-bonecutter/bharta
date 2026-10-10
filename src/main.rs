@@ -49,6 +49,13 @@ fn options() -> Result<Options> {
             "--dark" => options.dark = true,
             "--light" => options.dark = false,
             "--config" => options.config = Some(args.next().context("--config needs a path")?),
+            "--licenses" => {
+                print!(
+                    "Lucide icons\n{}",
+                    include_str!("../third_party/lucide/LICENSE")
+                );
+                std::process::exit(0);
+            }
             "--print-config" => {
                 print!("{}", config::DEFAULT);
                 std::process::exit(0);
@@ -66,7 +73,7 @@ fn options() -> Result<Options> {
             "--check-media" => options.check_media = true,
             "--help" | "-h" => {
                 println!(
-                    "bharta — native Sway menu bar\n\nUsage: bharta [--dark] [--all-outputs | --output NAME] [--font PATH]\n       bharta [--dark] --preview FILE.png\n       bharta --smoke-test\n\nClick workspaces to switch. Default: all active outputs. Default settings: ~/.config/bharta/config.json (or XDG_CONFIG_HOME).\n--config PATH selects a configuration file; --print-config prints all defaults.\n--dark / --light and --font override configuration.\n--preview renders sample data without connecting to Wayland.\n--smoke-test connects, renders a frame, then exits.\n--check-bluetooth checks BlueZ and lists devices without changing Bluetooth settings."
+                    "bharta — native Sway menu bar\n\nUsage: bharta [--dark] [--all-outputs | --output NAME] [--font PATH]\n       bharta [--dark] --preview FILE.png\n       bharta --smoke-test\n\nClick workspaces to switch. Default: all active outputs. Default settings: ~/.config/bharta/config.json (or XDG_CONFIG_HOME).\n--config PATH selects a configuration file; --print-config prints all defaults.\n--dark / --light and --font override configuration.\n--preview renders sample data without connecting to Wayland.\n--smoke-test connects, renders a frame, then exits.\n--check-bluetooth checks BlueZ and lists devices without changing Bluetooth settings.\n--licenses prints bundled icon license notices."
                 );
                 std::process::exit(0);
             }

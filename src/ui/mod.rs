@@ -226,6 +226,9 @@ impl Ui {
         self.close();
         self.panel = None;
         self.panel_rect = Rect::NOTHING;
+        self.selected_network = None;
+        self.password.clear();
+        self.bluetooth_pin.clear();
         self.preview = None;
         self.preview_previous = None;
         self.preview_pending = None;
@@ -237,7 +240,7 @@ impl Ui {
             if !clicked {
                 return;
             }
-            match launcher::launch_executable(executable) {
+            match launcher::launch_executable(executable, &config::get().strings("launcher.args")) {
                 Ok(()) => {
                     self.finish_close();
                     self.blocked_hover = Some(Menu::Apps);
@@ -306,13 +309,14 @@ impl Ui {
                 let _ = self.services.volume.send(volume::Request::Refresh);
                 let _ = self.services.media.send(media::Request::Refresh);
             }
-            Menu::Wifi => self.services.network(self.serial, Job::Scan(false)),
+            Menu::Wifi => self.services.network(self.serial, Job::Scan(true)),
             Menu::Bluetooth => {
                 self.bluetooth = None;
                 let _ = self
                     .services
                     .bluetooth
                     .send(bluetooth::Request::Open(self.serial));
+                let _ = self.services.bluetooth.send(bluetooth::Request::Scan);
             }
             Menu::Workspace(name) => {
                 let _ = self.services.preview.send(Some((
@@ -466,6 +470,7 @@ impl Ui {
                             )
                         {
                             self.bluetooth_pin.clear();
+                            self.reveal = false;
                             self.ctx
                                 .memory_mut(|m| m.request_focus(egui::Id::new("bluetooth-pin")));
                         }
@@ -481,7 +486,7 @@ impl Ui {
             self.ctx.request_repaint();
             match event {
                 Event::Apps(id, apps) if id == self.serial => self.apps = apps,
-                Event::Network(id, result) if id == self.serial => match result {
+                Event::Network(id, completed_action, result) if id == self.serial => match result {
                     Ok(s) => {
                         self.state.extras.wifi_enabled = Some(s.enabled);
                         self.state.extras.wifi_name =
@@ -489,8 +494,10 @@ impl Ui {
                         self.state.extras.wifi_signal =
                             s.networks.iter().find(|n| n.active).and_then(|n| n.signal);
                         self.network = Some(s);
-                        self.selected_network = None;
-                        self.password.clear();
+                        if completed_action {
+                            self.selected_network = None;
+                            self.password.clear();
+                        }
                         self.error.clear();
                     }
                     Err(e) => self.error = e,
@@ -636,8 +643,12 @@ impl Ui {
         }
     }
     fn icon(&mut self, icon: Icon) -> egui::TextureId {
+        self.icon_at_size(icon, config::get().number("appearance.icon_size"))
+    }
+    fn icon_at_size(&mut self, icon: Icon, size: f32) -> egui::TextureId {
+        let pixels = (size * self.ctx.pixels_per_point()).round().max(1.) as u32;
         let key = format!(
-            "icon:{}",
+            "icon:{}:{pixels}",
             match icon {
                 Icon::Volume(false) => 0,
                 Icon::Volume(true) => 1,
@@ -655,31 +666,32 @@ impl Ui {
                 Icon::Bluetooth => 14,
                 Icon::Apps => 15,
                 Icon::Logout => 16,
+                Icon::Link => 17,
+                Icon::Unlink => 18,
+                Icon::Back => 19,
             }
         );
         let ctx = &self.ctx;
         self.textures
             .entry(key.clone())
             .or_insert_with(|| {
-                let mut p = tiny_skia::Pixmap::new(48, 48).unwrap();
                 let color_key = if self.dark {
                     "appearance.icon_color_dark"
                 } else {
                     "appearance.icon_color_light"
                 };
                 let c = u32::from_str_radix(&config::get().text(color_key)[1..], 16).unwrap();
-                crate::icons::draw(
-                    &mut p,
+                let p = crate::icons::rasterize(
                     icon,
-                    0.,
-                    0.,
-                    24.,
-                    2.,
+                    pixels,
                     tiny_skia::Color::from_rgba8((c >> 16) as u8, (c >> 8) as u8, c as u8, 255),
                 );
                 ctx.load_texture(
                     &key,
-                    egui::ColorImage::from_rgba_premultiplied([48, 48], p.data()),
+                    egui::ColorImage::from_rgba_premultiplied(
+                        [pixels as usize, pixels as usize],
+                        p.data(),
+                    ),
                     egui::TextureOptions::LINEAR,
                 )
             })
@@ -716,11 +728,17 @@ impl Ui {
             }
         }
         let id = self.icon(Icon::Music);
-        self.textures.insert(key, self.textures["icon:2"].clone());
+        let texture = self
+            .textures
+            .values()
+            .find(|t| t.id() == id)
+            .unwrap()
+            .clone();
+        self.textures.insert(key, texture);
         id
     }
     fn icon_button(&mut self, ui: &mut egui::Ui, icon: Icon, enabled: bool) -> bool {
-        let image = egui::Image::new((self.icon(icon), vec2(14., 14.)));
+        let image = egui::Image::new((self.icon_at_size(icon, 14.), vec2(14., 14.)));
         ui.add_enabled(
             enabled,
             egui::Button::image(image).frame(false).min_size(vec2(
@@ -929,36 +947,13 @@ impl Ui {
                     config::get().number("layout.battery_icon_height"),
                 ),
             );
-            let color = ui.visuals().text_color();
-            ui.painter().rect_stroke(
-                rect,
-                2,
-                egui::Stroke::new(1.0_f32, color),
-                egui::StrokeKind::Inside,
-            );
-            ui.painter().rect_filled(
-                Rect::from_min_size(pos2(rect.right() + 1., center_y - 2.), vec2(2., 4.)),
-                1,
-                color,
-            );
+            paint_battery(ui, rect, if charging { 0 } else { percent });
             if charging {
                 ui.painter().image(
                     self.icon(Icon::Charging),
                     rect.shrink(1.),
                     Rect::from_min_max(Pos2::ZERO, pos2(1., 1.)),
                     Color32::WHITE,
-                );
-            } else {
-                ui.painter().rect_filled(
-                    Rect::from_min_size(
-                        rect.min + vec2(2., 2.),
-                        vec2(
-                            (rect.width() - 4.) * percent as f32 / 100.,
-                            rect.height() - 4.,
-                        ),
-                    ),
-                    1,
-                    color,
                 );
             }
         }
@@ -1213,9 +1208,23 @@ impl Ui {
             ctx.request_repaint_after(config::get().duration("animation.frame_ms"));
         }
         let min_height = match &kind {
+            Menu::Wifi => {
+                if self.selected_network.is_some() {
+                    4. * config::get().number("layout.control_height")
+                } else {
+                    config::get().number("layout.control_height")
+                        + self.network.as_ref().map_or(1, |s| s.networks.len().max(1)) as f32
+                            * (config::get().number("layout.control_height")
+                                + 12.
+                                + config::get().number("layout.item_gap_y"))
+                }
+            }
             Menu::Bluetooth => {
-                let row = config::get().number("layout.control_height");
+                let row = config::get().number("layout.control_height") + 12.;
                 self.bluetooth.as_ref().map_or(3. * row, |s| {
+                    if s.prompt.is_some() {
+                        return 4. * row;
+                    }
                     let groups = [
                         s.devices.iter().any(|d| d.connected || d.paired),
                         s.devices.iter().any(|d| !d.connected && !d.paired),
@@ -1284,17 +1293,12 @@ impl Ui {
                     .inner_margin(config::get().number("layout.popup_padding") as i8)
                     .show(ui, |ui| {
                         ui.set_width(w - 2. * config::get().number("layout.popup_padding"));
-                        if kind == Menu::Sound {
+                        if matches!(kind, Menu::Sound | Menu::Wifi | Menu::Bluetooth) {
                             // Areas remember their previous size. Allow the drawer to grow
                             // when streams/devices arrive, rather than scrolling at that size.
                             ui.set_max_height(max_height);
                         }
-                        let content_max_height = if kind == Menu::Bluetooth {
-                            (max_height - 2. * config::get().number("layout.control_height") - 16.)
-                                .max(1.)
-                        } else {
-                            max_height
-                        };
+                        let content_max_height = max_height;
                         egui::ScrollArea::vertical()
                             .min_scrolled_height(min_height.min(content_max_height))
                             .max_height(content_max_height)
@@ -1312,9 +1316,6 @@ impl Ui {
                                     ui.add(egui::Label::new(&self.error).wrap());
                                 }
                             });
-                        if kind == Menu::Bluetooth {
-                            self.bluetooth_scan(ui);
-                        }
                     });
             });
         self.panel_rect = shown.response.rect;
@@ -1323,6 +1324,8 @@ impl Ui {
         });
         let pinned = (!self.query.is_empty() && kind != Menu::Cpu)
             || self.selected_network.is_some()
+            || (kind == Menu::Bluetooth
+                && self.bluetooth.as_ref().is_some_and(|s| s.busy.is_some()))
             || self.confirm_logout
             || self.busy
             || ctx.egui_is_using_pointer();
@@ -1348,16 +1351,158 @@ impl Ui {
             }
         }
     }
+    fn credential_entry(&self) -> bool {
+        self.panel.as_ref().is_some_and(|p| {
+            p.closing.is_none()
+                && match p.kind {
+                    Menu::Wifi => self.selected_network.is_some(),
+                    Menu::Bluetooth => self.bluetooth.as_ref().is_some_and(|s| s.prompt.is_some()),
+                    _ => false,
+                }
+        })
+    }
     fn keyboard(&self) -> bool {
         self.panel.as_ref().is_some_and(|p| {
             p.closing.is_none()
                 && (matches!(p.kind, Menu::Apps | Menu::Cpu)
                     || self.selected_network.is_some()
+                    || (p.kind == Menu::Bluetooth
+                        && self.bluetooth.as_ref().is_some_and(|s| s.busy.is_some()))
                     || p.clicked)
         })
     }
 }
 
+fn connection_separator(ui: &mut egui::Ui, dark: bool) {
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 6.), egui::Sense::hover());
+    ui.painter().hline(
+        rect.x_range(),
+        rect.center().y,
+        egui::Stroke::new(1_f32, config::get().color("separator", dark)),
+    );
+}
+fn connection_row(ui: &mut egui::Ui, key: impl std::hash::Hash) -> (Rect, egui::Response) {
+    let (_, rect) = ui.allocate_space(vec2(
+        ui.available_width(),
+        config::get().number("layout.control_height") + 12.,
+    ));
+    let name_rect = Rect::from_min_max(pos2(rect.left() + 34., rect.top()), rect.max);
+    let response = ui.interact(
+        name_rect,
+        ui.id().with(("connection-row", key)),
+        egui::Sense::hover(),
+    );
+    (rect, response)
+}
+fn paint_row_name(ui: &egui::Ui, rect: Rect, name: &str, reserved: f32) {
+    let color = ui.visuals().text_color();
+    let mut job = egui::text::LayoutJob::simple(
+        name.to_owned(),
+        egui::FontId::proportional(config::get().number("appearance.font_size")),
+        color,
+        (rect.width() - reserved - 38.).max(1.),
+    );
+    job.wrap.max_rows = 1;
+    job.wrap.break_anywhere = true;
+    let galley = ui.painter().layout_job(job);
+    ui.painter().galley(
+        pos2(rect.left() + 38., rect.center().y - galley.size().y / 2.),
+        galley,
+        color,
+    );
+}
+fn radio_header(ui: &mut egui::Ui, enabled: &mut bool, label: &str) -> egui::Response {
+    ui.horizontal(|ui| {
+        ui.label(label);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            toggle(ui, enabled, "")
+        })
+        .inner
+    })
+    .inner
+}
+fn toggle(ui: &mut egui::Ui, value: &mut bool, label: &str) -> egui::Response {
+    ui.horizontal(|ui| {
+        let (rect, mut response) = ui.allocate_exact_size(vec2(30., 18.), egui::Sense::click());
+        if !label.is_empty() {
+            response = response.union(ui.add(egui::Label::new(label).sense(egui::Sense::click())));
+        }
+        response.widget_info(|| {
+            egui::WidgetInfo::selected(egui::WidgetType::Checkbox, ui.is_enabled(), *value, label)
+        });
+        if response.clicked() {
+            *value = !*value;
+            response.mark_changed();
+        }
+        let visuals = ui.style().interact(&response);
+        let color = if *value {
+            ui.visuals().selection.bg_fill
+        } else {
+            visuals.bg_fill
+        };
+        ui.painter().rect_filled(rect, 9, color);
+        ui.painter().rect_stroke(
+            rect,
+            9,
+            egui::Stroke::new(1_f32, ui.visuals().weak_text_color()),
+            egui::StrokeKind::Inside,
+        );
+        let t = ui.ctx().animate_bool(response.id, *value);
+        ui.painter().circle_filled(
+            pos2(rect.left() + 9. + t * 12., rect.center().y),
+            6.,
+            ui.visuals().text_color(),
+        );
+        response
+    })
+    .inner
+}
+fn paint_signal(ui: &egui::Ui, rect: Rect, strength: Option<u8>) {
+    for i in 0..4 {
+        let active = strength.is_some_and(|s| s > 0 && usize::from(s) * 4 / 101 >= i);
+        let color = ui
+            .visuals()
+            .text_color()
+            .gamma_multiply(if active { 1. } else { 0.2 });
+        let height = rect.height() * (i + 1) as f32 / 4.;
+        ui.painter().rect_filled(
+            Rect::from_min_size(
+                pos2(
+                    rect.left() + i as f32 * rect.width() / 4.,
+                    rect.bottom() - height,
+                ),
+                vec2(rect.width() / 4. - 1.5, height),
+            ),
+            1,
+            color,
+        );
+    }
+}
+fn paint_battery(ui: &egui::Ui, rect: Rect, percent: u8) {
+    let color = ui.visuals().text_color();
+    ui.painter().rect_stroke(
+        rect,
+        2,
+        egui::Stroke::new(1_f32, color),
+        egui::StrokeKind::Inside,
+    );
+    ui.painter().rect_filled(
+        Rect::from_min_size(pos2(rect.right() + 1., rect.center().y - 2.), vec2(2., 4.)),
+        1,
+        color,
+    );
+    ui.painter().rect_filled(
+        Rect::from_min_size(
+            rect.min + vec2(2., 2.),
+            vec2(
+                (rect.width() - 4.) * percent as f32 / 100.,
+                rect.height() - 4.,
+            ),
+        ),
+        1,
+        color,
+    );
+}
 fn flat(ui: &mut egui::Ui, text: impl Into<egui::WidgetText>) -> egui::Response {
     ui.add(
         egui::Button::new("")
@@ -1477,10 +1622,30 @@ impl Ui {
                 }
             });
     }
+    fn connection_back(&mut self, ui: &mut egui::Ui, name: &str) -> bool {
+        let mut back = false;
+        ui.horizontal(|ui| {
+            let image = egui::Image::new((self.icon_at_size(Icon::Back, 16.), vec2(16., 16.)));
+            back = ui
+                .add(egui::Button::image(image).min_size(vec2(28., 28.)))
+                .on_hover_text("Back")
+                .clicked();
+            ui.add(egui::Label::new(name).truncate());
+        });
+        back || ui.input(|i| i.pointer.button_clicked(egui::PointerButton::Extra1))
+    }
+    fn connection_button(&mut self, ui: &mut egui::Ui, connected: bool, enabled: bool) -> bool {
+        let image = egui::Image::new((
+            self.icon_at_size(if connected { Icon::Unlink } else { Icon::Link }, 16.),
+            vec2(16., 16.),
+        ));
+        ui.add_enabled(enabled, egui::Button::image(image).min_size(vec2(28., 28.)))
+            .on_hover_text(if connected { "Disconnect" } else { "Connect" })
+            .clicked()
+    }
     fn wifi(&mut self, ui: &mut egui::Ui) {
         if let Some(n) = self.selected_network.clone() {
-            ui.label(&n.ssid);
-            if flat(ui, "Back to networks").clicked() {
+            if self.connection_back(ui, &n.ssid) {
                 self.selected_network = None;
                 self.password.clear();
                 self.error.clear();
@@ -1497,7 +1662,7 @@ impl Ui {
                     input.request_focus();
                     self.focus_search = false;
                 }
-                ui.checkbox(&mut self.reveal, "Show password");
+                toggle(ui, &mut self.reveal, "Show password");
             }
             if flat(ui, if n.active { "Disconnect" } else { "Connect" }).clicked()
                 || ui.input(|i| i.key_pressed(egui::Key::Enter))
@@ -1514,14 +1679,9 @@ impl Ui {
             return;
         }
         let mut enabled = self.network.as_ref().is_none_or(|s| s.enabled);
-        ui.horizontal(|ui| {
-            if ui.checkbox(&mut enabled, "Wi-Fi").changed() {
-                self.services.network(self.serial, Job::Radio(enabled));
-            }
-            if ui.button("Scan").clicked() {
-                self.services.network(self.serial, Job::Scan(true));
-            }
-        });
+        if radio_header(ui, &mut enabled, "Wi-Fi").changed() {
+            self.services.network(self.serial, Job::Radio(enabled));
+        }
         if let Some(s) = &self.network {
             if s.networks.is_empty() {
                 ui.label(if enabled {
@@ -1530,44 +1690,52 @@ impl Ui {
                     "Wi-Fi is off"
                 });
             }
-            for n in s.networks.clone() {
-                let (rect, response) = ui.allocate_exact_size(
-                    vec2(
-                        ui.available_width(),
-                        config::get().number("layout.control_height"),
-                    ),
-                    egui::Sense::click(),
-                );
-                if response.hovered() {
-                    ui.painter()
-                        .rect_filled(rect, 2, ui.visuals().widgets.hovered.bg_fill);
+            let networks = s.networks.clone();
+            for (title, connected) in [("Connected networks", true), ("Available networks", false)]
+            {
+                if !networks.iter().any(|n| n.active == connected) {
+                    continue;
                 }
-                let text = format!("{}{}", if n.active { "•  " } else { "" }, n.ssid);
-                ui.scope_builder(
-                    egui::UiBuilder::new().max_rect(Rect::from_min_max(
-                        rect.min + vec2(4., 3.),
-                        rect.max - vec2(52., 0.),
-                    )),
-                    |ui| {
-                        ui.add(egui::Label::new(text).truncate());
-                    },
-                );
-                ui.painter().text(
-                    pos2(rect.right() - 4., rect.center().y),
-                    egui::Align2::RIGHT_CENTER,
-                    n.signal
-                        .map(|signal| format!("{signal}%"))
-                        .unwrap_or_else(|| "—".into()),
-                    egui::FontId::proportional(config::get().number("appearance.font_size")),
-                    ui.visuals().weak_text_color(),
-                );
-                let clicked = response.clicked();
-                if let Some(rssi) = n.rssi_dbm {
-                    response.on_hover_text(format!("{rssi} dBm"));
+                if !connected && networks.iter().any(|n| n.active) {
+                    connection_separator(ui, self.dark);
                 }
-                if clicked {
-                    self.selected_network = Some(n);
-                    self.focus_search = true;
+                ui.weak(title);
+                for n in networks.iter().filter(|n| n.active == connected).cloned() {
+                    let (rect, response) = connection_row(ui, (&n.device, &n.bssid));
+                    paint_row_name(ui, rect, &n.ssid, 24.);
+                    paint_signal(
+                        ui,
+                        Rect::from_center_size(
+                            pos2(rect.right() - 10., rect.center().y),
+                            vec2(16., 12.),
+                        ),
+                        n.signal,
+                    );
+                    let mut controls =
+                        ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_center_size(
+                            pos2(rect.left() + 14., rect.center().y),
+                            vec2(28., 28.),
+                        )));
+                    let action = self.connection_button(&mut controls, n.active, true);
+                    response.on_hover_text(
+                        n.rssi_dbm
+                            .map(|r| format!("{}\n{r} dBm", n.ssid))
+                            .unwrap_or_else(|| n.ssid.clone()),
+                    );
+                    if action {
+                        if n.active {
+                            self.services
+                                .network(self.serial, Job::Disconnect(n.device));
+                        } else if n.security.is_empty() || n.security == "--" {
+                            self.services
+                                .network(self.serial, Job::Connect(n, String::new()));
+                        } else {
+                            self.selected_network = Some(n);
+                            self.password.clear();
+                            self.reveal = false;
+                            self.focus_search = true;
+                        }
+                    }
                 }
             }
         } else {
@@ -1576,7 +1744,6 @@ impl Ui {
     }
     fn bluetooth(&mut self, ui: &mut egui::Ui) {
         let snapshot = self.bluetooth.clone();
-        ui.label("Bluetooth");
         let Some(s) = snapshot else {
             if self.error.is_empty() {
                 ui.weak("Loading devices…");
@@ -1587,11 +1754,29 @@ impl Ui {
             ui.weak("No Bluetooth adapter");
             return;
         }
+        let mut enabled = s.enabled();
+        if s.prompt.is_none() && radio_header(ui, &mut enabled, "Bluetooth").changed() {
+            let _ = self
+                .services
+                .bluetooth
+                .send(bluetooth::Request::Radio(enabled));
+        }
         if !s.enabled() {
             ui.weak("Bluetooth is off");
             return;
         }
         if let Some(prompt) = &s.prompt {
+            let name = s
+                .devices
+                .iter()
+                .find(|d| Some(&d.path) == s.busy.as_ref())
+                .map(|d| d.name.as_str())
+                .unwrap_or("Pair device");
+            if self.connection_back(ui, name) {
+                self.bluetooth_pin.clear();
+                let _ = self.services.bluetooth.send(bluetooth::Request::Cancel);
+                return;
+            }
             match prompt {
                 bluetooth::Prompt::Confirm(message) => {
                     ui.label(message);
@@ -1611,11 +1796,16 @@ impl Ui {
                     ui.label("Enter the device’s pairing code");
                     ui.add(
                         egui::TextEdit::singleline(&mut self.bluetooth_pin)
+                            .password(!self.reveal)
+                            .hint_text("Pairing code")
                             .id(egui::Id::new("bluetooth-pin"))
                             .desired_width(ui.available_width()),
                     );
+                    toggle(ui, &mut self.reveal, "Show pairing code");
                     ui.horizontal(|ui| {
-                        if ui.add(egui::Button::new("Pair").frame(false)).clicked() {
+                        if ui.add(egui::Button::new("Pair").frame(false)).clicked()
+                            || ui.input(|i| i.key_pressed(egui::Key::Enter))
+                        {
                             let _ = self
                                 .services
                                 .bluetooth
@@ -1632,6 +1822,7 @@ impl Ui {
                     ui.label(message);
                 }
             }
+            return;
         }
         if let Some(path) = &s.busy {
             ui.horizontal(|ui| {
@@ -1656,71 +1847,72 @@ impl Ui {
         if let Some(error) = &s.action_error {
             ui.label(error);
         }
-        for (title, paired) in [("Paired devices", true), ("Nearby devices", false)] {
+        let mut has_section = false;
+        for (title, group) in [
+            ("Connected devices", 0),
+            ("Paired devices", 1),
+            ("Nearby devices", 2),
+        ] {
             let devices: Vec<_> = s
                 .devices
                 .iter()
-                .filter(|d| (d.connected || d.paired) == paired)
+                .filter(|d| if d.connected { 0 } else if d.paired { 1 } else { 2 } == group)
                 .collect();
             if devices.is_empty() {
                 continue;
             }
+            if has_section {
+                connection_separator(ui, self.dark);
+            }
+            has_section = true;
             ui.weak(title);
             for device in devices {
-                let (rect, response) = ui.allocate_exact_size(
-                    vec2(
-                        ui.available_width(),
-                        config::get().number("layout.control_height"),
-                    ),
-                    egui::Sense::hover(),
-                );
+                let (rect, response) = connection_row(ui, &device.path);
                 response.on_hover_text(format!("{}\n{}", device.name, device.address));
-                ui.scope_builder(
-                    egui::UiBuilder::new().max_rect(Rect::from_min_max(
-                        rect.min + vec2(4., 3.),
-                        rect.max - vec2(170., 0.),
-                    )),
-                    |ui| {
-                        ui.add(egui::Label::new(&device.name).truncate());
+                paint_row_name(
+                    ui,
+                    rect,
+                    &device.name,
+                    if device.connected && device.battery.is_some() {
+                        50.
+                    } else {
+                        24.
                     },
                 );
-                let detail = if let Some(battery) = device.battery {
-                    format!("{battery}%")
-                } else if device.connected {
-                    "Connected".into()
-                } else {
-                    device.rssi.map(|r| format!("{r} dBm")).unwrap_or_default()
-                };
-                ui.painter().text(
-                    pos2(rect.right() - 90., rect.center().y),
-                    egui::Align2::RIGHT_CENTER,
-                    detail,
-                    egui::FontId::proportional(config::get().number("appearance.font_size")),
-                    ui.visuals().weak_text_color(),
-                );
-                let mut controls = ui.new_child(egui::UiBuilder::new().max_rect(
-                    Rect::from_min_max(pos2(rect.right() - 86., rect.top()), rect.max),
-                ));
-                controls.spacing_mut().interact_size.y = rect.height();
-                controls.spacing_mut().button_padding = vec2(2., 0.);
-                if s.busy.is_some() {
-                    controls.disable();
-                }
-                let (label, action) = if device.connected {
-                    ("Disconnect", bluetooth::Action::Disconnect)
-                } else if device.paired {
-                    ("Connect", bluetooth::Action::Connect)
-                } else {
-                    ("Pair", bluetooth::Action::Pair)
-                };
-                if controls
-                    .add(
-                        egui::Button::new(label)
-                            .frame(false)
-                            .wrap_mode(egui::TextWrapMode::Extend),
-                    )
-                    .clicked()
+                if device.connected
+                    && let Some(battery) = device.battery
                 {
+                    let battery_rect = Rect::from_center_size(
+                        pos2(rect.right() - 36., rect.center().y),
+                        vec2(16., 8.),
+                    );
+                    paint_battery(ui, battery_rect, battery);
+                }
+                paint_signal(
+                    ui,
+                    Rect::from_center_size(
+                        pos2(rect.right() - 10., rect.center().y),
+                        vec2(16., 12.),
+                    ),
+                    device
+                        .rssi
+                        .map(|r| ((i32::from(r).clamp(-100, -40) + 100) * 100 / 60) as u8),
+                );
+                let mut controls =
+                    ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_center_size(
+                        pos2(rect.left() + 14., rect.center().y),
+                        vec2(28., 28.),
+                    )));
+                let activate =
+                    self.connection_button(&mut controls, device.connected, s.busy.is_none());
+                let action = if device.connected {
+                    bluetooth::Action::Disconnect
+                } else if device.paired {
+                    bluetooth::Action::Connect
+                } else {
+                    bluetooth::Action::Pair
+                };
+                if activate {
                     let _ = self
                         .services
                         .bluetooth
@@ -1730,44 +1922,6 @@ impl Ui {
         }
         if s.devices.is_empty() {
             ui.weak("No devices found");
-        }
-    }
-    fn bluetooth_scan(&mut self, ui: &mut egui::Ui) {
-        ui.separator();
-        let snapshot = self.bluetooth.as_ref();
-        let scanning = snapshot.is_some_and(|s| s.scanning);
-        let owned = snapshot.is_some_and(|s| s.scan_owned);
-        ui.weak(if scanning {
-            "Bluetooth radio scanning…"
-        } else {
-            "Bluetooth radio idle"
-        });
-        if ui
-            .add_enabled_ui(
-                snapshot.is_some_and(|s| s.enabled() && s.busy.is_none()),
-                |ui| {
-                    ui.add_sized(
-                        vec2(
-                            ui.available_width(),
-                            config::get().number("layout.control_height") + 4.,
-                        ),
-                        egui::Button::new(if owned {
-                            "Stop Bluetooth scan"
-                        } else {
-                            "Bluetooth scan"
-                        })
-                        .frame(true),
-                    )
-                },
-            )
-            .inner
-            .clicked()
-        {
-            let _ = self.services.bluetooth.send(if owned {
-                bluetooth::Request::Stop
-            } else {
-                bluetooth::Request::Scan
-            });
         }
     }
     fn session(&mut self, ui: &mut egui::Ui) {

@@ -153,7 +153,15 @@ fn main() -> anyhow::Result<()> {
         std::thread::sleep(Duration::from_millis(150));
     }
     if !keys_only {
-        pointer.button(timestamp(), 0x110, wl_pointer::ButtonState::Pressed);
+        pointer.button(
+            timestamp(),
+            if a.get(5).is_some_and(|arg| arg == "--back") {
+                0x113
+            } else {
+                0x110
+            },
+            wl_pointer::ButtonState::Pressed,
+        );
         pointer.frame();
         q.roundtrip(&mut s)?;
         std::thread::sleep(Duration::from_millis(150));
@@ -180,11 +188,21 @@ fn main() -> anyhow::Result<()> {
         std::thread::sleep(Duration::from_millis(500));
     }
     if !keys_only {
-        pointer.button(timestamp(), 0x110, wl_pointer::ButtonState::Released);
+        pointer.button(
+            timestamp(),
+            if a.get(5).is_some_and(|arg| arg == "--back") {
+                0x113
+            } else {
+                0x110
+            },
+            wl_pointer::ButtonState::Released,
+        );
         pointer.frame();
         q.roundtrip(&mut s)?;
     }
-    if a.get(5).is_some_and(|arg| arg == "--click-hold") {
+    if a.get(5)
+        .is_some_and(|arg| arg == "--click-hold" || arg == "--back")
+    {
         std::thread::sleep(Duration::from_millis(
             a.get(6).map(|v| v.parse()).transpose()?.unwrap_or(2000),
         ));

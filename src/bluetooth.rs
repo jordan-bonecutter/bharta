@@ -49,8 +49,8 @@ impl Snapshot {
 }
 pub enum Request {
     Open(u64),
+    Radio(bool),
     Scan,
-    Stop,
     Action(String, Action),
     Answer(Option<String>),
     Cancel,
@@ -369,9 +369,32 @@ pub fn watch() -> (mpsc::Sender<Request>, mpsc::Receiver<Update>) {
                 Some(Request::Open(id)) => {
                     open = Some(id);
                 }
+                Some(Request::Radio(enabled)) if open.is_some() => {
+                    if let Some(s) = session.as_mut() {
+                        error = (|| -> Result<()> {
+                            s.cancel();
+                            s.stop();
+                            for (path, _) in s.snapshot()?.adapters {
+                                Proxy::new(&s.connection, SERVICE, path.as_str(), ADAPTER)?
+                                    .set_property("Powered", enabled)?;
+                            }
+                            if enabled {
+                                s.scan()?;
+                            }
+                            Ok(())
+                        })()
+                        .err();
+                    }
+                }
                 Some(Request::Scan) if open.is_some() => {
                     if let Some(s) = session.as_mut() {
-                        error = s.scan().err();
+                        error = (|| -> Result<()> {
+                            if s.snapshot()?.enabled() {
+                                s.scan()?;
+                            }
+                            Ok(())
+                        })()
+                        .err();
                     }
                 }
                 Some(Request::Action(path, action)) if open.is_some() => {
@@ -388,10 +411,6 @@ pub fn watch() -> (mpsc::Sender<Request>, mpsc::Receiver<Update>) {
                     if let Some(s) = session.as_mut() {
                         s.cancel();
                     }
-                }
-                Some(Request::Stop) => {
-                    // Dropping the connection also releases discovery if StopDiscovery fails.
-                    session = None;
                 }
                 _ => {}
             }

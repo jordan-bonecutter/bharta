@@ -6,6 +6,7 @@ Add --audio-only to check audio controls, event updates, and drawer height.
 Add --performance-only to measure steady/changing audio and Sound drawer CPU.
 Add --launcher-only to check the default and external app launchers.
 Add --alignment-only to check bar icons across themes, geometry, states, and scale.
+Add --trays-only to check wireless scanning, pairing, switches, and navigation.
 Requires sway, grim, dbus-daemon, and Python 3. Screenshots/logs go to the argument.
 """
 import json
@@ -114,6 +115,30 @@ while True:
  time.sleep(1024/rate)
 ''')
     fake_capture.chmod(0o755)
+    wifi_state = runtime / 'wifi.json'
+    wifi_state.write_text(json.dumps({'enabled': True, 'active': 'Home'}))
+    wifi_log = DEST / 'wifi-actions.jsonl'
+    wifi_log.write_text('')
+    env['BHARTA_TEST_WIFI_STATE'] = str(wifi_state)
+    env['BHARTA_TEST_WIFI_LOG'] = str(wifi_log)
+    fake_wifi = runtime / 'nmcli'
+    fake_wifi.write_text('''#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+p=Path(os.environ['BHARTA_TEST_WIFI_STATE']);s=json.loads(p.read_text());a=sys.argv[1:]
+with open(os.environ['BHARTA_TEST_WIFI_LOG'],'a') as f:f.write(json.dumps(a)+'\\n')
+if a[-2:]==['radio','wifi']:print('enabled' if s['enabled'] else 'disabled')
+elif 'radio' in a:s['enabled']=a[-1]=='on';p.write_text(json.dumps(s))
+elif 'list' in a and s['enabled']:
+ for bssid,name,strength,security in [('AA','Home',85,'WPA2'),('BB','Cafe',48,'--'),('CC','Guest',24,'WPA2')]:
+  print(':'.join(['*' if s['active']==name else '',bssid,name,str(strength),security,'1','wlan0']))
+elif 'connect' in a:
+ bssid=a[a.index('connect')+1]
+ if bssid=='CC' and sys.stdin.readline().strip()!='1234':sys.exit(1)
+ s['active']={'AA':'Home','BB':'Cafe','CC':'Guest'}[bssid];p.write_text(json.dumps(s))
+elif 'disconnect' in a:s['active']='';p.write_text(json.dumps(s))
+''')
+    fake_wifi.chmod(0o755)
     env['PATH'] = str(runtime) + os.pathsep + env['PATH']
     env['BHARTA_TEST_AUDIO'] = str(state)
     env['BHARTA_TEST_ROUTING'] = str(routing)
@@ -140,20 +165,22 @@ while True:
         return start([str(ROOT / 'target/release/examples/ui_probe'), output,
                       str(x), str(y), *map(str,size), *map(str, args)], 'input.log')
     def shot(name):
+        if 'bar' in globals() and ('--trays-only' in sys.argv[2:] or '--bluetooth-only' in sys.argv[2:]):
+            assert bar.poll() is None, f'Bar exited ({bar.returncode}) before {name}; see bar.log'
         run(['grim', '-o', 'HEADLESS-1', str(DEST / (name + '.png'))])
     def check_external_launcher(output, size):
         # External launchers require a click and never take over the desktop session.
         marker=runtime/'launcher-started'
         external_launcher=runtime/'external launcher'
-        external_launcher.write_text('#!/bin/sh\nprintf started > "'+str(marker)+'"\n')
+        external_launcher.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "'+str(marker)+'"\n')
         external_launcher.chmod(0o755)
-        settings={'launcher':{'executable':str(external_launcher)}}
+        settings={'launcher':{'executable':str(external_launcher),'args':['Find apps','$(literal)','--width','40']}}
         (initial_settings/'config.json').write_text(json.dumps(settings))
         external=start([str(BAR),'--dark','--output',output],'external-launcher.log');time.sleep(1.2)
         probe(72,14,'--hover',700,output=output,size=size).wait()
         assert not marker.exists(), 'Hover started the external launcher'
         probe(72,14,'--click-hold',500,output=output,size=size).wait()
-        assert marker.read_text()=='started', 'Click did not run the configured executable path'
+        assert marker.read_text().splitlines()==['Find apps','$(literal)','--width','40'], 'Launcher did not preserve configured arguments'
         run(['grim','-o',output,str(DEST/'external-launcher.png')])
         assert Image.open(DEST/'external-launcher.png').convert('RGB').crop((0,28,*size)).getbbox() is None, 'External launcher opened the built-in menu'
         external.terminate();external.wait()
@@ -220,166 +247,155 @@ while True:
         popup_left=max(8,min(sound_x-168,1600-344))
         bluetooth_x=battery_left-64
         cpu_x=battery_left-192
-        def tray_heights(image):
-            heights=[]
-            for i in range(7):
-                x=int(sound_x+2+i*24/7)
-                ys=[y for y in range(7,21)
-                    if max(image.getpixel((x,y)))-min(image.getpixel((x,y)))>70]
-                heights.append(len(ys))
-            return heights
-        time.sleep(.4);shot('tray-low')
-        low=tray_heights(Image.open(DEST/'tray-low.png').convert('RGB'))
-        assert low[2]>=10 and max(low[:2]+low[3:])<=3, f'Tray did not measure 375 Hz: {low}'
-        tray_tone.write_text('3000');time.sleep(.4);shot('tray-high')
-        high=tray_heights(Image.open(DEST/'tray-high.png').convert('RGB'))
-        assert high[5]>=10 and max(high[:5]+high[6:])<=3, f'Tray did not update to 3000 Hz: {high}'
-        tray_tone.write_text('0');time.sleep(.4);shot('tray-silent')
-        assert max(tray_heights(Image.open(DEST/'tray-silent.png').convert('RGB')))<=1, 'Tray fabricated activity during silence'
-        tray_tone.write_text('375')
-        if '--performance-only' in sys.argv[2:]:
-            def cpu_ticks():
-                # Fields after comm begin with state (field 3).
-                fields=Path(f'/proc/{bar.pid}/stat').read_text().rsplit(') ',1)[1].split()
-                return int(fields[11])+int(fields[12])
-            def measure_cpu(label):
-                time.sleep(.8)
-                previous=cpu_ticks();started=time.monotonic()
-                time.sleep(5)
-                percent=(cpu_ticks()-previous)/os.sysconf('SC_CLK_TCK')/(time.monotonic()-started)*100
-                shot('performance-'+label)
-                return round(percent,2)
-            results={'steady_audio':measure_cpu('steady')}
-            tray_tone.write_text('music')
-            results['changing_audio']=measure_cpu('changing')
-            holder=probe(sound_x,14,'--hover',8000)
-            results['sound_drawer']=measure_cpu('sound')
-            holder.wait()
-            (DEST/'cpu.json').write_text(json.dumps(results,indent=2)+'\n')
-            print('Bar CPU (% of one core):',results)
-            sys.exit(0)
-        # Live spectrum values must never move or paint over either icon.
-        slots=[]
-        for name in ('tray-low', 'tray-high', 'tray-silent'):
-            image, controls=assert_bar_alignment(Image.open(DEST/(name+'.png')), default_settings)
-            slots.append([image.crop((int(left),0,int(left+32),28))
-                          for left,_,_ in (controls['CPU'],controls['Sound'])])
-        for changed in slots[1:]:
-            assert all(ImageChops.difference(before,after).getbbox() is None
-                       for before,after in zip(slots[0],changed)), 'Live plots changed an icon slot'
-        if '--alignment-only' in sys.argv[2:]:
-            bar.terminate();bar.wait()
-            cases=[
-                ('dark',1,{}), ('light',1,{}),
-                ('dark',1,{'bar_height':34,'icon_slot_width':40,'cpu_width':88,'sound_tray_width':96,'group_gap':12}),
-                ('light',2,{'bar_height':34,'icon_slot_width':40,'cpu_width':88,'sound_tray_width':96,'group_gap':12}),
-                ('dark',1,{'cpu_width':32,'sound_tray_width':32}),
-            ]
-            for case,(theme,scale,geometry) in enumerate(cases):
-                run(['swaymsg','output HEADLESS-1 mode',f'{1600*scale}x{900*scale}','scale',str(scale)])
-                settings=json.loads(json.dumps(default_settings))
-                settings['layout'].update(geometry)
-                (initial_settings/'config.json').write_text(json.dumps({'layout':geometry}))
-                muted.write_text('false')
-                current=start([str(BAR),'--'+theme,'--output','HEADLESS-1'],f'alignment-{case}.log')
-                time.sleep(1.2)
-                sound_icons=[]
-                for mute in (False,True):
-                    muted.write_text(json.dumps(mute));time.sleep(.4)
-                    name=f'alignment-{case}-'+('muted' if mute else 'playing')
-                    shot(name)
-                    image,controls=assert_bar_alignment(Image.open(DEST/(name+'.png')), settings, scale)
-                    left,width,_=controls['Sound']
-                    sound_icons.append(image.crop((int(left),0,int(left+min(width,settings['layout']['icon_slot_width'])),settings['layout']['bar_height'])))
-                assert ImageChops.difference(*sound_icons).getbbox(), 'Mute fixture did not change the speaker glyph'
-                assert current.poll() is None, 'Alignment fixture bar exited'
-                current.terminate();current.wait()
-            print('Headless alignment screenshots and logs:', DEST)
-            sys.exit(0)
-        search_fixture=start(['python3','-c',
-            'import ctypes,time; ctypes.CDLL(None).prctl(15,b"qzprocess",0,0,0); time.sleep(120)'], 'cpu-search-fixture.log')
-        time.sleep(2)
-        def cpu_ticks(pid):
-            fields=Path(f'/proc/{pid}/stat').read_text().split()
-            return int(fields[13])+int(fields[14])
-        started=time.monotonic();previous=cpu_ticks(bar.pid)
-        time.sleep(3)
-        idle_cpu=(cpu_ticks(bar.pid)-previous)/os.sysconf('SC_CLK_TCK')/(time.monotonic()-started)*100
-        (DEST/'idle-cpu.txt').write_text(f'{idle_cpu:.2f}% CPU\n')
-        assert idle_cpu<15, f'Idle bar continually redraws: {idle_cpu:.1f}% CPU'
-        cpu_hover=probe(cpu_x,14,'--hover',5000)
-        monitor_left=max(8,min(cpu_x-160,1600-328))
-        deadline=time.monotonic()+4
-        while time.monotonic()<deadline:
-            time.sleep(.2);shot('process-monitor')
-            monitor=Image.open(DEST/'process-monitor.png').convert('RGB')
-            text_pixels=sum(1 for y in range(90,180) for x in range(int(monitor_left)+12,int(monitor_left)+155)
-                            if min(monitor.getpixel((x,y)))>100)
-            if text_pixels>20:break
-        assert text_pixels>20, 'CPU monitor has no process rows'
-        cpu_hover.wait()
-        # CPU search takes focus on hover and finds quiet processes.
-        # Typing stays on the private headless keyboard.
-        typed=probe(cpu_x,14,'--keys-only',16,44,25,19,24,46,18,31,31);typed.wait()
-        time.sleep(.4);shot('process-search-name')
-        filtered=Image.open(DEST/'process-search-name.png').convert('RGB')
-        assert filtered.getpixel((int(monitor_left)+20,120))!=(0,0,0), 'Process name search lost its result row'
-        assert filtered.getpixel((int(monitor_left)+20,210))==(0,0,0), 'Process name search did not filter rows'
-        name_bounds=(int(monitor_left)+12,110,int(monitor_left)+118,138)
-        name_result=filtered.crop(name_bounds)
-        digit_keys={'0':11,'1':2,'2':3,'3':4,'4':5,'5':6,'6':7,'7':8,'8':9,'9':10}
-        typed=probe(cpu_x,14,'--keys-only',*[14]*9,*[digit_keys[n] for n in str(search_fixture.pid)]);typed.wait()
-        time.sleep(.4);shot('process-search-pid')
-        filtered=Image.open(DEST/'process-search-pid.png').convert('RGB')
-        assert filtered.getpixel((int(monitor_left)+20,120))!=(0,0,0), 'PID search lost its result row'
-        assert filtered.getpixel((int(monitor_left)+20,210))==(0,0,0), 'PID search did not filter rows'
-        assert ImageChops.difference(name_result,filtered.crop(name_bounds)).getbbox() is None, 'Name and PID searches found different processes'
-        typed=probe(cpu_x,14,'--keys-only',*[14]*len(str(search_fixture.pid)),44,44,44,44);typed.wait()
-        time.sleep(.4);shot('process-search-empty')
-        assert Image.open(DEST/'process-search-empty.png').convert('RGB').getpixel((int(monitor_left)+20,210))==(0,0,0), 'Unmatched process search retained rows'
-        assert ImageChops.difference(name_result,Image.open(DEST/'process-search-empty.png').convert('RGB').crop(name_bounds)).getbbox(), 'Unmatched search still shows the matching process'
-        leave_cpu=probe(600,600,'--click-hold',900);leave_cpu.wait()
-        shot('process-search-dismissed')
-        assert Image.open(DEST/'process-search-dismissed.png').convert('RGB').getpixel((int(monitor_left)+5,80))==(0,0,0), 'Outside click did not dismiss process search with text'
-        cpu_clicked=probe(cpu_x,14,'--click-hold',1000);time.sleep(.6);shot('process-monitor-clicked');cpu_clicked.wait()
-        assert Image.open(DEST/'process-monitor-clicked.png').convert('RGB').getpixel((int(monitor_left)+5,80))!=(0,0,0), 'Clicking CPU did not open its monitor'
-        leave_cpu=probe(600,600,'--hover',900);leave_cpu.wait()
+        if '--trays-only' not in sys.argv[2:]:
+            def tray_heights(image):
+                heights=[]
+                for i in range(7):
+                    x=int(sound_x+2+i*24/7)
+                    ys=[y for y in range(7,21)
+                        if max(image.getpixel((x,y)))-min(image.getpixel((x,y)))>70]
+                    heights.append(len(ys))
+                return heights
+            time.sleep(.4);shot('tray-low')
+            low=tray_heights(Image.open(DEST/'tray-low.png').convert('RGB'))
+            assert low[2]>=10 and max(low[:2]+low[3:])<=3, f'Tray did not measure 375 Hz: {low}'
+            tray_tone.write_text('3000');time.sleep(.4);shot('tray-high')
+            high=tray_heights(Image.open(DEST/'tray-high.png').convert('RGB'))
+            assert high[5]>=10 and max(high[:5]+high[6:])<=3, f'Tray did not update to 3000 Hz: {high}'
+            tray_tone.write_text('0');time.sleep(.4);shot('tray-silent')
+            assert max(tray_heights(Image.open(DEST/'tray-silent.png').convert('RGB')))<=1, 'Tray fabricated activity during silence'
+            tray_tone.write_text('375')
+            if '--performance-only' in sys.argv[2:]:
+                def cpu_ticks():
+                    # Fields after comm begin with state (field 3).
+                    fields=Path(f'/proc/{bar.pid}/stat').read_text().rsplit(') ',1)[1].split()
+                    return int(fields[11])+int(fields[12])
+                def measure_cpu(label):
+                    time.sleep(.8)
+                    previous=cpu_ticks();started=time.monotonic()
+                    time.sleep(5)
+                    percent=(cpu_ticks()-previous)/os.sysconf('SC_CLK_TCK')/(time.monotonic()-started)*100
+                    shot('performance-'+label)
+                    return round(percent,2)
+                results={'steady_audio':measure_cpu('steady')}
+                tray_tone.write_text('music')
+                results['changing_audio']=measure_cpu('changing')
+                holder=probe(sound_x,14,'--hover',8000)
+                results['sound_drawer']=measure_cpu('sound')
+                holder.wait()
+                (DEST/'cpu.json').write_text(json.dumps(results,indent=2)+'\n')
+                print('Bar CPU (% of one core):',results)
+                sys.exit(0)
+            # Live spectrum values must never move or paint over either icon.
+            slots=[]
+            for name in ('tray-low', 'tray-high', 'tray-silent'):
+                image, controls=assert_bar_alignment(Image.open(DEST/(name+'.png')), default_settings)
+                slots.append([image.crop((int(left),0,int(left+32),28))
+                              for left,_,_ in (controls['CPU'],controls['Sound'])])
+            for changed in slots[1:]:
+                assert all(ImageChops.difference(before,after).getbbox() is None
+                           for before,after in zip(slots[0],changed)), 'Live plots changed an icon slot'
+            if '--alignment-only' in sys.argv[2:]:
+                bar.terminate();bar.wait()
+                cases=[
+                    ('dark',1,{}), ('light',1,{}),
+                    ('dark',1,{'bar_height':34,'icon_slot_width':40,'cpu_width':88,'sound_tray_width':96,'group_gap':12}),
+                    ('light',2,{'bar_height':34,'icon_slot_width':40,'cpu_width':88,'sound_tray_width':96,'group_gap':12}),
+                    ('dark',1,{'cpu_width':32,'sound_tray_width':32}),
+                ]
+                for case,(theme,scale,geometry) in enumerate(cases):
+                    run(['swaymsg','output HEADLESS-1 mode',f'{1600*scale}x{900*scale}','scale',str(scale)])
+                    settings=json.loads(json.dumps(default_settings))
+                    settings['layout'].update(geometry)
+                    (initial_settings/'config.json').write_text(json.dumps({'layout':geometry}))
+                    muted.write_text('false')
+                    current=start([str(BAR),'--'+theme,'--output','HEADLESS-1'],f'alignment-{case}.log')
+                    time.sleep(1.2)
+                    sound_icons=[]
+                    for mute in (False,True):
+                        muted.write_text(json.dumps(mute));time.sleep(.4)
+                        name=f'alignment-{case}-'+('muted' if mute else 'playing')
+                        shot(name)
+                        image,controls=assert_bar_alignment(Image.open(DEST/(name+'.png')), settings, scale)
+                        left,width,_=controls['Sound']
+                        sound_icons.append(image.crop((int(left),0,int(left+min(width,settings['layout']['icon_slot_width'])),settings['layout']['bar_height'])))
+                    assert ImageChops.difference(*sound_icons).getbbox(), 'Mute fixture did not change the speaker glyph'
+                    assert current.poll() is None, 'Alignment fixture bar exited'
+                    current.terminate();current.wait()
+                print('Headless alignment screenshots and logs:', DEST)
+                sys.exit(0)
+            search_fixture=start(['python3','-c',
+                'import ctypes,time; ctypes.CDLL(None).prctl(15,b"qzprocess",0,0,0); time.sleep(120)'], 'cpu-search-fixture.log')
+            time.sleep(2)
+            def cpu_ticks(pid):
+                fields=Path(f'/proc/{pid}/stat').read_text().split()
+                return int(fields[13])+int(fields[14])
+            started=time.monotonic();previous=cpu_ticks(bar.pid)
+            time.sleep(3)
+            idle_cpu=(cpu_ticks(bar.pid)-previous)/os.sysconf('SC_CLK_TCK')/(time.monotonic()-started)*100
+            (DEST/'idle-cpu.txt').write_text(f'{idle_cpu:.2f}% CPU\n')
+            assert idle_cpu<15, f'Idle bar continually redraws: {idle_cpu:.1f}% CPU'
+            cpu_hover=probe(cpu_x,14,'--hover',5000)
+            monitor_left=max(8,min(cpu_x-160,1600-328))
+            deadline=time.monotonic()+4
+            while time.monotonic()<deadline:
+                time.sleep(.2);shot('process-monitor')
+                monitor=Image.open(DEST/'process-monitor.png').convert('RGB')
+                text_pixels=sum(1 for y in range(90,180) for x in range(int(monitor_left)+12,int(monitor_left)+155)
+                                if min(monitor.getpixel((x,y)))>100)
+                if text_pixels>20:break
+            assert text_pixels>20, 'CPU monitor has no process rows'
+            cpu_hover.wait()
+            # CPU search takes focus on hover and finds quiet processes.
+            # Typing stays on the private headless keyboard.
+            typed=probe(cpu_x,14,'--keys-only',16,44,25,19,24,46,18,31,31);typed.wait()
+            time.sleep(.4);shot('process-search-name')
+            filtered=Image.open(DEST/'process-search-name.png').convert('RGB')
+            assert filtered.getpixel((int(monitor_left)+20,120))!=(0,0,0), 'Process name search lost its result row'
+            assert filtered.getpixel((int(monitor_left)+20,210))==(0,0,0), 'Process name search did not filter rows'
+            name_bounds=(int(monitor_left)+12,110,int(monitor_left)+118,138)
+            name_result=filtered.crop(name_bounds)
+            digit_keys={'0':11,'1':2,'2':3,'3':4,'4':5,'5':6,'6':7,'7':8,'8':9,'9':10}
+            typed=probe(cpu_x,14,'--keys-only',*[14]*9,*[digit_keys[n] for n in str(search_fixture.pid)]);typed.wait()
+            time.sleep(.4);shot('process-search-pid')
+            filtered=Image.open(DEST/'process-search-pid.png').convert('RGB')
+            assert filtered.getpixel((int(monitor_left)+20,120))!=(0,0,0), 'PID search lost its result row'
+            assert filtered.getpixel((int(monitor_left)+20,210))==(0,0,0), 'PID search did not filter rows'
+            assert ImageChops.difference(name_result,filtered.crop(name_bounds)).getbbox() is None, 'Name and PID searches found different processes'
+            typed=probe(cpu_x,14,'--keys-only',*[14]*len(str(search_fixture.pid)),44,44,44,44);typed.wait()
+            time.sleep(.4);shot('process-search-empty')
+            assert Image.open(DEST/'process-search-empty.png').convert('RGB').getpixel((int(monitor_left)+20,210))==(0,0,0), 'Unmatched process search retained rows'
+            assert ImageChops.difference(name_result,Image.open(DEST/'process-search-empty.png').convert('RGB').crop(name_bounds)).getbbox(), 'Unmatched search still shows the matching process'
+            leave_cpu=probe(600,600,'--click-hold',900);leave_cpu.wait()
+            shot('process-search-dismissed')
+            assert Image.open(DEST/'process-search-dismissed.png').convert('RGB').getpixel((int(monitor_left)+5,80))==(0,0,0), 'Outside click did not dismiss process search with text'
+            cpu_clicked=probe(cpu_x,14,'--click-hold',1000);time.sleep(.6);shot('process-monitor-clicked');cpu_clicked.wait()
+            assert Image.open(DEST/'process-monitor-clicked.png').convert('RGB').getpixel((int(monitor_left)+5,80))!=(0,0,0), 'Clicking CPU did not open its monitor'
+            leave_cpu=probe(600,600,'--hover',900);leave_cpu.wait()
         # All input is scoped to HEADLESS-1 on the private Wayland socket.
         bluetooth_hover=probe(bluetooth_x,14,'--hover',1600)
         time.sleep(1.2);shot('bluetooth-connected');bluetooth_hover.wait()
         assert bluetooth_fixture.poll() is None, 'BlueZ fixture exited'
-        assert not (DEST/'bluetooth-discovery.txt').read_text(), 'Opening the menu started discovery without a scan request'
+        assert (DEST/'bluetooth-discovery.txt').read_text().splitlines() == ['start'], 'Opening Bluetooth did not start discovery'
         bt_image=Image.open(DEST/'bluetooth-connected.png').convert('RGB')
         bt_left=max(8,min(bluetooth_x-160,1600-328))
         assert bt_image.getpixel((bt_left+30,80)) != (0,0,0), 'Bluetooth devices popup missing'
-        def bluetooth_scan_button(duration):
-            shot('bluetooth-controls')
-            image=Image.open(DEST/'bluetooth-controls.png').convert('RGB')
-            bounds=image.crop((bt_left,28,bt_left+320,900)).getbbox()
-            assert bounds, 'Bluetooth popup missing'
-            return probe(bt_left+120,28+bounds[3]-20,'--click-hold',duration)
-        scan=bluetooth_scan_button(2200)
-        time.sleep(1.6);shot('bluetooth-scan');scan.wait()
+        shot('bluetooth-scan')
         bt_log=DEST/'bluetooth-discovery.txt'
-        assert 'start' in bt_log.read_text().splitlines(), 'Scan did not call BlueZ StartDiscovery'
-        assert ImageChops.difference(Image.open(DEST/'bluetooth-connected.png'), Image.open(DEST/'bluetooth-scan.png')).crop((bt_left,70,bt_left+300,240)).getbbox(), 'Scan did not add the discovered device row'
         leave_bt=probe(700,700,'--hover',1300);leave_bt.wait();time.sleep(.4)
-        assert bt_log.read_text().splitlines() == ['start','stop'], 'Closing Bluetooth did not release its discovery session'
-        reopen_bt=probe(bluetooth_x,14,'--click-hold',1200);time.sleep(.8);shot('bluetooth-reopened');reopen_bt.wait()
-        scan_again=bluetooth_scan_button(1200);time.sleep(.8);shot('bluetooth-scan-again');scan_again.wait()
-        assert bt_log.read_text().splitlines() == ['start','stop','start'], 'Second scan did not start'
-        stop_scan=bluetooth_scan_button(1200);time.sleep(.8);shot('bluetooth-stop');stop_scan.wait()
-        assert bt_log.read_text().splitlines() == ['start','stop','start','stop'], 'Stop scan did not release discovery'
-        bounded_scan=bluetooth_scan_button(14000)
-        time.sleep(13);shot('bluetooth-scan-complete');bounded_scan.wait()
-        assert bt_log.read_text().splitlines() == ['start','stop']*3, 'Discovery exceeded its 12 second deadline'
-
-        switch_scan=bluetooth_scan_button(1200);switch_scan.wait()
-        assert bt_log.read_text().splitlines() == ['start','stop']*3+['start'], 'Scan before menu switch did not start'
-        holder = probe(sound_x, 14, '--click-hold', 6000)
-        time.sleep(1)
-        shot('sound')
-        assert bt_log.read_text().splitlines() == ['start','stop']*4, 'Switching menus did not release discovery'
+        assert bt_log.read_text().splitlines()==['start','stop'], 'Closing Bluetooth did not release discovery'
+        reopen_bt=probe(bluetooth_x,14,'--click-hold',1200);reopen_bt.wait()
+        assert bt_log.read_text().splitlines()==['start','stop','start'], 'Reopening Bluetooth did not scan'
+        # Scanning ends automatically, with no manual stop/rescan controls.
+        bounded_scan=probe(bt_left+25,75,'--hover',13000)
+        bounded_scan.wait();shot('bluetooth-scan-complete')
+        assert bt_log.read_text().splitlines()==['start','stop']*2, 'Discovery exceeded its deadline'
+        probe(sound_x,14,'--hover',700).wait()
+        probe(bluetooth_x,14,'--hover',1400).wait()
+        assert bt_log.read_text().splitlines()==['start','stop']*2+['start'], 'Opening Bluetooth again did not scan'
+        holder=probe(sound_x,14,'--click-hold',6000)
+        time.sleep(1);shot('sound')
+        assert bt_log.read_text().splitlines()==['start','stop']*3, 'Switching menus did not release discovery'
         def bluetooth_status(expected):
             deadline=time.monotonic()+6
             while time.monotonic()<deadline:
@@ -389,24 +405,119 @@ while True:
             raise AssertionError(diagnostic)
         assert 'battery 73%' in bluetooth_status('Studio headphones')
         reopen=probe(bluetooth_x,14,'--hover',1800);time.sleep(1.2);reopen.wait()
-        pair=probe(bt_left+240,160,'--click-hold',2200);time.sleep(1.5);shot('bluetooth-pair-confirmation');pair.wait()
+        pair=probe(bt_left+26,246,'--click-hold',2200);time.sleep(1.5);shot('bluetooth-pair-confirmation');pair.wait()
         actions=Path(str(bt_log)+'.actions')
         assert actions.exists() and 'confirmation' in actions.read_text(), 'Pair did not register and invoke its agent'
-        cancel=probe(bt_left+95,96,'--click-hold',1600);cancel.wait()
+        cancel=probe(bt_left+95,104,'--click-hold',1600);cancel.wait()
         bluetooth_status('Nearby speaker (AA:BB:CC:DD:EE:FF) — discovered')
         assert 'paired' not in actions.read_text(), 'Cancel accepted Bluetooth pairing'
-        pair=probe(bt_left+240,160,'--click-hold',2200);time.sleep(1.5);pair.wait()
-        confirm=probe(bt_left+30,96,'--click-hold',1800);confirm.wait()
+        probe(wifi_x,14,'--hover',700).wait()
+        probe(bluetooth_x,14,'--hover',1400).wait()
+        pair=probe(bt_left+26,246,'--click-hold',2200);time.sleep(1.5);pair.wait()
+        confirm=probe(bt_left+30,104,'--click-hold',1800);confirm.wait()
         bluetooth_status('Nearby speaker (AA:BB:CC:DD:EE:FF) — connected')
         shot('bluetooth-paired')
-        disconnect=probe(bt_left+240,96,'--click-hold',1800);disconnect.wait()
+        disconnect=probe(bt_left+26,104,'--click-hold',1800);disconnect.wait()
         bluetooth_status('Nearby speaker (AA:BB:CC:DD:EE:FF) — saved')
-        reconnect=probe(bt_left+240,140,'--click-hold',1800);reconnect.wait()
+        reconnect=probe(bt_left+26,216,'--click-hold',1800);reconnect.wait()
         bluetooth_status('Nearby speaker (AA:BB:CC:DD:EE:FF) — connected')
         assert actions.read_text().splitlines()==['confirmation','confirmation','paired','connected','disconnected','connected'], actions.read_text()
         shot('bluetooth-reconnected')
-        if '--bluetooth-only' in sys.argv[2:]:
-            print('Headless Bluetooth screenshots and logs:', DEST)
+        # Bluetooth shows an input screen only when BlueZ requests a secret.
+        paired_count = 1
+        for mode in ['pin', 'passkey']:
+            Path(str(bt_log)+'.mode').write_text(mode)
+            probe(wifi_x,14,'--hover',700).wait()
+            probe(bluetooth_x,14,'--hover',1400).wait()
+            probe(bt_left+26,216,'--click-hold',1800).wait()
+            shot('bluetooth-'+mode)
+            assert mode in actions.read_text().splitlines(), 'Pairing did not request '+mode
+            probe(bt_left+100,90,'--back',1400).wait()
+            bluetooth_status('Nearby speaker (AA:BB:CC:DD:EE:FF) — connected')
+            assert actions.read_text().splitlines().count('paired')==paired_count, 'Back accepted pairing'
+            probe(wifi_x,14,'--hover',700).wait()
+            probe(bluetooth_x,14,'--hover',1400).wait()
+            probe(bt_left+26,216,'--click-hold',1600).wait()
+            code=[2,3,4,5] if mode=='pin' else [2,3,4,5,6,7]
+            probe(bt_left+100,90,'--keys-only',*code,28).wait()
+            bluetooth_status('Desk keyboard (AA:BB:CC:DD:EE:FF) — connected')
+            paired_count += 1
+            time.sleep(1.2)
+            probe(bt_left+26,104,'--click-hold',1600).wait()
+            bluetooth_status('Desk keyboard (AA:BB:CC:DD:EE:FF) — discovered')
+        Path(str(bt_log)+'.mode').write_text('pin')
+        probe(wifi_x,14,'--hover',700).wait()
+        probe(bluetooth_x,14,'--hover',1400).wait()
+        probe(bt_left+26,216,'--click-hold',1600).wait()
+        probe(700,700,'--click-hold',900).wait();shot('bluetooth-outside-dismissed')
+        assert Image.open(DEST/'bluetooth-outside-dismissed.png').convert('RGB').getpixel((int(bt_left)+5,80))==(0,0,0), 'Outside click did not dismiss Bluetooth PIN'
+        assert actions.read_text().splitlines().count('paired')==paired_count, 'Outside click accepted pairing'
+        Path(str(bt_log)+'.mode').write_text('none')
+        probe(wifi_x,14,'--hover',700).wait()
+        probe(bluetooth_x,14,'--hover',1400).wait()
+        probe(bt_left+26,216,'--click-hold',1800).wait()
+        bluetooth_status('Desk keyboard (AA:BB:CC:DD:EE:FF) — connected')
+        shot('bluetooth-automatic')
+        assert 'automatic' in actions.read_text().splitlines(), 'No-input pairing did not finish'
+        probe(bt_left+285,51,'--click-hold',1400).wait()
+        shot('bluetooth-off')
+        stopped=bt_log.read_text().splitlines()
+        probe(wifi_x,14,'--hover',700).wait()
+        probe(bluetooth_x,14,'--hover',1400).wait()
+        assert bt_log.read_text().splitlines()==stopped, 'Disabled Bluetooth started discovery'
+        probe(bt_left+285,51,'--click-hold',1400).wait()
+        assert bt_log.read_text().splitlines()[-1]=='start', 'Enabling Bluetooth did not scan'
+        def assert_wireless_no_highlight(left, centers, prefix):
+            for row,center in enumerate(centers):
+                for offset in [-14, 0, 14]:
+                    probe(left+100,center+offset,'--hover',350).wait()
+                    shot(prefix+'-hover')
+                    im=Image.open(DEST/(prefix+'-hover.png')).convert('RGB')
+                    colors=[im.getpixel((int(left)+285,int(y))) for y in centers]
+                    assert len(set(colors))==1, ("Unexpected row highlight",prefix,row,offset,colors)
+            probe(left+100,centers[0]+21,'--hover',350).wait();shot(prefix+'-gap')
+            im=Image.open(DEST/(prefix+'-gap.png')).convert('RGB')
+            assert im.getpixel((int(left)+285,int(centers[0])))==im.getpixel((int(left)+285,int(centers[1]))), 'Highlight stuck in a row gap'
+        assert_wireless_no_highlight(bt_left,[104,145,186],'bluetooth')
+        # Bottom-row tooltips must remain visible below the popup surface.
+        def assert_bottom_tooltip(left, bottom_row, prefix):
+            probe(left+100,51,'--hover',350).wait();shot(prefix+'-before-tooltip')
+            before=Image.open(DEST/(prefix+'-before-tooltip.png')).convert('RGB')
+            popup_bottom=max(y for y in range(28,500) if before.getpixel((int(left)+5,y))!=(0,0,0))
+            probe(left+100,bottom_row,'--hover',1600).wait();shot(prefix+'-bottom-tooltip')
+            after=Image.open(DEST/(prefix+'-bottom-tooltip.png')).convert('RGB')
+            below=(int(left),popup_bottom+1,min(1600,int(left)+320),popup_bottom+85)
+            assert ImageChops.difference(before.crop(below),after.crop(below)).getbbox(), 'Bottom tooltip was clipped'
+        assert_bottom_tooltip(bt_left,186,'bluetooth')
+        # Wi-Fi scans on opening, connects open networks directly, and supports Back.
+        probe(wifi_x,14,'--hover',1600).wait();shot('wifi-networks')
+        wifi_left=max(8,min(wifi_x-160,1600-328))
+        assert_wireless_no_highlight(wifi_left,[104,175,216],'wifi')
+        assert_bottom_tooltip(wifi_left,216,'wifi')
+        probe(wifi_left+100,175,'--click-hold',500).wait()
+        assert json.loads(wifi_state.read_text())['active']=='Home', 'Clicking the name connected Wi-Fi'
+        assert any(a[-2:]==['--rescan','yes'] for a in map(json.loads,wifi_log.read_text().splitlines())), 'Wi-Fi did not scan on opening'
+        probe(wifi_left+26,175,'--click-hold',1200).wait()
+        assert json.loads(wifi_state.read_text())['active']=='Cafe', 'Open Wi-Fi did not connect directly'
+        probe(wifi_left+26,216,'--click-hold',1200).wait();shot('wifi-password')
+        probe(700,700,'--click-hold',900).wait();shot('wifi-outside-dismissed')
+        assert Image.open(DEST/'wifi-outside-dismissed.png').convert('RGB').getpixel((int(wifi_left)+5,80))==(0,0,0), 'Outside click did not dismiss Wi-Fi password'
+        assert json.loads(wifi_state.read_text())['active']=='Cafe', 'Outside click connected Wi-Fi'
+        probe(wifi_x,14,'--hover',1200).wait()
+        probe(wifi_left+26,216,'--click-hold',1200).wait()
+        probe(wifi_left+100,80,'--back',1200).wait();shot('wifi-back')
+        assert json.loads(wifi_state.read_text())['active']=='Cafe', 'Back connected the protected network'
+        probe(wifi_left+26,216,'--click-hold',1200).wait()
+        probe(wifi_left+100,80,'--keys-only',2,3,4,5,28).wait()
+        assert json.loads(wifi_state.read_text())['active']=='Guest', 'Wi-Fi password input or Enter failed'
+        shot('wifi-connected')
+        probe(wifi_left+285,51,'--click-hold',1200).wait();shot('wifi-off')
+        assert not json.loads(wifi_state.read_text())['enabled'], 'Wi-Fi switch did not turn off'
+        probe(wifi_left+285,51,'--click-hold',1200).wait()
+        assert json.loads(wifi_state.read_text())['enabled'], 'Wi-Fi switch did not turn on'
+
+        if '--bluetooth-only' in sys.argv[2:] or '--trays-only' in sys.argv[2:]:
+            print('Headless wireless tray screenshots and logs:', DEST)
             sys.exit(0)
 
         holder=probe(sound_x,14,'--click-hold',6000);time.sleep(.8)
