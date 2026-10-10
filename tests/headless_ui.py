@@ -160,6 +160,8 @@ while True:
         wifi_x=battery_left-24
         sound_x=battery_left-64
         cpu_x=battery_left-124
+        search_fixture=start(['python3','-c',
+            'import ctypes,time; ctypes.CDLL(None).prctl(15,b"qzprocess",0,0,0); time.sleep(120)'], 'cpu-search-fixture.log')
         time.sleep(2)
         def cpu_ticks(pid):
             fields=Path(f'/proc/{pid}/stat').read_text().split()
@@ -169,13 +171,39 @@ while True:
         idle_cpu=(cpu_ticks(bar.pid)-previous)/os.sysconf('SC_CLK_TCK')/(time.monotonic()-started)*100
         (DEST/'idle-cpu.txt').write_text(f'{idle_cpu:.2f}% CPU\n')
         assert idle_cpu<15, f'Idle bar continually redraws: {idle_cpu:.1f}% CPU'
-        cpu_hover=probe(cpu_x,14,'--hover',2600);time.sleep(1.5);shot('process-monitor')
-        monitor=Image.open(DEST/'process-monitor.png').convert('RGB')
+        cpu_hover=probe(cpu_x,14,'--hover',5000)
         monitor_left=max(8,min(cpu_x-160,1600-328))
-        text_pixels=sum(1 for y in range(90,180) for x in range(int(monitor_left)+12,int(monitor_left)+155)
-                        if min(monitor.getpixel((x,y)))>100)
+        deadline=time.monotonic()+4
+        while time.monotonic()<deadline:
+            time.sleep(.2);shot('process-monitor')
+            monitor=Image.open(DEST/'process-monitor.png').convert('RGB')
+            text_pixels=sum(1 for y in range(90,180) for x in range(int(monitor_left)+12,int(monitor_left)+155)
+                            if min(monitor.getpixel((x,y)))>100)
+            if text_pixels>20:break
         assert text_pixels>20, 'CPU monitor has no process rows'
         cpu_hover.wait()
+        # CPU search takes focus on hover and finds quiet processes.
+        # Typing stays on the private headless keyboard.
+        typed=probe(cpu_x,14,'--keys-only',16,44,25,19,24,46,18,31,31);typed.wait()
+        time.sleep(.4);shot('process-search-name')
+        filtered=Image.open(DEST/'process-search-name.png').convert('RGB')
+        assert filtered.getpixel((int(monitor_left)+20,120))!=(0,0,0), 'Process name search lost its result row'
+        assert filtered.getpixel((int(monitor_left)+20,210))==(0,0,0), 'Process name search did not filter rows'
+        name_bounds=(int(monitor_left)+12,110,int(monitor_left)+118,138)
+        name_result=filtered.crop(name_bounds)
+        digit_keys={'0':11,'1':2,'2':3,'3':4,'4':5,'5':6,'6':7,'7':8,'8':9,'9':10}
+        typed=probe(cpu_x,14,'--keys-only',*[14]*9,*[digit_keys[n] for n in str(search_fixture.pid)]);typed.wait()
+        time.sleep(.4);shot('process-search-pid')
+        filtered=Image.open(DEST/'process-search-pid.png').convert('RGB')
+        assert filtered.getpixel((int(monitor_left)+20,120))!=(0,0,0), 'PID search lost its result row'
+        assert filtered.getpixel((int(monitor_left)+20,210))==(0,0,0), 'PID search did not filter rows'
+        assert ImageChops.difference(name_result,filtered.crop(name_bounds)).getbbox() is None, 'Name and PID searches found different processes'
+        typed=probe(cpu_x,14,'--keys-only',*[14]*len(str(search_fixture.pid)),44,44,44,44);typed.wait()
+        time.sleep(.4);shot('process-search-empty')
+        assert Image.open(DEST/'process-search-empty.png').convert('RGB').getpixel((int(monitor_left)+20,210))==(0,0,0), 'Unmatched process search retained rows'
+        assert ImageChops.difference(name_result,Image.open(DEST/'process-search-empty.png').convert('RGB').crop(name_bounds)).getbbox(), 'Unmatched search still shows the matching process'
+        typed=probe(cpu_x,14,'--keys-only',14,14,14,14);typed.wait()
+        leave_cpu=probe(600,600,'--hover',900);leave_cpu.wait()
         cpu_clicked=probe(cpu_x,14,'--click-hold',1000);time.sleep(.6);shot('process-monitor-clicked');cpu_clicked.wait()
         assert Image.open(DEST/'process-monitor-clicked.png').convert('RGB').getpixel((int(monitor_left)+5,80))!=(0,0,0), 'Clicking CPU did not open its monitor'
         leave_cpu=probe(600,600,'--hover',900);leave_cpu.wait()
@@ -289,6 +317,20 @@ while True:
         baseline=Image.open(DEST / 'fixture.png').convert('RGB')
         bounds=ImageChops.difference(image,baseline).crop((0,28,1600,900)).getbbox()
         assert bounds and 400<=bounds[2]-bounds[0]<=450 and 150<=bounds[3]-bounds[1]<=330, f'Preview does not fit its display bounds: {bounds}'
+        # Server decorations are absent from toplevel captures. The preview
+        # must draw their title rows instead of stretching the app over them.
+        def title_colors(name):
+            pixels=Image.open(DEST/f'{name}.png').convert('RGB').crop((20,64,420,280))
+            counts={color:count for count,color in pixels.getcolors(pixels.width*pixels.height)}
+            return {color:counts.get(color,0) for color in [(40,85,119),(34,34,34)]}
+        colors=title_colors('workspace')
+        assert all(count>100 for count in colors.values()), f'Missing tiled title bars: {colors}'
+        for layout in ['tabbed','stacking']:
+            run(['swaymsg','layout '+layout]);time.sleep(.8)
+            titles=probe(120,14,'--hover',1200);time.sleep(.7);shot('decorations-'+layout);titles.wait()
+            colors=title_colors('decorations-'+layout)
+            assert all(count>100 for count in colors.values()), f'Missing {layout} title bars: {colors}'
+        run(['swaymsg','layout splith']);time.sleep(.8)
         def preview_title(name):
             return Image.open(DEST/f'{name}.png').convert('RGB').crop((20,40,130,56)).tobytes()
         title_one=preview_title('workspace')
