@@ -135,7 +135,8 @@ clicking again closes it until the pointer leaves that control.
   urgent, and audible workspaces have distinct accents and a reserved speaker
   slot. Live window captures require Sway 1.12+ and its capture protocols; older
   Sway shows positions and titles. Hidden tabs and fullscreen windows are
-  respected. Previews use area downsampling with bilinear display filtering.
+  respected. Previews show window content without recreating Sway title bars or
+  borders, using area downsampling with bilinear display filtering.
   Captures run concurrently on damage, reuse sessions/buffers, and target 60 FPS;
   presentation follows compositor frame callbacks, and changed thumbnails invalidate
   their raster cache even after the opening fade. Capture stays in memory and

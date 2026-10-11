@@ -2674,21 +2674,6 @@ impl Ui {
                     vec2(r.w * scale, r.h * scale),
                 )
             };
-            let colors = s.palette.0[w.state];
-            painter.rect_filled(map(w.rect), 0, colors[3]);
-            for decoration in &w.decorations {
-                let title = map(decoration.rect);
-                let colors = s.palette.0[decoration.state];
-                painter.rect_filled(title, 0, colors[0]);
-                painter.rect_filled(title.shrink(scale), 0, colors[1]);
-                painter.with_clip_rect(title.intersect(canvas)).text(
-                    title.left_center() + vec2(4. * scale, 0.),
-                    egui::Align2::LEFT_CENTER,
-                    &decoration.title,
-                    egui::FontId::proportional((decoration.rect.h - 6.).max(1.) * scale),
-                    colors[2],
-                );
-            }
             let rect = map(w.content);
             painter.rect_filled(rect, 0, config::get().color("preview_window", self.dark));
             if w.pixels.is_some() {
@@ -2888,26 +2873,28 @@ fn tray_menu_rows(ui: &mut egui::Ui, rows: &[crate::tray::MenuRow]) -> Option<i3
             None => row.label.clone(),
         };
         if row.children.is_empty() {
-            let width = ui.available_width();
             if ui
-                .add_enabled(
-                    row.enabled,
-                    egui::Button::new(label)
-                        .frame(false)
-                        .min_size(vec2(width, config::get().number("layout.row_height")))
-                        .wrap_mode(egui::TextWrapMode::Truncate),
-                )
+                .add_enabled_ui(row.enabled, |ui| action_button(ui, &label))
+                .inner
                 .clicked()
             {
                 clicked = Some(row.id);
             }
         } else {
             ui.add_enabled_ui(row.enabled, |ui| {
-                egui::CollapsingHeader::new(label)
-                    .id_salt(row.id)
-                    .show(ui, |ui| {
-                        clicked = clicked.or_else(|| tray_menu_rows(ui, &row.children));
-                    });
+                let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
+                    ui.ctx(),
+                    ui.make_persistent_id(row.id),
+                    false,
+                );
+                let arrow = if state.is_open() { "▾" } else { "▸" };
+                let response = action_button(ui, &format!("{arrow}  {label}"));
+                if response.clicked() {
+                    state.toggle(ui);
+                }
+                state.show_body_indented(&response, ui, |ui| {
+                    clicked = clicked.or_else(|| tray_menu_rows(ui, &row.children));
+                });
             });
         }
     }
