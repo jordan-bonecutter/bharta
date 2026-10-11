@@ -121,6 +121,16 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     let keys_only = a.get(5).is_some_and(|arg| arg == "--keys-only");
+    if a.get(5).is_some_and(|arg| arg == "--scroll") {
+        pointer.axis(timestamp(), wl_pointer::Axis::VerticalScroll, a[6].parse()?);
+        pointer.frame();
+        q.roundtrip(&mut s)?;
+        std::thread::sleep(Duration::from_millis(500));
+        pointer.destroy();
+        c.flush()?;
+        return Ok(());
+    }
+    let press_hold = a.get(5).is_some_and(|arg| arg == "--press-hold");
     let hover_click = a.get(5).is_some_and(|arg| arg == "--hover-click");
     if hover_click {
         anyhow::ensure!(a.len() == 9, "--hover-click needs X Y READY_FILE");
@@ -166,6 +176,9 @@ fn main() -> anyhow::Result<()> {
         q.roundtrip(&mut s)?;
         std::thread::sleep(Duration::from_millis(150));
     }
+    if press_hold {
+        std::thread::sleep(Duration::from_millis(a[6].parse()?));
+    }
     let dragging = a.get(5).is_some_and(|arg| arg == "--drag");
     if dragging {
         anyhow::ensure!(a.len() == 8, "--drag needs END_X END_Y");
@@ -206,7 +219,10 @@ fn main() -> anyhow::Result<()> {
         std::thread::sleep(Duration::from_millis(
             a.get(6).map(|v| v.parse()).transpose()?.unwrap_or(2000),
         ));
-    } else if a.len() > 5 && !dragging && !hover_click {
+    } else if press_hold {
+        // Let the release reach the app before destroying its virtual pointer.
+        std::thread::sleep(Duration::from_millis(300));
+    } else if a.len() > 5 && !dragging && !hover_click && !press_hold {
         std::thread::sleep(Duration::from_millis(500));
         let text = concat!(include_str!("../tests/fixtures/us.xkb"), "\0");
         let mut file = tempfile::tempfile()?;

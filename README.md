@@ -138,8 +138,9 @@ clicking again closes it until the pointer leaves that control.
   are coalesced. Playback changes keep the speaker button in place.
 - Wi-Fi: aligned signal percentages, live connected RSSI on iwd, radio switch,
   scan, connect/disconnect, saved credentials, and a password
-  field with reveal and clipboard paste. Enterprise and hidden networks can be
-  provisioned in system network settings.
+  field with reveal and clipboard paste. “Join hidden network…” accepts an exact
+  network name and password; leave the password empty for an open network.
+  Enterprise networks can be provisioned in system network settings.
 - Bluetooth: connected, saved, and discovered devices through BlueZ with names,
   signal strength, and battery percentages when available. Paired devices stay
   at the top; nearby devices sort by strongest signal first. The bottom Bluetooth

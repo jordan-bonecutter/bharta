@@ -97,6 +97,7 @@ struct Ui {
     query: String,
     selection: usize,
     selected_network: Option<network::Network>,
+    hidden_ssid: Option<String>,
     password: String,
     reveal: bool,
     confirm_logout: bool,
@@ -196,6 +197,7 @@ impl Ui {
             query: String::new(),
             selection: 0,
             selected_network: None,
+            hidden_ssid: None,
             password: String::new(),
             reveal: false,
             confirm_logout: false,
@@ -227,6 +229,7 @@ impl Ui {
         self.panel = None;
         self.panel_rect = Rect::NOTHING;
         self.selected_network = None;
+        self.hidden_ssid = None;
         self.password.clear();
         self.bluetooth_pin.clear();
         self.preview = None;
@@ -301,6 +304,7 @@ impl Ui {
         self.selection = 0;
         self.password.clear();
         self.selected_network = None;
+        self.hidden_ssid = None;
         self.confirm_logout = false;
         self.focus_search = matches!(kind, Menu::Apps | Menu::Cpu);
         match &kind {
@@ -496,6 +500,7 @@ impl Ui {
                         self.network = Some(s);
                         if completed_action {
                             self.selected_network = None;
+                            self.hidden_ssid = None;
                             self.password.clear();
                         }
                         self.error.clear();
@@ -669,6 +674,8 @@ impl Ui {
                 Icon::Link => 17,
                 Icon::Unlink => 18,
                 Icon::Back => 19,
+                Icon::Eye(false) => 20,
+                Icon::Eye(true) => 21,
             }
         );
         let ctx = &self.ctx;
@@ -1209,7 +1216,9 @@ impl Ui {
         }
         let min_height = match &kind {
             Menu::Wifi => {
-                if self.selected_network.is_some() {
+                if self.hidden_ssid.is_some() {
+                    5. * config::get().number("layout.control_height")
+                } else if self.selected_network.is_some() {
                     4. * config::get().number("layout.control_height")
                 } else {
                     config::get().number("layout.control_height")
@@ -1299,6 +1308,15 @@ impl Ui {
                             ui.set_max_height(max_height);
                         }
                         let content_max_height = max_height;
+                        // Wi-Fi scrolls its network list independently so its
+                        // radio switch and hidden-network action remain visible.
+                        if kind == Menu::Wifi {
+                            self.wifi(ui);
+                            if !self.error.is_empty() {
+                                ui.add(egui::Label::new(&self.error).wrap());
+                            }
+                            return;
+                        }
                         egui::ScrollArea::vertical()
                             .min_scrolled_height(min_height.min(content_max_height))
                             .max_height(content_max_height)
@@ -1324,6 +1342,7 @@ impl Ui {
         });
         let pinned = (!self.query.is_empty() && kind != Menu::Cpu)
             || self.selected_network.is_some()
+            || self.hidden_ssid.is_some()
             || (kind == Menu::Bluetooth
                 && self.bluetooth.as_ref().is_some_and(|s| s.busy.is_some()))
             || self.confirm_logout
@@ -1355,7 +1374,7 @@ impl Ui {
         self.panel.as_ref().is_some_and(|p| {
             p.closing.is_none()
                 && match p.kind {
-                    Menu::Wifi => self.selected_network.is_some(),
+                    Menu::Wifi => self.selected_network.is_some() || self.hidden_ssid.is_some(),
                     Menu::Bluetooth => self.bluetooth.as_ref().is_some_and(|s| s.prompt.is_some()),
                     _ => false,
                 }
@@ -1366,6 +1385,7 @@ impl Ui {
             p.closing.is_none()
                 && (matches!(p.kind, Menu::Apps | Menu::Cpu)
                     || self.selected_network.is_some()
+                    || self.hidden_ssid.is_some()
                     || (p.kind == Menu::Bluetooth
                         && self.bluetooth.as_ref().is_some_and(|s| s.busy.is_some()))
                     || p.clicked)
@@ -1572,8 +1592,9 @@ fn output_row(ui: &mut egui::Ui, selected: bool, name: &str, device: &str) -> eg
 }
 impl Ui {
     fn launcher(&mut self, ui: &mut egui::Ui) {
-        let search = ui.add(
-            egui::TextEdit::singleline(&mut self.query)
+        let search = add_text_field(
+            ui,
+            text_field(&mut self.query)
                 .hint_text("Search applications")
                 .desired_width(f32::INFINITY),
         );
@@ -1643,7 +1664,103 @@ impl Ui {
             .on_hover_text(if connected { "Disconnect" } else { "Connect" })
             .clicked()
     }
+    fn secret_field(&mut self, ui: &mut egui::Ui, pairing: bool) {
+        let image = egui::Image::new((
+            self.icon_at_size(Icon::Eye(!self.reveal), 16.),
+            vec2(16., 16.),
+        ));
+        // Reserve both slots before drawing either widget. Masked and visible
+        // glyphs must not change the field, eye button, or following rows.
+        let (row, _) =
+            ui.allocate_exact_size(vec2(ui.available_width(), 32.), egui::Sense::hover());
+        ui.scope_builder(egui::UiBuilder::new().max_rect(row), |ui| {
+            let width = (row.width() - 32. - ui.spacing().item_spacing.x).max(1.);
+            let (value, hint, id) = if pairing {
+                (&mut self.bluetooth_pin, "Pairing code", "bluetooth-pin")
+            } else {
+                (&mut self.password, "Password", "wifi-password")
+            };
+            let input = put_text_field(
+                ui,
+                Rect::from_min_size(row.min, vec2(width, row.height())),
+                text_field(value)
+                    .password(!self.reveal)
+                    .hint_text(hint)
+                    .id(egui::Id::new(id))
+                    .desired_width(width),
+            );
+            if self.focus_search {
+                input.request_focus();
+                self.focus_search = false;
+            }
+            let label = match (pairing, self.reveal) {
+                (true, true) => "Hide pairing code",
+                (true, false) => "Show pairing code",
+                (false, true) => "Hide password",
+                (false, false) => "Show password",
+            };
+            let response = ui
+                .put(
+                    Rect::from_min_size(
+                        pos2(row.right() - 32., row.top()),
+                        vec2(32., row.height()),
+                    ),
+                    egui::Button::image(image)
+                        .frame(false)
+                        .min_size(vec2(32., 32.)),
+                )
+                .on_hover_text(label);
+            response
+                .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
+            if response.clicked() {
+                self.reveal = !self.reveal;
+                input.request_focus();
+            }
+        });
+    }
     fn wifi(&mut self, ui: &mut egui::Ui) {
+        if self.hidden_ssid.is_some() {
+            if self.connection_back(ui, "Hidden network") {
+                self.hidden_ssid = None;
+                self.password.clear();
+                self.error.clear();
+                return;
+            }
+            ui.add_space(8.);
+            let ssid = self.hidden_ssid.as_mut().unwrap();
+            let input = add_text_field(
+                ui,
+                text_field(ssid)
+                    .hint_text("Network name")
+                    .desired_width(f32::INFINITY),
+            );
+            if self.focus_search {
+                input.request_focus();
+                self.focus_search = false;
+            }
+            ui.add_space(8.);
+            self.secret_field(ui, false);
+            ui.add_space(8.);
+            let valid = self
+                .hidden_ssid
+                .as_ref()
+                .is_some_and(|s| !s.is_empty() && s.len() <= 32 && !s.contains('\0'));
+            if ui
+                .add_enabled_ui(valid, |ui| action_button(ui, "Connect"))
+                .inner
+                .clicked()
+                || (valid && ui.input(|i| i.key_pressed(egui::Key::Enter)))
+            {
+                self.services.network(
+                    self.serial,
+                    Job::ConnectHidden(
+                        self.hidden_ssid.clone().unwrap(),
+                        std::mem::take(&mut self.password),
+                    ),
+                );
+            }
+            return;
+        }
         if let Some(n) = self.selected_network.clone() {
             if self.connection_back(ui, &n.ssid) {
                 self.selected_network = None;
@@ -1652,19 +1769,11 @@ impl Ui {
                 return;
             }
             if !n.active && !n.security.is_empty() {
-                let input = ui.add(
-                    egui::TextEdit::singleline(&mut self.password)
-                        .password(!self.reveal)
-                        .hint_text("Password")
-                        .desired_width(f32::INFINITY),
-                );
-                if self.focus_search {
-                    input.request_focus();
-                    self.focus_search = false;
-                }
-                toggle(ui, &mut self.reveal, "Show password");
+                ui.add_space(8.);
+                self.secret_field(ui, false);
+                ui.add_space(8.);
             }
-            if flat(ui, if n.active { "Disconnect" } else { "Connect" }).clicked()
+            if action_button(ui, if n.active { "Disconnect" } else { "Connect" }).clicked()
                 || ui.input(|i| i.key_pressed(egui::Key::Enter))
             {
                 self.services.network(
@@ -1682,64 +1791,84 @@ impl Ui {
         if radio_header(ui, &mut enabled, "Wi-Fi").changed() {
             self.services.network(self.serial, Job::Radio(enabled));
         }
-        if let Some(s) = &self.network {
-            if s.networks.is_empty() {
-                ui.label(if enabled {
-                    "No networks found"
-                } else {
-                    "Wi-Fi is off"
-                });
-            }
-            let networks = s.networks.clone();
-            for (title, connected) in [("Connected networks", true), ("Available networks", false)]
-            {
-                if !networks.iter().any(|n| n.active == connected) {
-                    continue;
-                }
-                if !connected && networks.iter().any(|n| n.active) {
-                    connection_separator(ui, self.dark);
-                }
-                ui.weak(title);
-                for n in networks.iter().filter(|n| n.active == connected).cloned() {
-                    let (rect, response) = connection_row(ui, (&n.device, &n.bssid));
-                    paint_row_name(ui, rect, &n.ssid, 24.);
-                    paint_signal(
-                        ui,
-                        Rect::from_center_size(
-                            pos2(rect.right() - 10., rect.center().y),
-                            vec2(16., 12.),
-                        ),
-                        n.signal,
-                    );
-                    let mut controls =
-                        ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_center_size(
-                            pos2(rect.left() + 14., rect.center().y),
-                            vec2(28., 28.),
-                        )));
-                    let action = self.connection_button(&mut controls, n.active, true);
-                    response.on_hover_text(
-                        n.rssi_dbm
-                            .map(|r| format!("{}\n{r} dBm", n.ssid))
-                            .unwrap_or_else(|| n.ssid.clone()),
-                    );
-                    if action {
-                        if n.active {
-                            self.services
-                                .network(self.serial, Job::Disconnect(n.device));
-                        } else if n.security.is_empty() || n.security == "--" {
-                            self.services
-                                .network(self.serial, Job::Connect(n, String::new()));
+        let list_height = config::get()
+            .number("layout.wifi_list_max_height")
+            .min((ui.available_height() - 64.).max(1.));
+        egui::ScrollArea::vertical()
+            .id_salt("wifi-networks")
+            .max_height(list_height)
+            .show(ui, |ui| {
+                if let Some(s) = &self.network {
+                    if s.networks.is_empty() {
+                        ui.label(if enabled {
+                            "No networks found"
                         } else {
-                            self.selected_network = Some(n);
-                            self.password.clear();
-                            self.reveal = false;
-                            self.focus_search = true;
+                            "Wi-Fi is off"
+                        });
+                    }
+                    let networks = s.networks.clone();
+                    for (title, connected) in
+                        [("Connected networks", true), ("Available networks", false)]
+                    {
+                        if !networks.iter().any(|n| n.active == connected) {
+                            continue;
+                        }
+                        if !connected && networks.iter().any(|n| n.active) {
+                            connection_separator(ui, self.dark);
+                        }
+                        ui.weak(title);
+                        for n in networks.iter().filter(|n| n.active == connected).cloned() {
+                            let (rect, response) = connection_row(ui, (&n.device, &n.bssid));
+                            paint_row_name(ui, rect, &n.ssid, 24.);
+                            paint_signal(
+                                ui,
+                                Rect::from_center_size(
+                                    pos2(rect.right() - 10., rect.center().y),
+                                    vec2(16., 12.),
+                                ),
+                                n.signal,
+                            );
+                            let mut controls = ui.new_child(egui::UiBuilder::new().max_rect(
+                                Rect::from_center_size(
+                                    pos2(rect.left() + 14., rect.center().y),
+                                    vec2(28., 28.),
+                                ),
+                            ));
+                            let action = self.connection_button(&mut controls, n.active, true);
+                            response.on_hover_text(
+                                n.rssi_dbm
+                                    .map(|r| format!("{}\n{r} dBm", n.ssid))
+                                    .unwrap_or_else(|| n.ssid.clone()),
+                            );
+                            if action {
+                                if n.active {
+                                    self.services
+                                        .network(self.serial, Job::Disconnect(n.device));
+                                } else if n.security.is_empty() || n.security == "--" {
+                                    self.services
+                                        .network(self.serial, Job::Connect(n, String::new()));
+                                } else {
+                                    self.selected_network = Some(n);
+                                    self.password.clear();
+                                    self.reveal = false;
+                                    self.focus_search = true;
+                                }
+                            }
                         }
                     }
+                } else {
+                    ui.label("Scanning…");
                 }
+            });
+        if enabled {
+            connection_separator(ui, self.dark);
+            if action_button(ui, "Join hidden network…").clicked() {
+                self.hidden_ssid = Some(String::new());
+                self.password.clear();
+                self.reveal = false;
+                self.focus_search = true;
+                self.error.clear();
             }
-        } else {
-            ui.label("Scanning…");
         }
     }
     fn bluetooth(&mut self, ui: &mut egui::Ui) {
@@ -1777,6 +1906,7 @@ impl Ui {
                 let _ = self.services.bluetooth.send(bluetooth::Request::Cancel);
                 return;
             }
+            ui.add_space(8.);
             match prompt {
                 bluetooth::Prompt::Confirm(message) => {
                     ui.label(message);
@@ -1794,14 +1924,9 @@ impl Ui {
                 }
                 bluetooth::Prompt::Pin | bluetooth::Prompt::Passkey => {
                     ui.label("Enter the device’s pairing code");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.bluetooth_pin)
-                            .password(!self.reveal)
-                            .hint_text("Pairing code")
-                            .id(egui::Id::new("bluetooth-pin"))
-                            .desired_width(ui.available_width()),
-                    );
-                    toggle(ui, &mut self.reveal, "Show pairing code");
+                    ui.add_space(4.);
+                    self.secret_field(ui, true);
+                    ui.add_space(8.);
                     ui.horizontal(|ui| {
                         if ui.add(egui::Button::new("Pair").frame(false)).clicked()
                             || ui.input(|i| i.key_pressed(egui::Key::Enter))
@@ -2197,8 +2322,9 @@ impl Ui {
                 .map(|v| format!("CPU  {v:.0}%"))
                 .unwrap_or_else(|| "CPU".into()),
         );
-        let search = ui.add(
-            egui::TextEdit::singleline(&mut self.query)
+        let search = add_text_field(
+            ui,
+            text_field(&mut self.query)
                 .hint_text("Search processes")
                 .desired_width(f32::INFINITY),
         );
@@ -2459,4 +2585,50 @@ fn volume_slider(ui: &mut egui::Ui, value: &mut f32, width: f32) -> egui::Respon
         response
     })
     .inner
+}
+
+// Give every text input the same comfortable vertical padding.
+fn text_field(value: &mut String) -> egui::TextEdit<'_> {
+    egui::TextEdit::singleline(value).margin(egui::Margin::symmetric(6, 7))
+}
+
+fn add_text_field(ui: &mut egui::Ui, edit: egui::TextEdit<'_>) -> egui::Response {
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 32.), egui::Sense::hover());
+    put_text_field(ui, rect, edit)
+}
+
+fn put_text_field(ui: &mut egui::Ui, rect: Rect, edit: egui::TextEdit<'_>) -> egui::Response {
+    // egui's default text-edit frame expands with hover/focus visuals. Use a
+    // fixed frame and paint its outline without changing the content bounds.
+    let frame = egui::Frame::new()
+        .inner_margin(egui::Margin::symmetric(6, 7))
+        .fill(ui.visuals().text_edit_bg_color())
+        .corner_radius(3);
+    let response = ui.put(rect, edit.frame(frame).vertical_align(egui::Align::Center));
+    let color = if response.has_focus() {
+        ui.visuals().selection.stroke.color
+    } else {
+        config::get().color("slider_border", ui.visuals().dark_mode)
+    };
+    ui.painter().rect_stroke(
+        rect,
+        3,
+        egui::Stroke::new(1_f32, color),
+        egui::StrokeKind::Inside,
+    );
+    response
+}
+
+fn action_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
+    ui.add(
+        egui::Button::new("")
+            .left_text(label)
+            .fill(config::get().color("active_widget", ui.visuals().dark_mode))
+            .stroke(egui::Stroke::new(
+                1_f32,
+                config::get().color("slider_border", ui.visuals().dark_mode),
+            ))
+            .corner_radius(3)
+            .min_size(vec2(ui.available_width(), 28.)),
+    )
 }

@@ -5,6 +5,7 @@ pub enum Job {
     Scan(bool),
     Radio(bool),
     Connect(network::Network, String),
+    ConnectHidden(String, String),
     Disconnect(String),
 }
 pub enum Event {
@@ -95,6 +96,7 @@ impl Services {
                 Job::Scan(rescan) => network::scan(rescan),
                 Job::Radio(on) => network::radio(on),
                 Job::Connect(n, password) => network::connect(&n, password),
+                Job::ConnectHidden(ssid, password) => network::connect_hidden(&ssid, password),
                 Job::Disconnect(device) => network::disconnect(&device),
             }
             .map_err(|e| e.to_string());

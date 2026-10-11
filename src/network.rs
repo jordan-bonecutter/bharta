@@ -121,20 +121,35 @@ pub fn connect(network: &Network, password: String) -> Result<Snapshot> {
     if network.backend == Backend::Iwd {
         return crate::iwd::connect(network, password);
     }
+    connect_nm(&network.bssid, &network.device, false, password)
+}
+pub fn connect_hidden(ssid: &str, password: String) -> Result<Snapshot> {
+    validate_ssid(ssid)?;
+    if crate::iwd::active()? {
+        return crate::iwd::connect_hidden(ssid, password);
+    }
+    connect_nm(ssid, "", true, password)
+}
+fn validate_ssid(ssid: &str) -> Result<()> {
+    if ssid.is_empty() || ssid.len() > 32 || ssid.contains('\0') {
+        bail!("Network name must contain 1–32 bytes and no NUL characters.");
+    }
+    Ok(())
+}
+fn connect_nm(target: &str, device: &str, hidden: bool, password: String) -> Result<Snapshot> {
     // Feed secrets via stdin to --ask; never expose a password in argv or logs.
     let mut command = Command::new("nmcli");
     command.env("LC_ALL", "C").args(["--wait", "25"]);
     if !password.is_empty() {
         command.arg("--ask");
     }
-    command.args([
-        "device",
-        "wifi",
-        "connect",
-        &network.bssid,
-        "ifname",
-        &network.device,
-    ]);
+    command.args(["device", "wifi", "connect", target]);
+    if !device.is_empty() {
+        command.args(["ifname", device]);
+    }
+    if hidden {
+        command.args(["hidden", "yes"]);
+    }
     let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
@@ -177,5 +192,13 @@ mod tests {
     #[test]
     fn skips_hidden_and_malformed_rows() {
         assert!(parse(":aa::10:--:1:wlan0\nbad").is_empty());
+    }
+    #[test]
+    fn hidden_ssid_validation_preserves_spaces_and_counts_bytes() {
+        assert!(validate_ssid("  Cafe: guest\\name  ").is_ok());
+        assert!(validate_ssid(&"é".repeat(16)).is_ok());
+        for ssid in [String::new(), "é".repeat(17), "bad\0name".into()] {
+            assert!(validate_ssid(&ssid).is_err());
+        }
     }
 }

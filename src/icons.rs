@@ -5,6 +5,7 @@ pub enum Icon {
     Link,
     Unlink,
     Back,
+    Eye(bool),
     Apps,
     Logout,
     Charging,
@@ -129,6 +130,30 @@ pub fn draw(pix: &mut Pixmap, icon: Icon, x: f32, y: f32, size: f32, scale: f32,
                 &paint,
                 &Stroke {
                     width: 2.,
+                    line_cap: tiny_skia::LineCap::Round,
+                    line_join: tiny_skia::LineJoin::Round,
+                    ..Default::default()
+                },
+                transform,
+                None,
+            );
+        }
+        Icon::Eye(crossed) => {
+            let mut p = PathBuilder::new();
+            p.move_to(2., 12.);
+            p.cubic_to(6., 4., 18., 4., 22., 12.);
+            p.cubic_to(18., 20., 6., 20., 2., 12.);
+            p.close();
+            p.push_circle(12., 12., 3.);
+            if crossed {
+                p.move_to(3., 3.);
+                p.line_to(21., 21.);
+            }
+            pix.stroke_path(
+                &p.finish().unwrap(),
+                &paint,
+                &Stroke {
+                    width: 1.8,
                     line_cap: tiny_skia::LineCap::Round,
                     line_join: tiny_skia::LineJoin::Round,
                     ..Default::default()

@@ -147,6 +147,8 @@ pub fn disconnect(device: &str) -> Result<Snapshot> {
 struct Agent {
     owner: String,
     network: String,
+    hidden: Option<(String, String)>,
+    connection: Connection,
     secret: std::sync::Mutex<Option<String>>,
 }
 #[zbus::interface(name = "net.connman.iwd.Agent")]
@@ -156,9 +158,28 @@ impl Agent {
         network: ObjectPath<'_>,
         #[zbus(header)] header: zbus::message::Header<'_>,
     ) -> zbus::fdo::Result<String> {
-        if header.sender().map(|s| s.as_str()) != Some(self.owner.as_str())
-            || network.as_str() != self.network
-        {
+        if header.sender().map(|s| s.as_str()) != Some(self.owner.as_str()) {
+            return Err(zbus::fdo::Error::AccessDenied(
+                "Unexpected credential request".into(),
+            ));
+        }
+        let expected = if let Some((ssid, station)) = &self.hidden {
+            proxy(
+                &self.connection,
+                network.as_str(),
+                "net.connman.iwd.Network",
+            )
+            .ok()
+            .is_some_and(|p| {
+                p.get_property::<String>("Name").ok().as_ref() == Some(ssid)
+                    && p.get_property::<OwnedObjectPath>("Device")
+                        .ok()
+                        .is_some_and(|d| d.as_str() == station)
+            })
+        } else {
+            network.as_str() == self.network
+        };
+        if !expected {
             return Err(zbus::fdo::Error::AccessDenied(
                 "Unexpected credential request".into(),
             ));
@@ -179,8 +200,51 @@ impl Agent {
 }
 pub fn connect(network: &Network, password: String) -> Result<Snapshot> {
     let c = Connection::system()?;
+    connect_with_agent(&c, &network.bssid, None, password)
+}
+pub fn connect_hidden(ssid: &str, password: String) -> Result<Snapshot> {
+    let c = Connection::system()?;
+    let objects = ObjectManagerProxy::builder(&c)
+        .destination(SERVICE)?
+        .path("/")?
+        .build()?
+        .get_managed_objects()?;
+    let station = objects
+        .iter()
+        .find_map(|(path, interfaces)| {
+            if interfaces.contains_key("net.connman.iwd.Station")
+                && proxy(&c, path.as_str(), "net.connman.iwd.Device")
+                    .ok()?
+                    .get_property::<bool>("Powered")
+                    .ok()?
+            {
+                Some(path.to_string())
+            } else {
+                None
+            }
+        })
+        .context("No powered Wi-Fi adapter")?;
+    // Already provisioned hidden networks use the ordinary Network API.
+    for (path, interfaces) in &objects {
+        if interfaces.contains_key("net.connman.iwd.Network") {
+            let n = proxy(&c, path.as_str(), "net.connman.iwd.Network")?;
+            if n.get_property::<String>("Name")? == ssid
+                && n.get_property::<OwnedObjectPath>("Device")?.as_str() == station
+            {
+                return connect_with_agent(&c, path.as_str(), None, password);
+            }
+        }
+    }
+    connect_with_agent(&c, &station, Some(ssid), password)
+}
+fn connect_with_agent(
+    c: &Connection,
+    target: &str,
+    hidden: Option<&str>,
+    password: String,
+) -> Result<Snapshot> {
     let bus = Proxy::new(
-        &c,
+        c,
         "org.freedesktop.DBus",
         "/org/freedesktop/DBus",
         "org.freedesktop.DBus",
@@ -191,14 +255,20 @@ pub fn connect(network: &Network, password: String) -> Result<Snapshot> {
         path.clone(),
         Agent {
             owner,
-            network: network.bssid.clone(),
+            network: target.to_owned(),
+            hidden: hidden.map(|ssid| (ssid.to_owned(), target.to_owned())),
+            // Keep credential lookup off the connection serving this agent.
+            connection: Connection::system()?,
             secret: std::sync::Mutex::new(Some(password)),
         },
     )?;
-    let manager = proxy(&c, "/net/connman/iwd", "net.connman.iwd.AgentManager")?;
+    let manager = proxy(c, "/net/connman/iwd", "net.connman.iwd.AgentManager")?;
     let _: () = manager.call("RegisterAgent", &(path.clone(),))?;
-    let result: Result<(), zbus::Error> =
-        proxy(&c, &network.bssid, "net.connman.iwd.Network")?.call("Connect", &());
+    let result: Result<(), zbus::Error> = if let Some(ssid) = hidden {
+        proxy(c, target, "net.connman.iwd.Station")?.call("ConnectHiddenNetwork", &(ssid,))
+    } else {
+        proxy(c, target, "net.connman.iwd.Network")?.call("Connect", &())
+    };
     let _: Result<(), _> = manager.call("UnregisterAgent", &(path,));
     if let Err(e) = result {
         bail!(
