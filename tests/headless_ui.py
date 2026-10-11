@@ -7,6 +7,7 @@ Add --performance-only to measure steady/changing audio and Sound drawer CPU.
 Add --launcher-only to check the default and external app launchers.
 Add --alignment-only to check bar icons across themes, geometry, states, and scale.
 Add --trays-only to check wireless scanning, pairing, switches, and navigation.
+Add --app-tray-only to check SNI icons, menus, actions, updates, and removal.
 Requires sway, grim, dbus-daemon, and Python 3. Screenshots/logs go to the argument.
 """
 import json
@@ -234,6 +235,78 @@ elif 'disconnect' in a:s['active']='';p.write_text(json.dumps(s))
             raise AssertionError('egui bar did not map; see bar.log')
         default_settings=json.loads((ROOT/'config.default.json').read_text())
         assert_bar_alignment(Image.open(DEST/'bar.png'), default_settings)
+        if '--app-tray-only' in sys.argv[2:]:
+            actions = DEST/'app-tray-actions.txt'
+            actions.write_text('')
+            env['BHARTA_TEST_TRAY_LOG'] = str(actions)
+            fixture = subprocess.Popen([str(ROOT/'target/release/examples/headless_tray')], cwd=ROOT, env=env,
+                stdin=subprocess.PIPE, stdout=open(DEST/'app-tray-fixture.log','w'), stderr=subprocess.STDOUT, start_new_session=True)
+            processes.append(fixture)
+            def send_tray(command):
+                fixture.stdin.write((command+'\n').encode());fixture.stdin.flush();time.sleep(1.2)
+            def colored_centers(name):
+                shot(name)
+                image=Image.open(DEST/(name+'.png')).convert('RGB')
+                red=[x for x in range(100,1500) if (lambda c:c[0]>170 and c[1]<90 and c[2]<110)(image.getpixel((x,14)))]
+                blue=[x for x in range(100,1500) if (lambda c:c[0]<90 and c[1]>130 and c[2]>170)(image.getpixel((x,14)))]
+                return (sum(red)/len(red) if red else None, sum(blue)/len(blue) if blue else None)
+            time.sleep(1.8)
+            assert fixture.poll() is None, 'Tray fixture did not register; see app-tray-fixture.log'
+            alpha,beta=colored_centers('app-tray-icons')
+            stride=default_settings['layout']['icon_slot_width']+default_settings['layout']['group_gap']
+            assert alpha and beta and abs(beta-alpha-stride)<1, 'Tray icons did not reserve space for their separators'
+            tray_image=Image.open(DEST/'app-tray-icons.png').convert('RGB')
+            for separator in [(alpha+beta)/2,beta+stride/2]:
+                assert any(tray_image.getpixel((x,14))[0]>40 for x in [int(separator)-1,int(separator),int(separator)+1]), 'Missing separator between tray apps or before CPU'
+            assert 1000<alpha<beta<1350, 'App tray icons are outside the right group'
+            probe(int(alpha),14,'--hover',800).wait();shot('app-tray-menu')
+            menu_image=Image.open(DEST/'app-tray-menu.png').convert('RGB')
+            assert tray_image.getpixel((int(alpha)-11,5))!=menu_image.getpixel((int(alpha)-11,5)), 'Tray icon button did not highlight'
+            assert menu_image.getpixel((int(alpha),60))!=(0,0,0), 'Tray menu did not open on hover'
+            probe(int(alpha),53,'--click-hold',300).wait();time.sleep(.4)
+            assert 'about:0' in actions.read_text() and 'event:1:clicked' in actions.read_text(), 'dbusmenu opening/click did not reach the app'
+            probe(800,600,'--hover',800).wait()
+            probe(int(alpha),14,'--click-hold',300).wait();time.sleep(.4)
+            assert 'org.kde.StatusNotifierItem:activate' in actions.read_text(), 'Tray primary activation did not reach the app'
+            probe(800,600,'--hover',800).wait()
+            probe(int(alpha),14,'--hover',700).wait()
+            sound_x=int(beta+122)
+            probe(sound_x,14,'--hover',700).wait();shot('app-tray-switch-sound')
+            # The old tray menu must disappear when the next control opens.
+            assert Image.open(DEST/'app-tray-switch-sound.png').convert('RGB').getpixel((int(alpha)-130,60))==(0,0,0), 'Tray menu stayed open alongside Sound'
+            probe(800,600,'--hover',950).wait();shot('app-tray-dismissed')
+            assert Image.open(DEST/'app-tray-dismissed.png').convert('RGB').crop((0,28,1600,900)).getbbox() is None, 'Popup did not dismiss after leaving the bar'
+            send_tray('change');shot('app-tray-changed')
+            changed=Image.open(DEST/'app-tray-changed.png').convert('RGB').getpixel((int(alpha),14))
+            assert changed[1]>170 and changed[0]<120, 'Live icon update was not rendered in its existing slot'
+            send_tray('passive');a,b=colored_centers('app-tray-passive')
+            assert a is None and abs(b-beta)<1, 'Passive item was not hidden or shifted the right controls'
+            send_tray('active');shot('app-tray-active')
+            send_tray('quit');fixture.wait(timeout=5);time.sleep(1.2)
+            a,b=colored_centers('app-tray-removed')
+            assert a is None and b is None, 'Exited apps left stale tray icons'
+            assert bar.poll() is None, 'Bar exited during tray lifecycle test'
+            # Check optional helper startup and its lifetime without an X server,
+            # native dependencies, or any connection to the desktop display.
+            bar.terminate();bar.wait()
+            bridge_marker=runtime/'bridge-state'
+            bridge=runtime/'fake-xembed-bridge'
+            bridge.write_text("#!/usr/bin/env python3\nimport signal,time\nfrom pathlib import Path\np=Path("+repr(str(bridge_marker))+")\np.write_text('started')\ndef stop(*args):\n p.write_text('stopped')\n raise SystemExit(0)\nsignal.signal(signal.SIGTERM,stop)\nwhile True:time.sleep(.1)\n")
+            bridge.chmod(0o755)
+            (initial_settings/'config.json').write_text(json.dumps({'tray':{'xembed_bridge':str(bridge)}}))
+            env['DISPLAY']=':99999'  # fake helper never opens an X connection
+            bridge_bar=start([str(BAR),'--dark','--output','HEADLESS-1'],'bridge-bar.log')
+            for _ in range(30):
+                if bridge_marker.exists():break
+                time.sleep(.1)
+            assert bridge_marker.read_text()=='started', 'Optional XEmbed bridge did not start'
+            bridge_bar.terminate();bridge_bar.wait()
+            for _ in range(30):
+                if bridge_marker.read_text()=='stopped':break
+                time.sleep(.1)
+            assert bridge_marker.read_text()=='stopped', 'XEmbed bridge survived its owning bar'
+            print('Headless app tray screenshots and logs:',DEST)
+            sys.exit(0)
         if '--launcher-only' in sys.argv[2:]:
             probe(72,14,'--hover',700).wait();shot('launcher')
             assert Image.open(DEST/'launcher.png').convert('RGB').getpixel((20,60))!=(0,0,0), 'Default launcher did not open on hover'
@@ -590,6 +663,19 @@ elif 'disconnect' in a:s['active']='';p.write_text(json.dumps(s))
         assert ImageChops.difference(before.crop(list_crop),after.crop(list_crop)).getbbox(), 'Long Wi-Fi list did not scroll'
         footer=tuple(map(int,(wifi_left,bottom-44,wifi_left+320,bottom+1)))
         assert not ImageChops.difference(before.crop(footer),after.crop(footer)).getbbox(), 'Hidden-network footer moved while scrolling'
+        hovered=probe(wifi_left+100,bottom-24,'--hover',800)
+        time.sleep(.4);shot('wifi-hidden-button-hover');hovered.wait()
+        hover_image=Image.open(DEST/'wifi-hidden-button-hover.png').convert('RGB')
+        assert after.getpixel((int(wifi_left)+260,bottom-24)) != hover_image.getpixel((int(wifi_left)+260,bottom-24)), 'Hidden-network button did not highlight on hover'
+        label_crop=tuple(map(int,(wifi_left+16,bottom-40,wifi_left+220,bottom-12)))
+        def label_pixels(im):
+            crop=im.crop(label_crop)
+            mask=Image.new('1',crop.size)
+            mask.putdata([crop.getpixel((x,y))==(140,140,140)
+                          for y in range(crop.height) for x in range(crop.width)])
+            return mask
+        normal_text=label_pixels(after);hover_text=label_pixels(hover_image)
+        assert normal_text.getbbox() and not ImageChops.difference(normal_text,hover_text).getbbox(), 'Button text shifted on hover'
         probe(wifi_left+100,bottom-24,'--click-hold',700).wait();shot('wifi-long-list-hidden')
         probe(wifi_left+100,80,'--keys-only',2,3,4,5).wait()
         probe(wifi_left+100,130,'--click-hold',400).wait()

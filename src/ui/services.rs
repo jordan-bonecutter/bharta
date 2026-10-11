@@ -14,6 +14,8 @@ pub enum Event {
     Launched(u64, Result<(), String>),
 }
 pub struct Services {
+    pub tray: mpsc::Sender<crate::tray::Request>,
+    pub tray_events: mpsc::Receiver<crate::tray::Update>,
     pub bluetooth: mpsc::Sender<bluetooth::Request>,
     pub bluetooth_events: mpsc::Receiver<bluetooth::Update>,
     pub cpu: mpsc::Sender<bool>,
@@ -32,6 +34,7 @@ pub struct Services {
 }
 impl Services {
     pub fn new(output: Option<String>) -> Self {
+        let (tray, tray_events) = crate::tray::watch();
         let (bluetooth, bluetooth_events) = bluetooth::watch();
         let (cpu, cpu_events) = crate::cpu::watch();
         let (status_tx, statuses) = mpsc::channel();
@@ -71,6 +74,8 @@ impl Services {
         let preview = workspace_preview::watch(tx);
         let (events_tx, events) = mpsc::channel();
         Self {
+            tray,
+            tray_events,
             bluetooth,
             bluetooth_events,
             cpu,

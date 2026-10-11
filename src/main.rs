@@ -16,6 +16,7 @@ mod ui;
 mod render;
 mod status;
 mod supervisor;
+mod tray;
 mod volume;
 mod workspace_preview;
 

@@ -115,6 +115,7 @@ pub fn run(options: crate::Options) -> Result<()> {
         })
         .context("Requested Wayland output is unavailable")?;
     if let Some(info) = app.outputs.info(&output) {
+        app.ui.tray_origin = info.logical_position.unwrap_or(info.location);
         app.output_height = info.logical_size.map(|(_, h)| h as u32).unwrap_or_else(|| {
             info.modes
                 .iter()
@@ -586,6 +587,7 @@ impl OutputHandler for App {
             && let Some(info) = self.outputs.info(&o)
             && let Some((_, h)) = info.logical_size
         {
+            self.ui.tray_origin = info.logical_position.unwrap_or(info.location);
             self.output_height =
                 h.max(crate::config::get().number("layout.bar_height") as i32) as u32;
             self.dirty = true;

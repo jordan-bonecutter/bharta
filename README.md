@@ -44,6 +44,21 @@ At runtime, use Sway. Audio requires `pactl` and `parec` (usually
 `pulseaudio-utils`, or `libpulse` on Arch), with PulseAudio or PipeWire-Pulse.
 Wi-Fi uses iwd over D-Bus or NetworkManager through `nmcli`. Bluetooth uses
 BlueZ over D-Bus directly from Rust, with no `bluetoothctl` dependency. Apps uses `gio launch`.
+App tray icons appear immediately to the left of CPU in the right-side group.
+StatusNotifierItem/AppIndicator apps are supported directly over session D-Bus,
+including icon/status updates, activation, scrolling, and D-Bus menus. Hover opens
+an exported menu; left-click activates the app, right-click opens its menu, and
+middle-click requests its secondary action. Apps that mark their icon as a menu
+open that menu on left-click.
+
+Legacy X11/XEmbed icons use the optional `xembedsniproxy` executable and Xwayland.
+When `DISPLAY` is set and the bridge is available on `PATH`, the watcher-owning
+bar starts it automatically. The bridge exits with that bar and does not replace
+an existing X11 tray owner. Native SNI support and the static build work without
+it. Set `"tray": { "xembed_bridge": "/path/to/xembedsniproxy" }` to select another
+location, or an empty string to disable automatic bridging. Legacy apps supply
+their own menus through the bridge; these are separate Xwayland windows.
+
 The PNG sample exporter uses installed fonts or `--font`.
 
 ```sway
@@ -211,6 +226,10 @@ using `cargo test --release spectrum_benchmark -- --ignored --nocapture`.
 
 For bar layout changes, run
 `python3 tests/headless_ui.py /tmp/bharta-alignment --alignment-only`.
+For SNI registration, menus, actions, icon updates, removal, and optional bridge
+lifecycle checks, run
+`python3 tests/headless_ui.py /tmp/bharta-app-tray --app-tray-only`.
+The helper lifecycle fixture does not exercise a real XEmbed client.
 This shorter check measures rendered icon positions in both
 themes, with custom bar/slot/plot sizes, muted and playing audio, silence, and
 2× output scaling. The regular harness also checks the default alignment and

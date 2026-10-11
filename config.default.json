@@ -37,6 +37,7 @@
     "launcher_row_height": 29,
     "launcher_max_height": 420,
     "wifi_list_max_height": 240,
+    "bluetooth_max_height": 360,
     "process_columns_width": 176,
     "pid_column_offset": 112,
     "cpu_column_offset": 53,
@@ -119,6 +120,8 @@
       "bar": "#1e1e1e",
       "popup": "#222222",
       "hover": "#303030",
+      "button": "#292929",
+      "button_hover": "#383838",
       "workspace_border": "#424242",
       "workspace_active": "#343434",
       "separator": "#414141",
@@ -137,6 +140,8 @@
       "bar": "#f2f2f2",
       "popup": "#f7f7f7",
       "hover": "#dedede",
+      "button": "#e6e6e6",
+      "button_hover": "#d4d4d4",
       "workspace_border": "#cdcdcd",
       "workspace_active": "#dcdcdc",
       "separator": "#c3c3c3",
@@ -151,5 +156,8 @@
       "urgent": "#c84646",
       "audio": "#41be8c"
     }
+  },
+  "tray": {
+    "xembed_bridge": "xembedsniproxy"
   }
 }
