@@ -38,9 +38,20 @@ impl Layout {
     }
 
     pub fn paint_icon(&self, painter: &Painter, texture: TextureId) {
+        // Odd-sized icons centered in even-sized slots land on half pixels.
+        // Align the raster to physical pixels to avoid filtering it a second time.
+        let scale = painter.ctx().pixels_per_point();
+        let min = pos2(
+            (self.icon.min.x * scale).floor() / scale,
+            (self.icon.min.y * scale).floor() / scale,
+        );
+        let size = vec2(
+            (self.icon.width() * scale).round() / scale,
+            (self.icon.height() * scale).round() / scale,
+        );
         painter.image(
             texture,
-            self.icon,
+            Rect::from_min_size(min, size),
             Rect::from_min_max(egui::Pos2::ZERO, pos2(1., 1.)),
             Color32::WHITE,
         );

@@ -1,6 +1,53 @@
 use crate::{bluetooth, launcher, media, network, status, volume, workspace_preview};
 use std::sync::mpsc;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SessionAction {
+    Lock,
+    Logout,
+    Reboot,
+    Shutdown,
+}
+impl SessionAction {
+    fn run(self) -> Result<(), String> {
+        match self {
+            Self::Lock => {
+                let path = std::env::var("HOME").unwrap_or_default() + "/.local/bin/lock-session";
+                let command = if std::path::Path::new(&path).exists() {
+                    format!("exec {}", serde_json::to_string(&path).unwrap())
+                } else {
+                    "exec swaylock".into()
+                };
+                status::ipc(0, &command)
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+            }
+            Self::Logout => status::ipc(0, "exit")
+                .map(|_| ())
+                .map_err(|e| e.to_string()),
+            Self::Reboot | Self::Shutdown => {
+                let command = if self == Self::Reboot {
+                    "reboot"
+                } else {
+                    "poweroff"
+                };
+                let output = std::process::Command::new("systemctl")
+                    .arg(command)
+                    .output()
+                    .map_err(|e| format!("Could not {command}: {e}"))?;
+                if output.status.success() {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "Could not {command}: {}",
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    ))
+                }
+            }
+        }
+    }
+}
+
 pub enum Job {
     Scan(bool),
     Radio(bool),
@@ -9,6 +56,7 @@ pub enum Job {
     Disconnect(String),
 }
 pub enum Event {
+    Session(Result<(), String>),
     Network(u64, bool, Result<network::Snapshot, String>),
     Apps(u64, Vec<launcher::Entry>),
     Launched(u64, Result<(), String>),
@@ -92,6 +140,12 @@ impl Services {
             events,
             events_tx,
         }
+    }
+    pub fn session(&self, action: SessionAction) {
+        let tx = self.events_tx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(Event::Session(action.run()));
+        });
     }
     pub fn network(&self, id: u64, job: Job) {
         let tx = self.events_tx.clone();

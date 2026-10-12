@@ -8,6 +8,10 @@ pub enum Icon {
     Eye(bool),
     Apps,
     Logout,
+    Lock,
+    Reboot,
+    Power,
+    Ethernet,
     Charging,
     Cpu,
     Bluetooth,
@@ -168,6 +172,63 @@ pub fn draw(pix: &mut Pixmap, icon: Icon, x: f32, y: f32, size: f32, scale: f32,
                     rect(pix, x, y, 5., 5.);
                 }
             }
+        }
+        Icon::Lock | Icon::Reboot | Icon::Power | Icon::Ethernet => {
+            let mut p = PathBuilder::new();
+            match icon {
+                Icon::Ethernet => {
+                    p.move_to(7., 20.);
+                    p.line_to(7., 16.);
+                    p.line_to(4., 16.);
+                    p.line_to(4., 4.);
+                    p.line_to(20., 4.);
+                    p.line_to(20., 16.);
+                    p.line_to(17., 16.);
+                    p.line_to(17., 20.);
+                    p.close();
+                    for x in [8., 12., 16.] {
+                        p.move_to(x, 4.);
+                        p.line_to(x, 9.);
+                    }
+                }
+                Icon::Lock => {
+                    p.move_to(7., 10.);
+                    p.line_to(7., 7.);
+                    p.cubic_to(7., 1., 17., 1., 17., 7.);
+                    p.line_to(17., 10.);
+                    p.push_rect(Rect::from_xywh(5., 10., 14., 11.).unwrap());
+                    p.move_to(12., 14.);
+                    p.line_to(12., 17.);
+                }
+                Icon::Reboot => {
+                    p.move_to(20., 10.);
+                    p.cubic_to(18., 2., 6., 2., 4., 10.);
+                    p.cubic_to(1., 21., 18., 25., 21., 15.);
+                    p.move_to(20., 4.);
+                    p.line_to(20., 10.);
+                    p.line_to(14., 10.);
+                }
+                Icon::Power => {
+                    p.move_to(12., 2.);
+                    p.line_to(12., 12.);
+                    p.move_to(6., 5.);
+                    p.cubic_to(-2., 12., 4., 22., 12., 22.);
+                    p.cubic_to(20., 22., 26., 12., 18., 5.);
+                }
+                _ => unreachable!(),
+            }
+            pix.stroke_path(
+                &p.finish().unwrap(),
+                &paint,
+                &Stroke {
+                    width: 1.8,
+                    line_cap: tiny_skia::LineCap::Round,
+                    line_join: tiny_skia::LineJoin::Round,
+                    ..Default::default()
+                },
+                transform,
+                None,
+            );
         }
         Icon::Logout => {
             let mut p = PathBuilder::new();

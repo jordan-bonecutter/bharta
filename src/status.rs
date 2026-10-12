@@ -23,6 +23,7 @@ pub struct Status {
     pub workspaces: Vec<Workspace>,
     pub battery: Option<(u8, bool)>,
     pub network: bool,
+    pub ethernet: bool,
     pub connected: bool,
 }
 
@@ -158,6 +159,27 @@ fn system_battery(root: &std::path::Path) -> Option<(u8, bool)> {
     })
 }
 
+// Physical Ethernet links have ARPHRD_ETHER type and a device, but no
+// wireless directory. Exclude bridges, VPNs, veth pairs and disconnected cables.
+fn network_links(root: &std::path::Path) -> (bool, bool) {
+    let mut connected = false;
+    let mut ethernet = false;
+    for entry in fs::read_dir(root).into_iter().flatten().flatten() {
+        let path = entry.path();
+        let read = |name: &str| fs::read_to_string(path.join(name)).unwrap_or_default();
+        if entry.file_name() == "lo" || read("operstate").trim() != "up" {
+            continue;
+        }
+        connected = true;
+        ethernet |= read("type").trim() == "1"
+            && read("carrier").trim() == "1"
+            && path.join("device").exists()
+            && !path.join("wireless").exists()
+            && !path.join("phy80211").exists();
+    }
+    (connected, ethernet)
+}
+
 impl Status {
     pub fn read(output: Option<&str>) -> Self {
         let mut s = Self {
@@ -189,15 +211,7 @@ impl Status {
             s.app = focused_app(&v).unwrap_or_else(|| "Desktop".into());
         }
         s.battery = system_battery(std::path::Path::new("/sys/class/power_supply"));
-        s.network = fs::read_dir("/sys/class/net")
-            .into_iter()
-            .flatten()
-            .flatten()
-            .any(|e| {
-                e.file_name() != "lo"
-                    && fs::read_to_string(e.path().join("operstate"))
-                        .is_ok_and(|s| s.trim() == "up")
-            });
+        (s.network, s.ethernet) = network_links(std::path::Path::new("/sys/class/net"));
         s
     }
     pub fn update_audio(&mut self) {
@@ -223,6 +237,7 @@ impl Status {
                 .collect(),
             battery: Some((86, false)),
             network: true,
+            ethernet: false,
             connected: true,
             extras: crate::media::Extras {
                 wifi_name: Some("Home Wi-Fi".into()),
@@ -249,6 +264,36 @@ impl Status {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn ethernet_requires_a_connected_physical_wired_link() {
+        let root = tempfile::tempdir().unwrap();
+        let link = |name: &str, physical: bool, wireless: bool, state: &str, carrier: &str| {
+            let path = root.path().join(name);
+            fs::create_dir_all(&path).unwrap();
+            fs::write(path.join("operstate"), state).unwrap();
+            fs::write(path.join("type"), "1").unwrap();
+            fs::write(path.join("carrier"), carrier).unwrap();
+            if physical {
+                fs::create_dir(path.join("device")).unwrap();
+            }
+            if wireless {
+                fs::create_dir(path.join("wireless")).unwrap();
+            }
+        };
+        assert_eq!(network_links(root.path()), (false, false));
+        link("wlan0", true, true, "up", "1");
+        link("veth0", false, false, "up", "1");
+        link("enp3s0", true, false, "down", "0");
+        assert_eq!(network_links(root.path()), (true, false));
+        let wired = root.path().join("enp3s0");
+        fs::write(wired.join("operstate"), "up").unwrap();
+        assert_eq!(network_links(root.path()), (true, false));
+        fs::write(wired.join("carrier"), "1").unwrap();
+        assert_eq!(network_links(root.path()), (true, true));
+        fs::write(wired.join("operstate"), "down").unwrap();
+        assert_eq!(network_links(root.path()), (true, false));
+    }
+
     #[test]
     fn main_battery_ignores_peripherals_and_tracks_charging() {
         let root = tempfile::tempdir().unwrap();

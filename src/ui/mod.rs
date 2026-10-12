@@ -1,4 +1,6 @@
 mod bar_button;
+#[cfg(not(target_env = "musl"))]
+mod gpu;
 mod keyboard;
 mod services;
 mod wayland;
@@ -7,7 +9,7 @@ use crate::{
     status, volume, workspace_preview,
 };
 use egui::{Color32, Pos2, Rect, pos2, vec2};
-use services::{Event, Job, Services};
+use services::{Event, Job, Services, SessionAction};
 use std::{
     collections::{HashMap, VecDeque},
     sync::{Arc, Mutex},
@@ -54,15 +56,18 @@ fn paint_equalizer(painter: &egui::Painter, bounds: Rect, levels: &[f64; 7]) {
     let painter = painter.with_clip_rect(bounds);
     let step = bounds.width() / levels.len() as f32;
     for (i, level) in levels.iter().enumerate() {
-        let level = *level as f32;
+        let level = (*level as f32).clamp(0., 1.);
         let height = (level * bounds.height()).max(1.);
-        painter.rect_filled(
-            Rect::from_min_size(
-                pos2(bounds.left() + i as f32 * step, bounds.bottom() - height),
-                vec2((step - 1.).max(1.).min(step), height),
-            ),
-            0,
-            plot_color(level).gamma_multiply(if level > 0. { 1. } else { 0.2 }),
+        painter.add(
+            egui::epaint::RectShape::filled(
+                Rect::from_min_size(
+                    pos2(bounds.left() + i as f32 * step, bounds.bottom() - height),
+                    vec2((step - 1.).max(1.).min(step), height),
+                ),
+                1,
+                plot_color(level).gamma_multiply(if level > 0. { 1. } else { 0.2 }),
+            )
+            .with_round_to_pixels(false),
         );
     }
 }
@@ -104,7 +109,7 @@ struct Ui {
     hidden_ssid: Option<String>,
     password: String,
     reveal: bool,
-    confirm_logout: bool,
+    confirm_session: Option<SessionAction>,
     focus_search: bool,
     error: String,
     busy: bool,
@@ -207,7 +212,7 @@ impl Ui {
             hidden_ssid: None,
             password: String::new(),
             reveal: false,
-            confirm_logout: false,
+            confirm_session: None,
             focus_search: false,
             error: String::new(),
             busy: false,
@@ -316,7 +321,7 @@ impl Ui {
         self.password.clear();
         self.selected_network = None;
         self.hidden_ssid = None;
-        self.confirm_logout = false;
+        self.confirm_session = None;
         self.focus_search = matches!(kind, Menu::Apps | Menu::Cpu);
         match &kind {
             Menu::Tray(id) => {
@@ -557,6 +562,14 @@ impl Ui {
                     Ok(()) => self.close(),
                     Err(e) => self.error = e,
                 },
+                Event::Session(result) => {
+                    self.busy = false;
+                    self.confirm_session = None;
+                    match result {
+                        Ok(()) => self.close(),
+                        Err(e) => self.error = e,
+                    }
+                }
                 _ => {}
             }
         }
@@ -717,6 +730,10 @@ impl Ui {
                 Icon::Bluetooth => 14,
                 Icon::Apps => 15,
                 Icon::Logout => 16,
+                Icon::Lock => 22,
+                Icon::Reboot => 23,
+                Icon::Power => 24,
+                Icon::Ethernet => 25,
                 Icon::Link => 17,
                 Icon::Unlink => 18,
                 Icon::Back => 19,
@@ -1172,7 +1189,11 @@ impl Ui {
                 pos2(wifi_x, 0.),
                 vec2(slot, config::get().number("layout.bar_height")),
             ),
-            Icon::Wifi(self.state.extras.wifi_signal),
+            if self.state.ethernet {
+                Icon::Ethernet
+            } else {
+                Icon::Wifi(self.state.extras.wifi_signal)
+            },
             bar_button::Content::Icon,
             Menu::Wifi,
         );
@@ -1513,7 +1534,11 @@ impl Ui {
                         ui.set_width(w - 2. * config::get().number("layout.popup_padding"));
                         if matches!(
                             kind,
-                            Menu::Sound | Menu::Wifi | Menu::Bluetooth | Menu::Tray(_)
+                            Menu::Sound
+                                | Menu::Wifi
+                                | Menu::Bluetooth
+                                | Menu::Session
+                                | Menu::Tray(_)
                         ) {
                             // Areas remember their previous size. Allow the drawer to grow
                             // when streams/devices arrive, rather than scrolling at that size.
@@ -1555,7 +1580,7 @@ impl Ui {
             || self.hidden_ssid.is_some()
             || (kind == Menu::Bluetooth
                 && self.bluetooth.as_ref().is_some_and(|s| s.busy.is_some()))
-            || self.confirm_logout
+            || self.confirm_session.is_some()
             || self.busy
             || ctx.egui_is_using_pointer();
         if !inside && ctx.input(|i| i.pointer.any_pressed()) {
@@ -2260,33 +2285,39 @@ impl Ui {
         }
     }
     fn session(&mut self, ui: &mut egui::Ui) {
-        if flat(ui, "Lock screen").clicked() {
-            let path = std::env::var("HOME").unwrap_or_default() + "/.local/bin/lock-session";
-            let command = if std::path::Path::new(&path).exists() {
-                format!("exec {}", serde_json::to_string(&path).unwrap())
+        for (action, icon, label) in [
+            (SessionAction::Lock, Icon::Lock, "Lock"),
+            (SessionAction::Logout, Icon::Logout, "Log out"),
+            (SessionAction::Reboot, Icon::Reboot, "Reboot"),
+            (SessionAction::Shutdown, Icon::Power, "Shut down"),
+        ] {
+            let confirming = self.confirm_session == Some(action);
+            let text = if confirming {
+                format!("Confirm {}", label.to_lowercase())
             } else {
-                "exec swaylock".into()
+                label.into()
             };
-            std::thread::spawn(move || {
-                let _ = status::ipc(0, &command);
-            });
-            self.close();
-        }
-        if flat(
-            ui,
-            if self.confirm_logout {
-                "Confirm log out"
-            } else {
-                "Log out…"
-            },
-        )
-        .clicked()
-        {
-            if self.confirm_logout {
-                let _ = status::ipc(0, "exit");
-            } else {
-                self.confirm_logout = true;
+            let image = egui::Image::new((self.icon_at_size(icon, 16.), vec2(16., 16.)));
+            if ui
+                .add_enabled(
+                    !self.busy,
+                    egui::Button::image_and_text(image, text)
+                        .min_size(vec2(ui.available_width(), 32.))
+                        .corner_radius(4),
+                )
+                .clicked()
+            {
+                if action == SessionAction::Lock || confirming {
+                    self.busy = true;
+                    self.error.clear();
+                    self.services.session(action);
+                } else {
+                    self.confirm_session = Some(action);
+                }
             }
+        }
+        if self.confirm_session.is_some() && !self.busy && flat(ui, "Cancel").clicked() {
+            self.confirm_session = None;
         }
     }
     fn sound(&mut self, ui: &mut egui::Ui) {

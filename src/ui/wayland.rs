@@ -82,6 +82,8 @@ pub fn run(options: crate::Options) -> Result<()> {
         paste_rx,
         input: egui::RawInput::default(),
         renderer: EguiSoftwareRender::new(ColorFieldOrder::Bgra),
+        #[cfg(not(target_env = "musl"))]
+        gpu: None,
         width: 1,
         height: crate::config::get().number("layout.bar_height") as u32,
         output_height: 900,
@@ -140,6 +142,13 @@ pub fn run(options: crate::Options) -> Result<()> {
     layer.set_exclusive_zone(crate::config::get().number("layout.bar_height") as i32);
     layer.set_keyboard_interactivity(KeyboardInteractivity::None);
     layer.commit();
+    #[cfg(not(target_env = "musl"))]
+    if std::env::var("BHARTA_RENDERER").as_deref() != Ok("software") {
+        match super::gpu::Gpu::new(&conn, layer.wl_surface()) {
+            Ok(gpu) => app.gpu = Some(gpu),
+            Err(error) => eprintln!("bharta: GPU unavailable, using software: {error:#}"),
+        }
+    }
     app.layer = Some(layer);
     let mut event_loop: EventLoop<App> = EventLoop::try_new()?;
     WaylandSource::new(conn.clone(), queue)
@@ -206,6 +215,9 @@ pub fn run(options: crate::Options) -> Result<()> {
     Ok(())
 }
 struct App {
+    // Drop the GPU swapchain before the layer surface is destroyed.
+    #[cfg(not(target_env = "musl"))]
+    gpu: Option<super::gpu::Gpu>,
     registry: RegistryState,
     seats: SeatState,
     outputs: OutputState,
@@ -352,6 +364,27 @@ impl App {
             .set_input_region(Some(region.wl_region()));
         let scale = self.scale as u32;
         let (w, h) = (self.width * scale, self.height * scale);
+        let jobs = ctx.tessellate(out.shapes, out.pixels_per_point);
+        #[cfg(not(target_env = "musl"))]
+        if let Some(gpu) = &mut self.gpu {
+            let surface = layer.wl_surface();
+            surface.set_buffer_scale(self.scale);
+            let presented = gpu.draw(
+                [w, h],
+                &jobs,
+                &out.textures_delta,
+                out.pixels_per_point,
+                || {
+                    surface.damage_buffer(0, 0, w as i32, h as i32);
+                    surface.frame(qh, surface.clone());
+                },
+            )?;
+            self.frame_ready = !presented;
+            if !presented {
+                ctx.request_repaint_after(crate::config::get().duration("animation.frame_ms"));
+            }
+            return Ok(());
+        }
         self.buffers
             .retain(|buffer| buffer.height() == h as i32 && buffer.stride() == w as i32 * 4);
         let available = self
@@ -377,7 +410,6 @@ impl App {
             .context("Released presentation buffer")?;
         canvas.fill(0);
         let pixels = canvas.as_chunks_mut::<4>().0;
-        let jobs = ctx.tessellate(out.shapes, out.pixels_per_point);
         self.renderer.render(
             &mut BufferMutRef::new(pixels, w as usize, h as usize),
             &jobs,

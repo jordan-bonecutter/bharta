@@ -274,7 +274,11 @@ impl Renderer {
         }
         crate::icons::draw(
             &mut pix,
-            crate::icons::Icon::Wifi(status.extras.wifi_signal),
+            if status.ethernet {
+                crate::icons::Icon::Ethernet
+            } else {
+                crate::icons::Icon::Wifi(status.extras.wifi_signal)
+            },
             net_x - 2.0,
             5.0,
             18.0,

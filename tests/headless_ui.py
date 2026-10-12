@@ -2,6 +2,8 @@
 """Isolated egui/Sway UI harness. Never connects input to the desktop session.
 Build first: cargo build --release --examples && cargo build --release
 Run: python3 tests/headless_ui.py /tmp/bharta-headless
+Add --eq-only to check isolated stream spectra and save an EQ screenshot.
+Add --session-only to check session buttons and mocked power commands.
 Add --audio-only to check audio controls, event updates, and drawer height.
 Add --performance-only to measure steady/changing audio and Sound drawer CPU.
 Add --launcher-only to check the default and external app launchers.
@@ -146,6 +148,10 @@ elif 'connect' in a:
 elif 'disconnect' in a:s['active']='';p.write_text(json.dumps(s))
 ''')
     fake_wifi.chmod(0o755)
+    session_actions = runtime / 'session-actions'
+    fake_systemctl = runtime / 'systemctl'
+    fake_systemctl.write_text('#!/bin/sh\nprintf "%s\\n" "$1" >> "' + str(session_actions) + '"\necho "Session action test failure" >&2\nexit 1\n')
+    fake_systemctl.chmod(0o755)
     env['PATH'] = str(runtime) + os.pathsep + env['PATH']
     env['BHARTA_TEST_AUDIO'] = str(state)
     env['BHARTA_TEST_ROUTING'] = str(routing)
@@ -175,6 +181,21 @@ elif 'disconnect' in a:s['active']='';p.write_text(json.dumps(s))
         if 'bar' in globals() and ('--trays-only' in sys.argv[2:] or '--bluetooth-only' in sys.argv[2:]):
             assert bar.poll() is None, f'Bar exited ({bar.returncode}) before {name}; see bar.log'
         run(['grim', '-o', 'HEADLESS-1', str(DEST / (name + '.png'))])
+    def check_session_actions():
+        # First click only arms the action; cancelling never invokes systemctl.
+        probe(100,122,'--click-hold',180).wait()
+        time.sleep(.2);shot('session-confirm-reboot')
+        assert not session_actions.exists(), 'Reboot ran without confirmation'
+        probe(100,194,'--click-hold',180).wait()
+        time.sleep(.2);shot('session-cancelled')
+        assert not session_actions.exists(), 'Cancelling invoked a session action'
+        # Confirm shutdown against a private stub, never the host systemctl.
+        probe(100,158,'--click-hold',180).wait()
+        time.sleep(.2);shot('session-confirm-shutdown')
+        assert not session_actions.exists(), 'Shutdown ran without confirmation'
+        probe(100,158,'--click-hold',180).wait()
+        time.sleep(.4);shot('session-action-error')
+        assert session_actions.read_text().splitlines() == ['poweroff'], 'Wrong session command'
     def check_external_launcher(output, size):
         # External launchers require a click and never take over the desktop session.
         marker=runtime/'launcher-started'
@@ -233,8 +254,18 @@ elif 'disconnect' in a:s['active']='';p.write_text(json.dumps(s))
             time.sleep(.2)
         else:
             raise AssertionError('egui bar did not map; see bar.log')
+        # The first visible GPU frame may still be in egui's opening fade.
+        # Check final colors and icon geometry after that animation settles.
+        time.sleep(.3)
+        shot('bar')
         default_settings=json.loads((ROOT/'config.default.json').read_text())
         assert_bar_alignment(Image.open(DEST/'bar.png'), default_settings)
+        if '--session-only' in sys.argv[2:]:
+            probe(28,14,'--hover',900).wait()
+            shot('session-hover')
+            check_session_actions()
+            print('Session buttons, confirmation, cancellation and command errors passed')
+            sys.exit(0)
         if '--app-tray-only' in sys.argv[2:]:
             actions = DEST/'app-tray-actions.txt'
             actions.write_text('')
@@ -326,6 +357,25 @@ elif 'disconnect' in a:s['active']='';p.write_text(json.dumps(s))
         popup_left=max(8,min(sound_x-168,1600-344))
         bluetooth_x=battery_left-64
         cpu_x=battery_left-192
+        if '--eq-only' in sys.argv[2:]:
+            probe(sound_x,14,'--hover',1800).wait()
+            shot('equalizer')
+            pixels=Image.open(DEST/'equalizer.png').convert('RGB')
+            layout=default_settings['layout']
+            meter_width=6*layout['meter_bar_gap']+layout['meter_bar_width']
+            drawer_left=next(x for x in range(1000,1600) if pixels.getpixel((x,50)) != (0,0,0))
+            control_right=drawer_left+layout['sound_width']-layout['popup_padding']
+            meter_left=control_right-layout['meter_offset']
+            for center,band in [(134,3),(198,4)]:
+                heights=[]
+                for i in range(7):
+                    x=int(meter_left+(i+.5)*meter_width/7)
+                    ys=[y for y in range(center-10,center+11)
+                        if max(pixels.getpixel((x,y)))-min(pixels.getpixel((x,y)))>70]
+                    heights.append(max(ys)-min(ys) if ys else 0)
+                assert heights[band]>=10 and max(heights[:band]+heights[band+1:])<=5, f'Stream spectrum mismatch: {heights}'
+            print('Isolated stream equalizer spectra passed:', DEST)
+            sys.exit(0)
         if '--trays-only' not in sys.argv[2:]:
             def tray_heights(image):
                 heights=[]
@@ -956,6 +1006,7 @@ elif 'disconnect' in a:s['active']='';p.write_text(json.dumps(s))
         switched=Image.open(DEST / 'session-hover.png').convert('RGB')
         assert switched.getpixel((50,55)) != (0,0,0), 'Session hover failed'
         assert switched.crop((500,28,1600,900)).getbbox() is None, 'Switching menus left the old popup visible'
+        check_session_actions()
         # Switch directly from a clicked (grabbed) menu to a workspace preview,
         # then to another menu, without visiting the desktop between controls.
         leave=probe(600,600,'--hover',900);leave.wait()

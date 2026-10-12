@@ -1,8 +1,9 @@
 # bharta
 
 A compact, macOS-inspired Sway bar in Rust. egui supplies the widgets; a direct
-Wayland layer surface and CPU renderer display them without GTK, layer-shell
-shared libraries, OpenGL, or Vulkan. The bar reserves 28 logical pixels.
+Wayland layer surface displays them without GTK or layer-shell shared libraries.
+Normal Cargo builds render with Vulkan through wgpu, falling back to the CPU
+renderer when Vulkan is unavailable. The bar reserves 28 logical pixels.
 
 ## Build and run
 
@@ -14,7 +15,7 @@ shared libraries, OpenGL, or Vulkan. The bar reserves 28 logical pixels.
 The helper produces a **single static executable** for x86_64 or aarch64 Linux.
 Copy `dist/bharta` to another machine of the same architecture: it needs no
 shared libraries, library directory, or distro-specific build. musl is embedded;
-keyboard layout handling, Wayland transport, and rendering are Rust. Compose
+keyboard layout handling, Wayland transport, and CPU rendering are Rust. Compose
 rules and UI fonts have bundled fallbacks.
 
 Building requires Bash, curl, tar, xz, and sha256sum. The helper provisions Rust
@@ -39,6 +40,20 @@ permission. A plain
 for distribution. `--font /path/to/font.ttf` selects a custom UI font with the
 bundled fallbacks. SF Mono is selected automatically when installed;
 `--font` takes precedence.
+
+For GPU rendering, build and run the native executable:
+
+```sh
+cargo build --release
+./target/release/bharta --dark --all-outputs
+```
+
+This build loads the installed Vulkan driver and `libwayland-client` at runtime;
+it needs no GPU headers, compiler, pkg-config, or GPU development libraries to
+build. Startup logs identify the renderer and adapter, or explain the software
+fallback. Set `BHARTA_RENDERER=software` to use CPU rendering explicitly.
+The static musl executable from `./build.sh` keeps CPU rendering because static
+musl cannot dynamically load GPU drivers. PNG previews also use the CPU renderer.
 
 At runtime, use Sway. Audio requires `pactl` and `parec` (usually
 `pulseaudio-utils`, or `libpulse` on Arch), with PulseAudio or PipeWire-Pulse.
