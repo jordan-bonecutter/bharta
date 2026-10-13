@@ -158,6 +158,6 @@
     }
   },
   "tray": {
-    "xembed_bridge": "xembedsniproxy"
+    "xembed_bridge": ""
   }
 }

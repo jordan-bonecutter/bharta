@@ -4,12 +4,14 @@ mod bluetooth;
 mod capture;
 mod config;
 mod cpu;
+mod gpu_host;
 mod icons;
 mod iwd;
 mod launcher;
 mod media;
 mod network;
 mod popup_motion;
+mod pulse;
 mod ui;
 // The small headless PNG exporter is independent of the live egui interface.
 #[allow(dead_code)]
@@ -89,6 +91,10 @@ fn options() -> Result<Options> {
 }
 fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().collect();
+    if args.get(1).is_some_and(|a| a == "--gpu-host-check") {
+        anyhow::ensure!(gpu_host::available(), "Desktop driver host unavailable");
+        return Ok(());
+    }
     if args.iter().any(|a| a == "--print-config") {
         print!("{}", config::DEFAULT);
         return Ok(());
@@ -172,5 +178,6 @@ fn main() -> Result<()> {
     if !options.smoke && (options.all_outputs || options.output.is_none()) {
         return supervisor::run(&options);
     }
+    gpu_host::run();
     ui::run(options)
 }

@@ -481,9 +481,13 @@ impl Ui {
                 media::Update::Playback(tracks) => {
                     audio_changed = true;
                     extras.track = tracks.first().cloned();
-                    extras
-                        .artworks
-                        .retain(|url, _| tracks.iter().any(|track| &track.art_url == url));
+                    // Keep loaded artwork through temporary MPRIS outages. The
+                    // worker may coalesce the empty snapshot with reconnection.
+                    if !tracks.is_empty() {
+                        extras
+                            .artworks
+                            .retain(|url, _| tracks.iter().any(|track| &track.art_url == url));
+                    }
                     extras.tracks = tracks;
                 }
                 media::Update::Artwork(art) => {

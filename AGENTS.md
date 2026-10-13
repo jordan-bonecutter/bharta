@@ -47,7 +47,7 @@ dragging must work continuously. Preserve the speaker control position across
 play/pause changes and bound workspace previews independently of captured image
 dimensions. Per-app equalizer bars must monitor their own audio stream, never
 the mixed output or fabricated animation; stop stream capture when the drawer closes.
-For headless meter tests, give each fake `parec --monitor-stream=ID` a distinct
+For headless meter tests, give each native-protocol fixture stream a distinct
 tone and verify it appears only in that source row's matching frequency band.
 Use two MPRIS fixtures with distinct artwork to verify all source images load.
 Keep image, meter, mute, and playback control columns aligned across source rows;

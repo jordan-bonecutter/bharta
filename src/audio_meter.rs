@@ -1,6 +1,6 @@
 use std::{
-    io::Read,
-    process::{Child, Command, Stdio},
+    net::Shutdown,
+    os::unix::net::UnixStream,
     sync::{Arc, Mutex},
     thread::{self, JoinHandle},
 };
@@ -18,7 +18,7 @@ const BANDS: [(f64, f64); 7] = [
 ];
 
 pub struct Capture {
-    child: Child,
+    socket: UnixStream,
     reader: Option<JoinHandle<()>>,
 }
 impl Capture {
@@ -29,36 +29,35 @@ impl Capture {
         Self::spawn(levels, None)
     }
     fn spawn(levels: Arc<Mutex<[f64; 7]>>, stream: Option<u32>) -> std::io::Result<Self> {
-        let mut command = Command::new("parec");
-        command.args([
-            "--device=@DEFAULT_MONITOR@",
-            "--raw",
-            "--format=s16le",
-            "--rate=24000",
-            "--channels=1",
-            "--latency-msec=50",
-        ]);
-        if let Some(stream) = stream {
-            command.arg(format!("--monitor-stream={stream}"));
-        }
-        let mut child = command
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()?;
-        let mut stdout = child.stdout.take().expect("parec stdout is piped");
+        let mut connection = crate::pulse::Connection::open().map_err(std::io::Error::other)?;
+        let channel = connection.record(stream).map_err(std::io::Error::other)?;
+        let socket = connection
+            .shutdown_handle()
+            .map_err(std::io::Error::other)?;
         let reader = thread::spawn(move || {
             let mut bytes = [0u8; WINDOW * 2];
             let mut samples = [0.0; WINDOW];
             let mut spectrum = Spectrum::new();
-            while stdout.read_exact(&mut bytes).is_ok() {
-                for (sample, pair) in samples.iter_mut().zip(bytes.as_chunks::<2>().0) {
-                    *sample = i16::from_le_bytes(*pair) as f64 / 32768.0;
+            let mut pending = Vec::new();
+            while let Ok((packet_channel, data)) = connection.packet() {
+                if packet_channel == u32::MAX {
+                    continue;
                 }
-                // Do the transform outside the lock so the UI never waits for analysis.
-                let analyzed = spectrum.analyze(&samples);
-                if let Ok(mut output) = levels.lock() {
-                    *output = analyzed;
+                if packet_channel != channel {
+                    break;
+                }
+                pending.extend_from_slice(&data);
+                while pending.len() >= bytes.len() {
+                    bytes.copy_from_slice(&pending[..WINDOW * 2]);
+                    pending.drain(..WINDOW * 2);
+                    for (sample, pair) in samples.iter_mut().zip(bytes.as_chunks::<2>().0) {
+                        *sample = i16::from_le_bytes(*pair) as f64 / 32768.0;
+                    }
+                    // Do the transform outside the lock so the UI never waits for analysis.
+                    let analyzed = spectrum.analyze(&samples);
+                    if let Ok(mut output) = levels.lock() {
+                        *output = analyzed;
+                    }
                 }
             }
             if let Ok(mut output) = levels.lock() {
@@ -66,19 +65,20 @@ impl Capture {
             }
         });
         Ok(Self {
-            child,
+            socket,
             reader: Some(reader),
         })
     }
     pub fn stop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        let _ = self.socket.shutdown(Shutdown::Both);
         if let Some(reader) = self.reader.take() {
             let _ = reader.join();
         }
     }
     pub fn is_running(&mut self) -> bool {
-        matches!(self.child.try_wait(), Ok(None))
+        self.reader
+            .as_ref()
+            .is_some_and(|reader| !reader.is_finished())
     }
 }
 impl Drop for Capture {

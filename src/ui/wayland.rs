@@ -369,7 +369,17 @@ impl App {
         if let Some(gpu) = &mut self.gpu {
             let surface = layer.wl_surface();
             surface.set_buffer_scale(self.scale);
-            let presented = gpu.draw(
+            // Keep software textures ready for a driver failure after startup.
+            if !out.textures_delta.is_empty() {
+                let mut pixel = [[0u8; 4]];
+                self.renderer.render(
+                    &mut BufferMutRef::new(&mut pixel, 1, 1),
+                    &[],
+                    &out.textures_delta,
+                    out.pixels_per_point,
+                );
+            }
+            let result = gpu.draw(
                 [w, h],
                 &jobs,
                 &out.textures_delta,
@@ -378,12 +388,22 @@ impl App {
                     surface.damage_buffer(0, 0, w as i32, h as i32);
                     surface.frame(qh, surface.clone());
                 },
-            )?;
-            self.frame_ready = !presented;
-            if !presented {
-                ctx.request_repaint_after(crate::config::get().duration("animation.frame_ms"));
+            );
+            match result {
+                Ok(presented) => {
+                    self.frame_ready = !presented;
+                    if !presented {
+                        ctx.request_repaint_after(
+                            crate::config::get().duration("animation.frame_ms"),
+                        );
+                    }
+                    return Ok(());
+                }
+                Err(error) => {
+                    eprintln!("bharta: GPU presentation failed, using software: {error:#}");
+                    self.gpu = None;
+                }
             }
-            return Ok(());
         }
         self.buffers
             .retain(|buffer| buffer.height() == h as i32 && buffer.stride() == w as i32 * 4);

@@ -11,38 +11,37 @@ pub enum SessionAction {
 impl SessionAction {
     fn run(self) -> Result<(), String> {
         match self {
-            Self::Lock => {
-                let path = std::env::var("HOME").unwrap_or_default() + "/.local/bin/lock-session";
-                let command = if std::path::Path::new(&path).exists() {
-                    format!("exec {}", serde_json::to_string(&path).unwrap())
-                } else {
-                    "exec swaylock".into()
-                };
-                status::ipc(0, &command)
-                    .map(|_| ())
-                    .map_err(|e| e.to_string())
-            }
+            Self::Lock => (|| -> zbus::Result<()> {
+                let connection = zbus::blocking::Connection::session()?;
+                let locker = zbus::blocking::Proxy::new(
+                    &connection,
+                    "org.freedesktop.ScreenSaver",
+                    "/org/freedesktop/ScreenSaver",
+                    "org.freedesktop.ScreenSaver",
+                )?;
+                locker.call("Lock", &())
+            })()
+            .map_err(|e| format!("Could not lock session: {e}")),
             Self::Logout => status::ipc(0, "exit")
                 .map(|_| ())
                 .map_err(|e| e.to_string()),
             Self::Reboot | Self::Shutdown => {
-                let command = if self == Self::Reboot {
-                    "reboot"
+                let method = if self == Self::Reboot {
+                    "Reboot"
                 } else {
-                    "poweroff"
+                    "PowerOff"
                 };
-                let output = std::process::Command::new("systemctl")
-                    .arg(command)
-                    .output()
-                    .map_err(|e| format!("Could not {command}: {e}"))?;
-                if output.status.success() {
-                    Ok(())
-                } else {
-                    Err(format!(
-                        "Could not {command}: {}",
-                        String::from_utf8_lossy(&output.stderr).trim()
-                    ))
-                }
+                (|| -> zbus::Result<()> {
+                    let connection = zbus::blocking::Connection::system()?;
+                    let manager = zbus::blocking::Proxy::new(
+                        &connection,
+                        "org.freedesktop.login1",
+                        "/org/freedesktop/login1",
+                        "org.freedesktop.login1.Manager",
+                    )?;
+                    manager.call(method, &(true,))
+                })()
+                .map_err(|e| format!("Could not {method}: {e}"))
             }
         }
     }

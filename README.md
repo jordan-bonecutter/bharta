@@ -13,8 +13,8 @@ renderer when Vulkan is unavailable. The bar reserves 28 logical pixels.
 ```
 
 The helper produces a **single static executable** for x86_64 or aarch64 Linux.
-Copy `dist/bharta` to another machine of the same architecture: it needs no
-shared libraries, library directory, or distro-specific build. musl is embedded;
+Copy `dist/bharta` to another machine of the same architecture. Its static CPU
+path needs no shared libraries, library directory, or distro-specific build. musl is embedded;
 keyboard layout handling, Wayland transport, and CPU rendering are Rust. Compose
 rules and UI fonts have bundled fallbacks.
 
@@ -41,24 +41,27 @@ for distribution. `--font /path/to/font.ttf` selects a custom UI font with the
 bundled fallbacks. SF Mono is selected automatically when installed;
 `--font` takes precedence.
 
-For GPU rendering, build and run the native executable:
+The distributed executable also embeds a GPU-capable build against glibc 2.28.
+At startup it executes that bundled build from an anonymous in-memory file when
+the desktop can run it. That build loads the desktop's existing Vulkan driver
+and Wayland client library, with automatic CPU fallback when GPU initialization
+fails. If the glibc loader is missing or incompatible, the static executable
+continues using its own CPU renderer. No helper files are extracted or installed. The packaged GPU host targets glibc
+2.28 or later; older glibc and musl systems retain the static CPU path.
+Set `BHARTA_RENDERER=software` to stay on the static CPU path explicitly.
+PNG previews also use the CPU renderer. Ordinary `cargo build --release` builds
+are GPU-capable; the single-file distribution is produced by `./build.sh`.
 
-```sh
-cargo build --release
-./target/release/bharta --dark --all-outputs
-```
-
-This build loads the installed Vulkan driver and `libwayland-client` at runtime;
-it needs no GPU headers, compiler, pkg-config, or GPU development libraries to
-build. Startup logs identify the renderer and adapter, or explain the software
-fallback. Set `BHARTA_RENDERER=software` to use CPU rendering explicitly.
-The static musl executable from `./build.sh` keeps CPU rendering because static
-musl cannot dynamically load GPU drivers. PNG previews also use the CPU renderer.
-
-At runtime, use Sway. Audio requires `pactl` and `parec` (usually
-`pulseaudio-utils`, or `libpulse` on Arch), with PulseAudio or PipeWire-Pulse.
-Wi-Fi uses iwd over D-Bus or NetworkManager through `nmcli`. Bluetooth uses
-BlueZ over D-Bus directly from Rust, with no `bluetoothctl` dependency. Apps uses `gio launch`.
+At runtime, use Sway. There are **no required CLI wrapper utilities**: audio
+controls, app streams, and meters speak the PulseAudio native socket protocol
+(also supported by PipeWire-Pulse); Wi-Fi uses NetworkManager or iwd over D-Bus;
+Bluetooth uses BlueZ over D-Bus; power actions use login1 over D-Bus. Apps supports
+Desktop Entry commands and D-Bus activation directly. The desktop's running
+services and graphics drivers are still needed for their respective features.
+Launching an app or a terminal entry naturally requires that app to be installed.
+Session locking uses the desktop's `org.freedesktop.ScreenSaver` D-Bus service;
+without a lock service, it reports an error. Explicitly configured external
+launchers and XEmbed bridges remain optional integrations.
 App tray icons appear immediately to the left of CPU in the right-side group.
 StatusNotifierItem/AppIndicator apps are supported directly over session D-Bus,
 including icon/status updates, activation, scrolling, and D-Bus menus. Hover opens
@@ -67,14 +70,14 @@ middle-click requests its secondary action. Apps that mark their icon as a menu
 open that menu on left-click.
 
 Legacy X11/XEmbed icons use the optional `xembedsniproxy` executable and Xwayland.
-When `DISPLAY` is set and the bridge is available on `PATH`, the watcher-owning
-bar starts it automatically. The bridge exits with that bar and does not replace
+When a bridge is explicitly configured and `DISPLAY` is set, the watcher-owning
+bar starts it. The bridge exits with that bar and does not replace
 an existing X11 tray owner. Native SNI support and the static build work without
-it. Set `"tray": { "xembed_bridge": "/path/to/xembedsniproxy" }` to select another
-location, or an empty string to disable automatic bridging. Legacy apps supply
+it. Set `"tray": { "xembed_bridge": "/path/to/xembedsniproxy" }` to enable
+bridging; the default is an empty string. Legacy apps supply
 their own menus through the bridge; these are separate Xwayland windows.
 
-The PNG sample exporter uses installed fonts or `--font`.
+The PNG sample exporter uses installed fonts, the bundled fallback, or `--font`.
 
 ```sway
 exec /path/to/bharta --dark --all-outputs
@@ -162,7 +165,7 @@ clicking again closes it until the pointer leaves that control.
   frequency meters, MPRIS playback controls and artwork, output/port selection,
   master volume/mute, and expandable channels. Audio sliders use compact neutral
   tracks and round handles without percentage readouts. Paused sources retain their
-  sliders and row height. Drawer meters monitor their own streams through `parec`
+  sliders and row height. Drawer meters monitor their own streams over the native audio socket
   and stop when the drawer closes; the tray spectrum stays live while audio is active.
   Master volume preserves channel balance; changing
   output moves current playback. Worker commands are ordered and slider updates
@@ -192,16 +195,16 @@ clicking again closes it until the pointer leaves that control.
 - Apps: immediately focused search, desktop-entry filtering, arrow-key selection,
   Enter to launch, or clickable rows. egui handles editing and selection; Wayland
   handles clipboard transfer and keyboard layout/repeat.
-- Session: lock using `~/.local/bin/lock-session`, falling back to `swaylock`;
+- Session: lock through the desktop screen saver D-Bus service;
   logout requires two clicks.
 - Battery percentage, charging indicator, and local clock.
 
 For iwd, the session needs access to `net.connman.iwd` on the system D-Bus.
 `integration/iwd-jordan.conf` is an example policy with a machine-specific user;
 adapt it to your existing policy. Passwords use a temporary iwd D-Bus agent or
-NetworkManager stdin, never command-line arguments or logs.
+NetworkManager D-Bus settings, never command-line arguments or logs.
 
-There are no per-application menus or StatusNotifier tray. Standard Sway does not
+StatusNotifier tray menus use session D-Bus directly. Standard Sway does not
 blur the bar. Desktop portal screen sharing is separate from window previews.
 
 ## Code and validation
@@ -230,6 +233,13 @@ an animated capture alongside a static source (45 FPS minimum under headless
 testing, with no repeated captures of the static source). Inspect its screenshots
 and logs.
 It never sends input to the desktop or changes real audio levels.
+
+Focused checks are available with `--audio-only`, `--eq-only` (including both
+source artworks), `--network-only`, and `--session-only`. Set
+`BHARTA_TEST_NO_CLI=1` to give the bar an empty tool search path during these
+checks. `python3 tests/private_audio.py` additionally verifies output and stereo
+app-stream volume/mute against a private real PipeWire-Pulse server; it requires
+existing PipeWire and WirePlumber test tools and disables hardware monitors.
 
 For CPU measurements, run
 `python3 tests/headless_ui.py /tmp/bharta-performance --performance-only`.

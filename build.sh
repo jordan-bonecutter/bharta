@@ -69,7 +69,7 @@ if [[ ! -x $zig_dir/zig ]]; then
   curl -fsSL --retry 3 --proto '=https' --tlsv1.2 \
     "https://ziglang.org/download/0.14.1/zig-$arch-linux-0.14.1.tar.xz" -o "$archive"
   printf '%s  %s\n' "$zig_sha" "$archive" | sha256sum -c -
-  tar -xJf "$archive" -C .build
+  tar --no-same-owner -xJf "$archive" -C .build
   rm "$archive"
 fi
 # Zig brings its own C headers and musl; ring's bundled crypto is built statically.
@@ -99,6 +99,26 @@ chmod +x .build/ar
 export "AR_${target//-/_}=$PWD/.build/ar"
 export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-"$PWD/.build/target"}
 export CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-2}
+# Compile the optional GPU host for the desktop's glibc ABI, using Zig's
+# bundled libc import libraries. No host development packages are used.
+# The statically linked entry point still works on systems without glibc.
+gpu_target="$arch-unknown-linux-gnu"
+export BHARTA_GPU_CC_TARGET="$arch-linux-gnu.2.28"
+printf '%s\n' '#!/usr/bin/env bash' 'args=()' \
+  'for arg; do [[ $arg == --target=* ]] || args+=("$arg"); done' \
+  'exec "${BHARTA_ZIG:?}" cc -target "${BHARTA_GPU_CC_TARGET:?}" "${args[@]}"' > .build/cc-gpu
+chmod +x .build/cc-gpu
+if [[ ${cargo_cmd[1]:-} == +1.92.0 ]]; then
+  rustup target add --toolchain 1.92.0 "$gpu_target"
+else
+  rustup target add "$gpu_target"
+fi
+gpu_key=${gpu_target^^}; gpu_key=${gpu_key//-/_}
+export "CARGO_TARGET_${gpu_key}_LINKER=$PWD/.build/cc-gpu"
+export "CC_${gpu_target//-/_}=$PWD/.build/cc-gpu"
+export "AR_${gpu_target//-/_}=$PWD/.build/ar"
+"${cargo_cmd[@]}" build --release --locked --target "$gpu_target"
+export BHARTA_GPU_PAYLOAD="$CARGO_TARGET_DIR/$gpu_target/release/bharta"
 "${cargo_cmd[@]}" build --release --locked --target "$target"
 mkdir -p dist
 cp "$CARGO_TARGET_DIR/$target/release/bharta" dist/bharta.new

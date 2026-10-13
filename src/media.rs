@@ -1,10 +1,5 @@
 use serde_json::Value;
-use std::{
-    collections::{HashMap, HashSet},
-    io::Read,
-    process::{Command, Stdio},
-    time::Instant,
-};
+use std::collections::{HashMap, HashSet};
 use zbus::{
     blocking::{Connection, Proxy},
     zvariant::OwnedValue,
@@ -354,46 +349,9 @@ fn parse_audio(value: &Value) -> Vec<AudioProcess> {
     processes
 }
 pub fn audio_sources() -> Vec<AudioProcess> {
-    let Ok(mut child) = Command::new("pactl")
-        .args(["--format=json", "list", "sink-inputs"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-    else {
-        return vec![];
-    };
-    let Some(stdout) = child.stdout.take() else {
-        return vec![];
-    };
-    let reader = std::thread::spawn(move || {
-        let mut data = vec![];
-        let _ = stdout.take(1024 * 1024).read_to_end(&mut data);
-        data
-    });
-    let deadline = Instant::now() + crate::config::get().duration("timeouts.command_ms");
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let data = reader.join().unwrap_or_default();
-                return if status.success() {
-                    serde_json::from_slice(&data)
-                        .map(|v| parse_audio(&v))
-                        .unwrap_or_default()
-                } else {
-                    vec![]
-                };
-            }
-            Ok(None) if Instant::now() < deadline => {
-                std::thread::sleep(crate::config::get().duration("timeouts.command_poll_ms"))
-            }
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = reader.join();
-                return vec![];
-            }
-        }
-    }
+    crate::pulse::streams_json()
+        .map(|v| parse_audio(&v))
+        .unwrap_or_default()
 }
 pub fn window_pids(v: &Value, workspace: Option<&str>, map: &mut HashMap<u32, HashSet<String>>) {
     let workspace = if v["type"] == "workspace" {
@@ -663,11 +621,12 @@ mod tests {
 mod event_tests {
     use super::*;
     use std::io::{BufRead, BufReader};
+    use std::process::{Command, Stdio};
     use std::sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
     };
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
     struct TestBus(std::process::Child);
     impl Drop for TestBus {
         fn drop(&mut self) {

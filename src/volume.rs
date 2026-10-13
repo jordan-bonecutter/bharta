@@ -1,12 +1,7 @@
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
+use pulseaudio::protocol::*;
 use serde_json::Value;
-use std::{
-    io::{ErrorKind, Read},
-    os::fd::AsRawFd,
-    process::{Child, ChildStdout, Command, Stdio},
-    sync::mpsc,
-    time::Instant,
-};
+use std::{sync::mpsc, time::Instant};
 #[derive(Clone, Debug)]
 pub struct Channel {
     pub name: String,
@@ -82,52 +77,6 @@ pub enum Request {
 pub struct Update {
     pub completed: Option<u64>,
     pub result: Result<Snapshot, String>,
-}
-fn pactl(args: &[String]) -> Result<Vec<u8>> {
-    let mut child = Command::new("pactl")
-        .args(args)
-        .env("LC_ALL", "C")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .context(
-            "Audio controls require pactl and a running PulseAudio or PipeWire-Pulse server",
-        )?;
-    let stdout = child.stdout.take().context("Missing pactl output")?;
-    let reader = std::thread::spawn(move || {
-        let mut bytes = vec![];
-        stdout
-            .take(2 * 1024 * 1024)
-            .read_to_end(&mut bytes)
-            .map(|_| bytes)
-    });
-    let deadline = Instant::now() + crate::config::get().duration("timeouts.command_ms");
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let bytes = reader
-                    .join()
-                    .map_err(|_| anyhow::anyhow!("Audio reader failed"))??;
-                ensure!(
-                    status.success(),
-                    "Audio server rejected the request; the output may have disconnected"
-                );
-                return Ok(bytes);
-            }
-            Ok(None) if Instant::now() < deadline => {
-                std::thread::sleep(crate::config::get().duration("timeouts.command_poll_ms"))
-            }
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = reader.join();
-                bail!("Audio server did not respond");
-            }
-        }
-    }
-}
-fn run(args: &[&str]) -> Result<Vec<u8>> {
-    pactl(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>())
 }
 fn parse(value: &Value, default: String) -> Result<Snapshot> {
     let mut outputs = vec![];
@@ -238,18 +187,9 @@ fn parse_streams(value: &Value) -> Vec<Stream> {
     streams
 }
 pub fn read() -> Result<Snapshot> {
-    let default = String::from_utf8(run(&["get-default-sink"])?)?
-        .trim()
-        .to_owned();
-    let mut snapshot = parse(
-        &serde_json::from_slice(&run(&["--format=json", "list", "sinks"])?)?,
-        default,
-    )?;
-    snapshot.streams = parse_streams(&serde_json::from_slice(&run(&[
-        "--format=json",
-        "list",
-        "sink-inputs",
-    ])?)?);
+    let (default, outputs, streams) = crate::pulse::snapshot_json()?;
+    let mut snapshot = parse(&outputs, default)?;
+    snapshot.streams = parse_streams(&streams);
     Ok(snapshot)
 }
 fn volume_values(output: &Output, channel: Option<&str>, percent: u8) -> Result<Vec<u32>> {
@@ -274,12 +214,6 @@ fn volume_values(output: &Output, channel: Option<&str>, percent: u8) -> Result<
         })
         .collect())
 }
-fn volumes(output: &Output, channel: Option<&str>, percent: u8) -> Result<Vec<String>> {
-    Ok(volume_values(output, channel, percent)?
-        .into_iter()
-        .map(|v| v.to_string())
-        .collect())
-}
 // Immediate visual feedback uses the same channel math as the audio worker.
 pub fn preview(snapshot: &mut Snapshot, control: &Control) {
     if let Control::Volume {
@@ -297,91 +231,103 @@ pub fn preview(snapshot: &mut Snapshot, control: &Control) {
 }
 fn apply(control: Control) -> Result<()> {
     let current = read()?;
-    match control {
-        Control::StreamVolume(index, percent) => {
-            ensure!(percent <= 150, "Stream volume must be at most 150 percent");
-            ensure!(
-                current.streams.iter().any(|stream| stream.index == index),
-                "Audio stream ended"
-            );
-            run(&[
-                "set-sink-input-volume",
-                &index.to_string(),
-                &format!("{percent}%"),
-            ])?;
-            return Ok(());
-        }
-        Control::StreamMute(index) => {
-            let stream = current
-                .streams
-                .iter()
-                .find(|stream| stream.index == index)
-                .context("Audio stream ended")?;
-            run(&[
-                "set-sink-input-mute",
-                &index.to_string(),
-                if stream.muted { "0" } else { "1" },
-            ])?;
-            return Ok(());
-        }
-        _ => {}
-    }
-    let name = match &control {
-        Control::Volume { output, .. }
-        | Control::Mute(output)
-        | Control::Output(output)
-        | Control::Port(output, _) => output,
-        Control::StreamVolume(_, _) | Control::StreamMute(_) => unreachable!(),
-    };
-    let output = current
-        .outputs
-        .iter()
-        .find(|s| &s.name == name)
-        .context("Output disconnected")?;
-    match control {
-        Control::Volume {
-            output: name,
-            channel,
-            percent,
-        } => {
-            let mut args = vec!["set-sink-volume".into(), name];
-            args.extend(volumes(output, channel.as_deref(), percent)?);
-            pactl(&args)?;
-        }
-        Control::Mute(name) => {
-            run(&["set-sink-mute", &name, if output.muted { "0" } else { "1" }])?;
-        }
-        Control::Port(name, port) => {
-            ensure!(
-                output.ports.iter().any(|p| p.name == port && p.available),
-                "Audio port is unavailable"
-            );
-            run(&["set-sink-port", &name, &port])?;
-            activate_output(&name)?;
-        }
-        Control::Output(name) => {
-            activate_output(&name)?;
-        }
-        Control::StreamVolume(_, _) | Control::StreamMute(_) => unreachable!(),
-    }
-    Ok(())
+    crate::pulse::with(|connection| {
+        let command = match control {
+            Control::StreamVolume(index, percent) => {
+                ensure!(percent <= 150, "Stream volume must be at most 150 percent");
+                let stream = connection
+                    .streams()?
+                    .into_iter()
+                    .find(|s| s.index == index)
+                    .context("Audio stream ended")?;
+                Command::SetSinkInputVolume(SetStreamVolumeParams {
+                    index,
+                    volume: crate::pulse::volumes(std::iter::repeat_n(
+                        (u32::from(percent) * 65536 + 50) / 100,
+                        stream.cvolume.channels().len(),
+                    )),
+                })
+            }
+            Control::StreamMute(index) => {
+                let stream = current
+                    .streams
+                    .iter()
+                    .find(|s| s.index == index)
+                    .context("Audio stream ended")?;
+                Command::SetSinkInputMute(SetStreamMuteParams {
+                    index,
+                    mute: !stream.muted,
+                })
+            }
+            control => {
+                let name = match &control {
+                    Control::Volume { output, .. }
+                    | Control::Mute(output)
+                    | Control::Output(output)
+                    | Control::Port(output, _) => output,
+                    _ => unreachable!(),
+                };
+                let output = current
+                    .outputs
+                    .iter()
+                    .find(|s| &s.name == name)
+                    .context("Output disconnected")?;
+                match control {
+                    Control::Volume {
+                        output: name,
+                        channel,
+                        percent,
+                    } => Command::SetSinkVolume(SetDeviceVolumeParams {
+                        device_index: None,
+                        device_name: Some(crate::pulse::name(&name)?),
+                        volume: crate::pulse::volumes(volume_values(
+                            output,
+                            channel.as_deref(),
+                            percent,
+                        )?),
+                    }),
+                    Control::Mute(name) => Command::SetSinkMute(SetDeviceMuteParams {
+                        device_index: None,
+                        device_name: Some(crate::pulse::name(&name)?),
+                        mute: !output.muted,
+                    }),
+                    Control::Port(name, port) => {
+                        ensure!(
+                            output.ports.iter().any(|p| p.name == port && p.available),
+                            "Audio port is unavailable"
+                        );
+                        connection.request(&Command::SetSinkPort(SetPortParams {
+                            index: None,
+                            name: Some(crate::pulse::name(&name)?),
+                            port_name: crate::pulse::name(&port)?,
+                        }))?;
+                        return activate_output(connection, &name);
+                    }
+                    Control::Output(name) => return activate_output(connection, &name),
+                    _ => unreachable!(),
+                }
+            }
+        };
+        connection.request(&command)?;
+        Ok(())
+    })
 }
-fn activate_output(name: &str) -> Result<()> {
-    run(&["set-default-sink", name])?;
-    // Move current playback too, so choosing any destination is audible immediately.
-    let inputs: Value = serde_json::from_slice(&run(&["--format=json", "list", "sink-inputs"])?)?;
-    for input in inputs.as_array().into_iter().flatten() {
-        if let Some(id) = input["index"].as_u64() {
-            // A stream can disappear between enumeration and move.
-            let _ = run(&["move-sink-input", &id.to_string(), name]);
-        }
+fn activate_output(connection: &mut crate::pulse::Connection, name: &str) -> Result<()> {
+    connection.request(&Command::SetDefaultSink(crate::pulse::name(name)?))?;
+    for stream in connection.streams()? {
+        // Streams can end between enumeration and moving them.
+        let _ = connection.request(&Command::MoveSinkInput(MoveStreamParams {
+            index: Some(stream.index),
+            device_index: None,
+            device_name: Some(crate::pulse::name(name)?),
+        }));
     }
     Ok(())
 }
 pub fn watch(sender: std::sync::mpsc::Sender<Update>) -> mpsc::Sender<Request> {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
-        let mut subscription = Subscription::start().ok();
+        let mut subscription = crate::pulse::Connection::subscribe().ok();
         let mut request = Request::Refresh;
         loop {
             let (completed, result) = match request {
@@ -419,7 +365,7 @@ pub fn watch(sender: std::sync::mpsc::Sender<Update>) -> mpsc::Sender<Request> {
                 }
                 if Instant::now() >= deadline {
                     if subscription.is_none() {
-                        subscription = Subscription::start().ok();
+                        subscription = crate::pulse::Connection::subscribe().ok();
                     }
                     break Request::Refresh;
                 }
@@ -429,94 +375,9 @@ pub fn watch(sender: std::sync::mpsc::Sender<Update>) -> mpsc::Sender<Request> {
     tx
 }
 
-struct Subscription {
-    child: Child,
-    stdout: ChildStdout,
-    pending: Vec<u8>,
-}
-impl Subscription {
-    fn start() -> Result<Self> {
-        let mut child = Command::new("pactl")
-            .arg("subscribe")
-            .env("LC_ALL", "C")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()?;
-        let stdout = child.stdout.take().context("Missing pactl event stream")?;
-        let subscription = Self {
-            child,
-            stdout,
-            pending: Vec::new(),
-        };
-        let fd = subscription.stdout.as_raw_fd();
-        // The audio worker must keep servicing sliders while waiting for events.
-        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-        ensure!(
-            flags >= 0 && unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } >= 0,
-            "Cannot make pactl event stream nonblocking"
-        );
-        Ok(subscription)
-    }
-    fn changed(&mut self) -> Result<bool> {
-        let mut changed = false;
-        let mut bytes = [0; 4096];
-        loop {
-            match self.stdout.read(&mut bytes) {
-                Ok(0) => bail!("Audio event stream disconnected"),
-                Ok(n) => {
-                    self.pending.extend_from_slice(&bytes[..n]);
-                    while let Some(end) = self.pending.iter().position(|b| *b == b'\n') {
-                        changed |= audio_event(&String::from_utf8_lossy(&self.pending[..end]));
-                        self.pending.drain(..=end);
-                    }
-                    ensure!(self.pending.len() <= 4096, "Oversized audio event");
-                }
-                Err(e) if e.kind() == ErrorKind::WouldBlock => return Ok(changed),
-                Err(e) if e.kind() == ErrorKind::Interrupted => continue,
-                Err(e) => return Err(e.into()),
-            }
-        }
-    }
-}
-impl Drop for Subscription {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-fn audio_event(line: &str) -> bool {
-    [
-        " on sink #",
-        " on sink-input #",
-        " on server #",
-        " on card #",
-    ]
-    .iter()
-    .any(|facility| line.contains(facility))
-}
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn refreshes_for_output_stream_and_default_device_events() {
-        for event in [
-            "Event 'change' on sink #42",
-            "Event 'new' on sink-input #7",
-            "Event 'remove' on sink-input #7",
-            "Event 'change' on server #0",
-            "Event 'change' on card #1",
-        ] {
-            assert!(audio_event(event), "ignored {event}");
-        }
-        for event in [
-            "Event 'change' on source #42",
-            "Event 'new' on client #2",
-            "",
-        ] {
-            assert!(!audio_event(event), "refreshed for {event}");
-        }
-    }
     fn fixture() -> Snapshot {
         parse(&serde_json::json!([{
         "name":"speaker", "channel_map":"front-right,front-left", "volume":{
@@ -529,12 +390,12 @@ mod tests {
         let s = fixture();
         let o = s.active().unwrap();
         assert_eq!(
-            volumes(o, Some("front-left"), 25).unwrap(),
-            ["65536", "16384"]
+            volume_values(o, Some("front-left"), 25).unwrap(),
+            [65536, 16384]
         );
-        assert_eq!(volumes(o, None, 50).unwrap(), ["32768", "16384"]);
-        assert!(volumes(o, Some("missing"), 50).is_err());
-        assert!(volumes(o, None, 101).is_err());
+        assert_eq!(volume_values(o, None, 50).unwrap(), [32768, 16384]);
+        assert!(volume_values(o, Some("missing"), 50).is_err());
+        assert!(volume_values(o, None, 101).is_err());
         assert!(!o.ports[0].available);
         assert_eq!(o.active_port, "speaker");
     }
@@ -581,7 +442,7 @@ mod tests {
         for c in &mut o.channels {
             c.value = 0;
         }
-        assert_eq!(volumes(o, None, 50).unwrap(), ["32768", "32768"]);
+        assert_eq!(volume_values(o, None, 50).unwrap(), [32768, 32768]);
         s.default = "removed".into();
         assert!(s.active().is_none());
         assert!(parse(&Value::Null, String::new()).is_err());
@@ -589,17 +450,25 @@ mod tests {
     #[test]
     #[ignore = "requires a running PulseAudio/PipeWire-Pulse server; creates a temporary null sink"]
     fn live_volume_and_mute_roundtrip() {
-        struct Module(String);
+        struct Module(u32);
         impl Drop for Module {
             fn drop(&mut self) {
-                let _ = run(&["unload-module", &self.0]);
+                let _ = crate::pulse::with(|c| c.request(&Command::UnloadModule(self.0)));
             }
         }
         let name = format!("bharta-test-{}", std::process::id());
         let args = format!("sink_name={name}");
-        let id =
-            String::from_utf8(run(&["load-module", "module-null-sink", &args]).unwrap()).unwrap();
-        let _module = Module(id.trim().into());
+        let id = crate::pulse::with(|c| {
+            c.request(&Command::LoadModule(LoadModuleParams {
+                name: c"module-null-sink".into(),
+                arguments: Some(crate::pulse::name(&args)?),
+            }))
+        })
+        .unwrap();
+        let id = TagStructReader::new(&mut std::io::Cursor::new(id), MAX_VERSION)
+            .read_u32()
+            .unwrap();
+        let _module = Module(id);
         apply(Control::Volume {
             output: name.clone(),
             channel: None,
@@ -632,6 +501,57 @@ mod tests {
                 .percent(),
             40
         );
+        // Create a paused stereo app on the temporary output; stream controls
+        // must retain the channel count and work independently of sink volume.
+        let mut playback = crate::pulse::Connection::open().unwrap();
+        let mut props = Props::new();
+        props.set(Prop::ApplicationName, c"bharta stream test");
+        let bytes = playback
+            .request(&Command::CreatePlaybackStream(PlaybackStreamParams {
+                sample_spec: SampleSpec {
+                    format: SampleFormat::S16Le,
+                    channels: 2,
+                    sample_rate: 48000,
+                },
+                channel_map: ChannelMap::stereo(),
+                sink_name: Some(crate::pulse::name(&name).unwrap()),
+                cvolume: Some(ChannelVolume::norm(2)),
+                props,
+                flags: pulseaudio::protocol::stream::StreamFlags {
+                    start_corked: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            }))
+            .unwrap();
+        let stream = CreatePlaybackStreamReply::read(
+            &mut TagStructReader::new(&mut std::io::Cursor::new(bytes), MAX_VERSION),
+            MAX_VERSION,
+        )
+        .unwrap();
+        apply(Control::StreamVolume(stream.stream_index, 60)).unwrap();
+        apply(Control::StreamMute(stream.stream_index)).unwrap();
+        let inputs = playback.streams().unwrap();
+        let input = inputs
+            .iter()
+            .find(|s| s.index == stream.stream_index)
+            .unwrap();
+        assert!(input.muted);
+        assert_eq!(input.cvolume.channels().len(), 2);
+        assert!(input.cvolume.channels().iter().all(|v| v.as_u32() == 39322));
+        apply(Control::StreamMute(stream.stream_index)).unwrap();
+        assert!(
+            !playback
+                .streams()
+                .unwrap()
+                .iter()
+                .find(|s| s.index == stream.stream_index)
+                .unwrap()
+                .muted
+        );
+        playback
+            .request(&Command::DeletePlaybackStream(stream.channel))
+            .unwrap();
         apply(Control::Mute(name.clone())).unwrap();
         assert!(
             read()

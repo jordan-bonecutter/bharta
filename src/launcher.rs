@@ -104,13 +104,196 @@ fn collect(dir: &Path, files: &mut Vec<PathBuf>, depth: usize) {
         }
     }
 }
+fn desktop_fields(text: &str) -> HashMap<&str, &str> {
+    let mut active = false;
+    let mut fields = HashMap::new();
+    for line in text.lines().map(str::trim) {
+        if line.starts_with('[') {
+            active = line == "[Desktop Entry]";
+        } else if active
+            && !line.starts_with('#')
+            && let Some((key, value)) = line.split_once('=')
+        {
+            fields.insert(key, value);
+        }
+    }
+    fields
+}
+fn unescape(value: &str) -> String {
+    let mut chars = value.chars();
+    let mut result = String::new();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            result.push(ch);
+            continue;
+        }
+        match chars.next() {
+            Some('s') => result.push(' '),
+            Some('n') => result.push('\n'),
+            Some('t') => result.push('\t'),
+            Some('r') => result.push('\r'),
+            Some('\\') => result.push('\\'),
+            Some(ch) => {
+                result.push('\\');
+                result.push(ch);
+            }
+            None => result.push('\\'),
+        }
+    }
+    result
+}
+fn exec_args(exec: &str, name: &str, icon: &str, path: &Path) -> anyhow::Result<Vec<String>> {
+    let value = unescape(exec);
+    let mut chars = value.chars().peekable();
+    let mut quoted = false;
+    let mut present = false;
+    let mut word = String::new();
+    let mut words = vec![];
+    while let Some(ch) = chars.next() {
+        match ch {
+            '"' => {
+                quoted = !quoted;
+                present = true;
+            }
+            '\\' => {
+                let next = chars
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("Trailing escape in application command"))?;
+                if quoted && !matches!(next, '"' | '\\' | '$' | '`') {
+                    word.push('\\');
+                }
+                word.push(next);
+                present = true;
+            }
+            ch if ch.is_whitespace() && !quoted => {
+                if present {
+                    words.push(std::mem::take(&mut word));
+                    present = false;
+                }
+            }
+            ch => {
+                word.push(ch);
+                present = true;
+            }
+        }
+    }
+    anyhow::ensure!(!quoted, "Unclosed quote in application command");
+    if present {
+        words.push(word);
+    }
+    let mut result = vec![];
+    for word in words {
+        if word == "%i" {
+            if !icon.is_empty() {
+                result.extend(["--icon".into(), icon.into()]);
+            }
+            continue;
+        }
+        let mut value = String::new();
+        let mut chars = word.chars();
+        let mut removed = false;
+        while let Some(ch) = chars.next() {
+            if ch != '%' {
+                value.push(ch);
+                continue;
+            }
+            match chars.next() {
+                Some('%') => value.push('%'),
+                Some('c') => value.push_str(name),
+                Some('k') => value.push_str(&path.to_string_lossy()),
+                Some('f' | 'F' | 'u' | 'U' | 'd' | 'D' | 'n' | 'N' | 'v' | 'm') => removed = true,
+                _ => anyhow::bail!("Unsupported application field code"),
+            }
+        }
+        if !removed || !value.is_empty() {
+            result.push(value);
+        }
+    }
+    anyhow::ensure!(
+        result.first().is_some_and(|s| !s.is_empty()),
+        "Application has no executable"
+    );
+    Ok(result)
+}
+fn activate(path: &Path) -> anyhow::Result<()> {
+    let id = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| anyhow::anyhow!("Invalid desktop application ID"))?;
+    let object = format!("/{}", id.replace('.', "/").replace('-', "_"));
+    let connection = zbus::blocking::Connection::session()?;
+    let app = zbus::blocking::Proxy::new(
+        &connection,
+        id,
+        object.as_str(),
+        "org.freedesktop.Application",
+    )?;
+    let data: HashMap<String, zbus::zvariant::OwnedValue> = HashMap::new();
+    let _: () = app.call("Activate", &(data,))?;
+    Ok(())
+}
+fn terminal(args: Vec<String>) -> anyhow::Result<Vec<String>> {
+    // Terminals are applications, not wrapper utilities. Use an installed desktop
+    // terminal directly for Terminal=true entries, or the user's chosen terminal.
+    if let Ok(command) = std::env::var("TERMINAL")
+        && !command.is_empty()
+    {
+        let mut terminal = exec_args(&command, "", "", Path::new(""))?;
+        terminal.push("-e".into());
+        terminal.extend(args);
+        return Ok(terminal);
+    }
+    for (program, flag) in [
+        ("foot", "-e"),
+        ("kitty", "--"),
+        ("alacritty", "-e"),
+        ("gnome-terminal", "--"),
+        ("konsole", "-e"),
+        ("xterm", "-e"),
+    ] {
+        if std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+            .any(|dir| dir.join(program).is_file())
+        {
+            let mut terminal = vec![program.into(), flag.into()];
+            terminal.extend(args);
+            return Ok(terminal);
+        }
+    }
+    anyhow::bail!("No terminal application available for this entry")
+}
 pub fn launch(path: &Path) -> anyhow::Result<()> {
-    // GIO implements Desktop Entry field codes, terminal apps and D-Bus activation.
-    let status = std::process::Command::new("gio")
-        .arg("launch")
-        .arg(path)
-        .status()?;
-    anyhow::ensure!(status.success(), "Could not launch application");
+    let text = std::fs::read_to_string(path)?;
+    let fields = desktop_fields(&text);
+    if fields.get("DBusActivatable") == Some(&"true") {
+        match activate(path) {
+            Ok(()) => return Ok(()),
+            Err(error) if !fields.contains_key("Exec") => return Err(error),
+            Err(_) => (),
+        }
+    }
+    let exec = fields
+        .get("Exec")
+        .ok_or_else(|| anyhow::anyhow!("Application has no launch command"))?;
+    let mut args = exec_args(
+        exec,
+        &unescape(fields.get("Name").unwrap_or(&"")),
+        &unescape(fields.get("Icon").unwrap_or(&"")),
+        path,
+    )?;
+    if fields.get("Terminal") == Some(&"true") {
+        args = terminal(args)?;
+    }
+    let mut command = std::process::Command::new(&args[0]);
+    command.args(&args[1..]);
+    if let Some(dir) = fields.get("Path")
+        && !dir.is_empty()
+    {
+        command.current_dir(unescape(dir));
+    }
+    let mut child = command.spawn()?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
     Ok(())
 }
 /// Start an external launcher without waiting for its window to close.
@@ -124,6 +307,31 @@ pub fn launch_executable(executable: &str, args: &[&str]) -> std::io::Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn exec_field_codes_and_quoting_preserve_literal_arguments() {
+        let args = exec_args(
+            r#"editor "a b" "$(literal)" %c %i %k %U %%"#,
+            "My App",
+            "app-icon",
+            Path::new("/tmp/my app.desktop"),
+        )
+        .unwrap();
+        assert_eq!(
+            args,
+            [
+                "editor",
+                "a b",
+                "$(literal)",
+                "My App",
+                "--icon",
+                "app-icon",
+                "/tmp/my app.desktop",
+                "%"
+            ]
+        );
+        assert!(exec_args("editor %q", "", "", Path::new("")).is_err());
+        assert!(exec_args("editor \"unclosed", "", "", Path::new("")).is_err());
+    }
     #[test]
     fn respects_visibility_and_desktop_groups() {
         let text = "[Desktop Entry]\nType=Application\nName=Editor\nExec=editor %U\nKeywords=code;\n[Desktop Action New]\nName=Wrong";

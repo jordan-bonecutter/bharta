@@ -4,6 +4,7 @@ Build first: cargo build --release --examples && cargo build --release
 Run: python3 tests/headless_ui.py /tmp/bharta-headless
 Add --eq-only to check isolated stream spectra and save an EQ screenshot.
 Add --session-only to check session buttons and mocked power commands.
+Add --network-only to check NetworkManager D-Bus scanning, radio, and connections.
 Add --audio-only to check audio controls, event updates, and drawer height.
 Add --performance-only to measure steady/changing audio and Sound drawer CPU.
 Add --launcher-only to check the default and external app launchers.
@@ -47,112 +48,18 @@ with tempfile.TemporaryDirectory(prefix='bharta-headless-') as directory:
     routing.write_text(json.dumps({'default':'test', 'test':'speaker', 'hdmi':'hdmi'}))
     moves = runtime / 'moves.json'
     moves.write_text('[]')
-    fake = runtime / 'pactl'
-    fake.write_text('''#!/usr/bin/env python3
-import json,sys,os
-from pathlib import Path
-p=Path(os.environ['BHARTA_TEST_AUDIO'])
-r=Path(os.environ['BHARTA_TEST_ROUTING'])
-route=json.loads(r.read_text())
-a=sys.argv[1:]
-if a==['subscribe']:
- import time
- previous=None
- while True:
-  pidfile=Path(os.environ['BHARTA_TEST_WINDOW_PID'])
-  current=(p.read_text(),r.read_text(),Path(os.environ['BHARTA_TEST_MUTED']).read_text(),pidfile.exists())
-  if current!=previous:
-   print("Event 'change' on sink #0",flush=True);previous=current
-  time.sleep(.01)
-elif a==['get-default-sink']:print(route['default'])
-elif a==['--format=json','list','sinks']:
- v=json.loads(p.read_text())
- outputs=[]
- for name,description,ports in [('test','Built-in audio',[('speaker','Speakers'),('headphones','Headphones')]),('hdmi','External display',[('hdmi','HDMI')])]:
-  outputs.append({'name':name,'description':description,'channel_map':'front-left,front-right','volume':{k:{'value':n} for k,n in zip(['front-left','front-right'],v)},'ports':[{'name':n,'description':d,'availability':'yes'} for n,d in ports],'active_port':route[name],'mute':json.loads(Path(os.environ['BHARTA_TEST_MUTED']).read_text())})
- print(json.dumps(outputs))
-elif a==['--format=json','list','sink-inputs']:
- streams=[
-  {'index':11,'corked':False,'mute':False,'volume':{'front-left':{'value':49152},'front-right':{'value':49152}},'properties':{'application.name':'Firefox','media.name':'YouTube'}},
-  {'index':12,'corked':False,'mute':False,'volume':{'front-left':{'value':32768},'front-right':{'value':32768}},'properties':{'application.name':'Spotify','media.name':'Music'}},
- ]
- pidfile=os.environ.get('BHARTA_TEST_WINDOW_PID')
- if pidfile and Path(pidfile).exists():
-  streams.append({'index':13,'corked':False,'mute':False,'volume':{'front-left':{'value':32768},'front-right':{'value':32768}},'properties':{'application.name':'Fixture','application.process.id':Path(pidfile).read_text().strip()}})
- print(json.dumps(streams))
-elif a and a[0]=='set-sink-volume':p.write_text(json.dumps([int(n) for n in a[2:]]))
-elif a and a[0]=='set-sink-mute':
- m=Path(os.environ['BHARTA_TEST_MUTED']);m.write_text(json.dumps(not json.loads(m.read_text())))
-elif a and a[0]=='set-sink-port':route[a[1]]=a[2];r.write_text(json.dumps(route))
-elif a and a[0]=='set-default-sink':route['default']=a[1];r.write_text(json.dumps(route))
-elif a and a[0]=='move-sink-input':
- m=Path(os.environ['BHARTA_TEST_MOVES']);values=json.loads(m.read_text());values.append(a[1:]);m.write_text(json.dumps(values))
-elif 'list' in a:print('[]')
-''')
-    fake.chmod(0o755)
-    fake_capture = runtime / 'parec'
     tray_tone = runtime / 'tray-tone'
     tray_tone.write_text('375')
     env['BHARTA_TEST_TRAY_TONE'] = str(tray_tone)
-    fake_capture.write_text('''#!/usr/bin/env python3
-import math,os,struct,sys,time
-from pathlib import Path
-phase=0.0
-frame=0
-rate=24000
-args=sys.argv[1:]
-frequency=750 if '--monitor-stream=11' in args else 1600
-while True:
- if not any(a.startswith('--monitor-stream=') for a in args):
-  tone=Path(os.environ['BHARTA_TEST_TRAY_TONE']).read_text().strip()
-  frequency=375 if tone=='music' else float(tone or frequency)
- dynamic=Path(os.environ['BHARTA_TEST_TRAY_TONE']).read_text().strip()=='music'
- amplitude=10000 * (.55 + .45*math.sin(frame*.37)) if dynamic else 10000
- values=[]
- for _ in range(1024):
-  values.append(int(amplitude*math.sin(phase)) if frequency else 0)
-  phase += 2*math.pi*frequency/rate
-  if phase > 2*math.pi: phase -= 2*math.pi
- sys.stdout.buffer.write(struct.pack('<1024h',*values));sys.stdout.buffer.flush()
- frame += 1
- time.sleep(1024/rate)
-''')
-    fake_capture.chmod(0o755)
     wifi_state = runtime / 'wifi.json'
     wifi_state.write_text(json.dumps({'enabled': True, 'active': 'Home'}))
     wifi_log = DEST / 'wifi-actions.jsonl'
     wifi_log.write_text('')
     env['BHARTA_TEST_WIFI_STATE'] = str(wifi_state)
     env['BHARTA_TEST_WIFI_LOG'] = str(wifi_log)
-    fake_wifi = runtime / 'nmcli'
-    fake_wifi.write_text('''#!/usr/bin/env python3
-import json, os, sys
-from pathlib import Path
-p=Path(os.environ['BHARTA_TEST_WIFI_STATE']);s=json.loads(p.read_text());a=sys.argv[1:]
-with open(os.environ['BHARTA_TEST_WIFI_LOG'],'a') as f:f.write(json.dumps(a)+'\\n')
-if a[-2:]==['radio','wifi']:print('enabled' if s['enabled'] else 'disabled')
-elif 'radio' in a:s['enabled']=a[-1]=='on';p.write_text(json.dumps(s))
-elif 'list' in a and s['enabled']:
- rows=[('AA','Home',85,'WPA2'),('BB','Cafe',48,'--'),('CC','Guest',24,'WPA2')]
- if s['active']=='1234':rows.insert(0,('DD','1234',70,'WPA2'))
- if s.get('many'):rows.extend((f'EE{i}',f'Extra network {i:02}',20,'--') for i in range(20))
- for bssid,name,strength,security in rows:
-  print(':'.join(['*' if s['active']==name else '',bssid,name,str(strength),security,'1','wlan0']))
-elif 'connect' in a:
- bssid=a[a.index('connect')+1]
- if a[-2:]==['hidden','yes']:
-  if bssid!='1234' or sys.stdin.readline().strip()!='1234':sys.exit(1)
-  s['active']=bssid;p.write_text(json.dumps(s));sys.exit(0)
- if bssid=='CC' and sys.stdin.readline().strip()!='1234':sys.exit(1)
- s['active']={'AA':'Home','BB':'Cafe','CC':'Guest'}[bssid];p.write_text(json.dumps(s))
-elif 'disconnect' in a:s['active']='';p.write_text(json.dumps(s))
-''')
-    fake_wifi.chmod(0o755)
     session_actions = runtime / 'session-actions'
-    fake_systemctl = runtime / 'systemctl'
-    fake_systemctl.write_text('#!/bin/sh\nprintf "%s\\n" "$1" >> "' + str(session_actions) + '"\necho "Session action test failure" >&2\nexit 1\n')
-    fake_systemctl.chmod(0o755)
-    env['PATH'] = str(runtime) + os.pathsep + env['PATH']
+    env['BHARTA_TEST_SESSION_ACTIONS'] = str(session_actions)
+    env['PULSE_SERVER'] = 'unix:' + str(runtime / 'pulse-native')
     env['BHARTA_TEST_AUDIO'] = str(state)
     env['BHARTA_TEST_ROUTING'] = str(routing)
     env['BHARTA_TEST_MOVES'] = str(moves)
@@ -168,7 +75,10 @@ elif 'disconnect' in a:s['active']='';p.write_text(json.dumps(s))
     config = runtime / 'config'
     config.write_text('output HEADLESS-1 mode 1600x900\nseat seat0 fallback true\n')
     def start(args, log):
-        p = subprocess.Popen(args, cwd=ROOT, env=env, stdout=open(DEST / log, 'w'),
+        process_env=env.copy()
+        if Path(args[0]) == BAR and os.environ.get('BHARTA_TEST_NO_CLI') == '1':
+            process_env['PATH']=str(runtime/'no-cli-tools')
+        p = subprocess.Popen(args, cwd=ROOT, env=process_env, stdout=open(DEST / log, 'w'),
                              stderr=subprocess.STDOUT, start_new_session=True)
         processes.append(p)
         return p
@@ -182,14 +92,14 @@ elif 'disconnect' in a:s['active']='';p.write_text(json.dumps(s))
             assert bar.poll() is None, f'Bar exited ({bar.returncode}) before {name}; see bar.log'
         run(['grim', '-o', 'HEADLESS-1', str(DEST / (name + '.png'))])
     def check_session_actions():
-        # First click only arms the action; cancelling never invokes systemctl.
+        # First click only arms the action; cancelling never calls login1.
         probe(100,122,'--click-hold',180).wait()
         time.sleep(.2);shot('session-confirm-reboot')
         assert not session_actions.exists(), 'Reboot ran without confirmation'
         probe(100,194,'--click-hold',180).wait()
         time.sleep(.2);shot('session-cancelled')
         assert not session_actions.exists(), 'Cancelling invoked a session action'
-        # Confirm shutdown against a private stub, never the host systemctl.
+        # Confirm shutdown against a private stub, never the host login1.
         probe(100,158,'--click-hold',180).wait()
         time.sleep(.2);shot('session-confirm-shutdown')
         assert not session_actions.exists(), 'Shutdown ran without confirmation'
@@ -228,6 +138,8 @@ elif 'disconnect' in a:s['active']='';p.write_text(json.dumps(s))
         env['BHARTA_TEST_BLUETOOTH_LOG'] = str(DEST / 'bluetooth-discovery.txt')
         (DEST / 'bluetooth-discovery.txt').write_text('')
         (DEST / 'bluetooth-discovery.txt.actions').write_text('')
+        audio_fixture = start([str(ROOT / 'target/release/examples/headless_audio')], 'audio.log')
+        services_fixture = start([str(ROOT / 'target/release/examples/headless_services')], 'services.log')
         bluetooth_fixture = start([str(ROOT / 'target/release/examples/headless_bluetooth')], 'bluetooth.log')
         sway = start(['sway', '--unsupported-gpu', '-c', str(config)], 'sway.log')
         for _ in range(100):
@@ -358,6 +270,9 @@ elif 'disconnect' in a:s['active']='';p.write_text(json.dumps(s))
         bluetooth_x=battery_left-64
         cpu_x=battery_left-192
         if '--eq-only' in sys.argv[2:]:
+            player=subprocess.Popen([str(ROOT / 'target/release/examples/headless_player')],cwd=ROOT,env=env,stdin=subprocess.PIPE,stdout=open(DEST / 'player.log','w'),stderr=subprocess.STDOUT,start_new_session=True)
+            processes.append(player)
+            time.sleep(1.2)
             probe(sound_x,14,'--hover',1800).wait()
             shot('equalizer')
             pixels=Image.open(DEST/'equalizer.png').convert('RGB')
@@ -374,7 +289,31 @@ elif 'disconnect' in a:s['active']='';p.write_text(json.dumps(s))
                         if max(pixels.getpixel((x,y)))-min(pixels.getpixel((x,y)))>70]
                     heights.append(max(ys)-min(ys) if ys else 0)
                 assert heights[band]>=10 and max(heights[:band]+heights[band+1:])<=5, f'Stream spectrum mismatch: {heights}'
-            print('Isolated stream equalizer spectra passed:', DEST)
+            for color in [(220,105,40),(40,180,90)]:
+                assert any(pixels.getpixel((x,y))==color for y in range(100,230) for x in range(drawer_left+12,drawer_left+45)), f'Source artwork missing: {color}'
+            print('Isolated stream spectra and both source artworks passed:', DEST)
+            sys.exit(0)
+        if '--network-only' in sys.argv[2:]:
+            wifi_left=max(8,min(wifi_x-160,1600-328))
+            probe(wifi_x,14,'--hover',1800).wait();shot('wifi-networks')
+            assert any(a.get('action')=='scan' for a in map(json.loads,wifi_log.read_text().splitlines())), 'Wi-Fi did not request a D-Bus scan'
+            probe(wifi_left+26,175,'--click-hold',1200).wait()
+            assert json.loads(wifi_state.read_text())['active']=='Cafe', 'Open Wi-Fi did not connect'
+            probe(wifi_left+26,216,'--click-hold',1200).wait()
+            probe(wifi_left+100,80,'--keys-only',2,3,4,5,28).wait()
+            assert json.loads(wifi_state.read_text())['active']=='Guest', 'Protected Wi-Fi did not connect'
+            probe(wifi_left+285,51,'--click-hold',1200).wait();shot('wifi-off')
+            assert not json.loads(wifi_state.read_text())['enabled'], 'Wi-Fi radio did not turn off'
+            probe(wifi_left+285,51,'--click-hold',1200).wait()
+            assert json.loads(wifi_state.read_text())['enabled'], 'Wi-Fi radio did not turn on'
+            probe(wifi_left+100,262,'--click-hold',900).wait()
+            probe(wifi_left+100,80,'--keys-only',2,3,4,5).wait()
+            probe(wifi_left+100,130,'--click-hold',400).wait()
+            probe(wifi_left+100,130,'--keys-only',2,3,4,5,28).wait();shot('wifi-hidden-connected')
+            assert json.loads(wifi_state.read_text())['active']=='1234', 'Hidden Wi-Fi did not connect'
+            hidden=[a for a in map(json.loads,wifi_log.read_text().splitlines()) if a.get('hidden')]
+            assert len(hidden)==1 and hidden[0]['secret_supplied'], 'Hidden Wi-Fi did not send a secret over D-Bus'
+            print('NetworkManager D-Bus scans, radio, and open/protected/hidden connections passed')
             sys.exit(0)
         if '--trays-only' not in sys.argv[2:]:
             def tray_heights(image):
@@ -501,243 +440,244 @@ elif 'disconnect' in a:s['active']='';p.write_text(json.dumps(s))
             cpu_clicked=probe(cpu_x,14,'--click-hold',1000);time.sleep(.6);shot('process-monitor-clicked');cpu_clicked.wait()
             assert Image.open(DEST/'process-monitor-clicked.png').convert('RGB').getpixel((int(monitor_left)+5,80))!=(0,0,0), 'Clicking CPU did not open its monitor'
             leave_cpu=probe(600,600,'--hover',900);leave_cpu.wait()
-        # All input is scoped to HEADLESS-1 on the private Wayland socket.
-        bluetooth_hover=probe(bluetooth_x,14,'--hover',1600)
-        time.sleep(1.2);shot('bluetooth-connected');bluetooth_hover.wait()
-        assert bluetooth_fixture.poll() is None, 'BlueZ fixture exited'
-        assert (DEST/'bluetooth-discovery.txt').read_text().splitlines() == ['start'], 'Opening Bluetooth did not start discovery'
-        bt_image=Image.open(DEST/'bluetooth-connected.png').convert('RGB')
-        bt_left=max(8,min(bluetooth_x-160,1600-328))
-        assert bt_image.getpixel((bt_left+30,80)) != (0,0,0), 'Bluetooth devices popup missing'
-        shot('bluetooth-scan')
-        bt_log=DEST/'bluetooth-discovery.txt'
-        leave_bt=probe(700,700,'--hover',1300);leave_bt.wait();time.sleep(.4)
-        assert bt_log.read_text().splitlines()==['start','stop'], 'Closing Bluetooth did not release discovery'
-        reopen_bt=probe(bluetooth_x,14,'--click-hold',1200);reopen_bt.wait()
-        assert bt_log.read_text().splitlines()==['start','stop','start'], 'Reopening Bluetooth did not scan'
-        # Scanning ends automatically, with no manual stop/rescan controls.
-        bounded_scan=probe(bt_left+25,75,'--hover',13000)
-        bounded_scan.wait();shot('bluetooth-scan-complete')
-        assert bt_log.read_text().splitlines()==['start','stop']*2, 'Discovery exceeded its deadline'
-        probe(sound_x,14,'--hover',700).wait()
-        probe(bluetooth_x,14,'--hover',1400).wait()
-        assert bt_log.read_text().splitlines()==['start','stop']*2+['start'], 'Opening Bluetooth again did not scan'
-        holder=probe(sound_x,14,'--click-hold',6000)
-        time.sleep(1);shot('sound')
-        assert bt_log.read_text().splitlines()==['start','stop']*3, 'Switching menus did not release discovery'
-        def bluetooth_status(expected):
-            deadline=time.monotonic()+6
-            while time.monotonic()<deadline:
-                diagnostic=run([str(BAR),'--check-bluetooth']).stdout
-                if expected in diagnostic:return diagnostic
-                time.sleep(.1)
-            raise AssertionError(diagnostic)
-        assert 'battery 73%' in bluetooth_status('Studio headphones')
-        reopen=probe(bluetooth_x,14,'--hover',1800);time.sleep(1.2);reopen.wait()
-        pair=probe(bt_left+26,246,'--click-hold',2200);time.sleep(1.5);shot('bluetooth-pair-confirmation');pair.wait()
-        actions=Path(str(bt_log)+'.actions')
-        assert actions.exists() and 'confirmation' in actions.read_text(), 'Pair did not register and invoke its agent'
-        cancel=probe(bt_left+95,104,'--click-hold',1600);cancel.wait()
-        bluetooth_status('Nearby speaker (AA:BB:CC:DD:EE:FF) — discovered')
-        assert 'paired' not in actions.read_text(), 'Cancel accepted Bluetooth pairing'
-        probe(wifi_x,14,'--hover',700).wait()
-        probe(bluetooth_x,14,'--hover',1400).wait()
-        pair=probe(bt_left+26,246,'--click-hold',2200);time.sleep(1.5);pair.wait()
-        confirm=probe(bt_left+30,104,'--click-hold',1800);confirm.wait()
-        bluetooth_status('Nearby speaker (AA:BB:CC:DD:EE:FF) — connected')
-        shot('bluetooth-paired')
-        disconnect=probe(bt_left+26,104,'--click-hold',1800);disconnect.wait()
-        bluetooth_status('Nearby speaker (AA:BB:CC:DD:EE:FF) — saved')
-        reconnect=probe(bt_left+26,216,'--click-hold',1800);reconnect.wait()
-        bluetooth_status('Nearby speaker (AA:BB:CC:DD:EE:FF) — connected')
-        assert actions.read_text().splitlines()==['confirmation','confirmation','paired','connected','disconnected','connected'], actions.read_text()
-        shot('bluetooth-reconnected')
-        # Bluetooth shows an input screen only when BlueZ requests a secret.
-        def field_fill_bounds(im, left, top):
-            crop = im.crop(tuple(map(int, (left,top,left+270,top+40))))
-            fill = im.getpixel((int(left)+16,int(top)+6))
-            mask = Image.new('1', crop.size)
-            mask.putdata([crop.getpixel((x,y)) == fill
-                          for y in range(crop.height) for x in range(crop.width)])
-            return mask.getbbox()
-        paired_count = 1
-        for mode in ['pin', 'passkey']:
-            Path(str(bt_log)+'.mode').write_text(mode)
+        if '--audio-only' not in sys.argv[2:]:
+            # All input is scoped to HEADLESS-1 on the private Wayland socket.
+            bluetooth_hover=probe(bluetooth_x,14,'--hover',1600)
+            time.sleep(1.2);shot('bluetooth-connected');bluetooth_hover.wait()
+            assert bluetooth_fixture.poll() is None, 'BlueZ fixture exited'
+            assert (DEST/'bluetooth-discovery.txt').read_text().splitlines() == ['start'], 'Opening Bluetooth did not start discovery'
+            bt_image=Image.open(DEST/'bluetooth-connected.png').convert('RGB')
+            bt_left=max(8,min(bluetooth_x-160,1600-328))
+            assert bt_image.getpixel((bt_left+30,80)) != (0,0,0), 'Bluetooth devices popup missing'
+            shot('bluetooth-scan')
+            bt_log=DEST/'bluetooth-discovery.txt'
+            leave_bt=probe(700,700,'--hover',1300);leave_bt.wait();time.sleep(.4)
+            assert bt_log.read_text().splitlines()==['start','stop'], 'Closing Bluetooth did not release discovery'
+            reopen_bt=probe(bluetooth_x,14,'--click-hold',1200);reopen_bt.wait()
+            assert bt_log.read_text().splitlines()==['start','stop','start'], 'Reopening Bluetooth did not scan'
+            # Scanning ends automatically, with no manual stop/rescan controls.
+            bounded_scan=probe(bt_left+25,75,'--hover',13000)
+            bounded_scan.wait();shot('bluetooth-scan-complete')
+            assert bt_log.read_text().splitlines()==['start','stop']*2, 'Discovery exceeded its deadline'
+            probe(sound_x,14,'--hover',700).wait()
+            probe(bluetooth_x,14,'--hover',1400).wait()
+            assert bt_log.read_text().splitlines()==['start','stop']*2+['start'], 'Opening Bluetooth again did not scan'
+            holder=probe(sound_x,14,'--click-hold',6000)
+            time.sleep(1);shot('sound')
+            assert bt_log.read_text().splitlines()==['start','stop']*3, 'Switching menus did not release discovery'
+            def bluetooth_status(expected):
+                deadline=time.monotonic()+6
+                while time.monotonic()<deadline:
+                    diagnostic=run([str(BAR),'--check-bluetooth']).stdout
+                    if expected in diagnostic:return diagnostic
+                    time.sleep(.1)
+                raise AssertionError(diagnostic)
+            assert 'battery 73%' in bluetooth_status('Studio headphones')
+            reopen=probe(bluetooth_x,14,'--hover',1800);time.sleep(1.2);reopen.wait()
+            pair=probe(bt_left+26,246,'--click-hold',2200);time.sleep(1.5);shot('bluetooth-pair-confirmation');pair.wait()
+            actions=Path(str(bt_log)+'.actions')
+            assert actions.exists() and 'confirmation' in actions.read_text(), 'Pair did not register and invoke its agent'
+            cancel=probe(bt_left+95,104,'--click-hold',1600);cancel.wait()
+            bluetooth_status('Nearby speaker (AA:BB:CC:DD:EE:FF) — discovered')
+            assert 'paired' not in actions.read_text(), 'Cancel accepted Bluetooth pairing'
             probe(wifi_x,14,'--hover',700).wait()
             probe(bluetooth_x,14,'--hover',1400).wait()
-            probe(bt_left+26,216,'--click-hold',1800).wait()
-            shot('bluetooth-'+mode)
-            assert mode in actions.read_text().splitlines(), 'Pairing did not request '+mode
-            probe(bt_left+100,90,'--back',1400).wait()
+            pair=probe(bt_left+26,246,'--click-hold',2200);time.sleep(1.5);pair.wait()
+            confirm=probe(bt_left+30,104,'--click-hold',1800);confirm.wait()
             bluetooth_status('Nearby speaker (AA:BB:CC:DD:EE:FF) — connected')
-            assert actions.read_text().splitlines().count('paired')==paired_count, 'Back accepted pairing'
+            shot('bluetooth-paired')
+            disconnect=probe(bt_left+26,104,'--click-hold',1800);disconnect.wait()
+            bluetooth_status('Nearby speaker (AA:BB:CC:DD:EE:FF) — saved')
+            reconnect=probe(bt_left+26,216,'--click-hold',1800);reconnect.wait()
+            bluetooth_status('Nearby speaker (AA:BB:CC:DD:EE:FF) — connected')
+            assert actions.read_text().splitlines()==['confirmation','confirmation','paired','connected','disconnected','connected'], actions.read_text()
+            shot('bluetooth-reconnected')
+            # Bluetooth shows an input screen only when BlueZ requests a secret.
+            def field_fill_bounds(im, left, top):
+                crop = im.crop(tuple(map(int, (left,top,left+270,top+40))))
+                fill = im.getpixel((int(left)+16,int(top)+6))
+                mask = Image.new('1', crop.size)
+                mask.putdata([crop.getpixel((x,y)) == fill
+                              for y in range(crop.height) for x in range(crop.width)])
+                return mask.getbbox()
+            paired_count = 1
+            for mode in ['pin', 'passkey']:
+                Path(str(bt_log)+'.mode').write_text(mode)
+                probe(wifi_x,14,'--hover',700).wait()
+                probe(bluetooth_x,14,'--hover',1400).wait()
+                probe(bt_left+26,216,'--click-hold',1800).wait()
+                shot('bluetooth-'+mode)
+                assert mode in actions.read_text().splitlines(), 'Pairing did not request '+mode
+                probe(bt_left+100,90,'--back',1400).wait()
+                bluetooth_status('Nearby speaker (AA:BB:CC:DD:EE:FF) — connected')
+                assert actions.read_text().splitlines().count('paired')==paired_count, 'Back accepted pairing'
+                probe(wifi_x,14,'--hover',700).wait()
+                probe(bluetooth_x,14,'--hover',1400).wait()
+                probe(bt_left+26,216,'--click-hold',1600).wait()
+                code=[2,3,4,5] if mode=='pin' else [2,3,4,5,6,7]
+                probe(bt_left+100,90,'--keys-only',*code).wait()
+                shot('bluetooth-'+mode+'-hidden')
+                probe(bt_left+292,120,'--click-hold',500).wait()
+                shot('bluetooth-'+mode+'-visible')
+                hidden = Image.open(DEST/('bluetooth-'+mode+'-hidden.png')).convert('RGB')
+                visible = Image.open(DEST/('bluetooth-'+mode+'-visible.png')).convert('RGB')
+                for bounds in [(bt_left+18,108,bt_left+85,128), (bt_left+285,112,bt_left+301,128)]:
+                    crop = tuple(map(int, bounds))
+                    assert ImageChops.difference(hidden.crop(crop), visible.crop(crop)).getbbox(), 'Reveal did not change pairing text and eye icon'
+                for bounds in [(bt_left,138,bt_left+320,180)]:
+                    crop = tuple(map(int, bounds))
+                    assert not ImageChops.difference(hidden.crop(crop), visible.crop(crop)).getbbox(), 'Pairing controls moved on reveal'
+                assert field_fill_bounds(hidden,bt_left+8,100) == field_fill_bounds(visible,bt_left+8,100), 'Pairing field moved on reveal'
+                probe(bt_left+292,120,'--click-hold',500).wait()
+                probe(bt_left+100,90,'--keys-only',28).wait()
+                bluetooth_status('Desk keyboard (AA:BB:CC:DD:EE:FF) — connected')
+                paired_count += 1
+                time.sleep(1.2)
+                probe(bt_left+26,104,'--click-hold',1600).wait()
+                bluetooth_status('Desk keyboard (AA:BB:CC:DD:EE:FF) — discovered')
+            Path(str(bt_log)+'.mode').write_text('pin')
             probe(wifi_x,14,'--hover',700).wait()
             probe(bluetooth_x,14,'--hover',1400).wait()
             probe(bt_left+26,216,'--click-hold',1600).wait()
-            code=[2,3,4,5] if mode=='pin' else [2,3,4,5,6,7]
-            probe(bt_left+100,90,'--keys-only',*code).wait()
-            shot('bluetooth-'+mode+'-hidden')
-            probe(bt_left+292,120,'--click-hold',500).wait()
-            shot('bluetooth-'+mode+'-visible')
-            hidden = Image.open(DEST/('bluetooth-'+mode+'-hidden.png')).convert('RGB')
-            visible = Image.open(DEST/('bluetooth-'+mode+'-visible.png')).convert('RGB')
-            for bounds in [(bt_left+18,108,bt_left+85,128), (bt_left+285,112,bt_left+301,128)]:
-                crop = tuple(map(int, bounds))
-                assert ImageChops.difference(hidden.crop(crop), visible.crop(crop)).getbbox(), 'Reveal did not change pairing text and eye icon'
-            for bounds in [(bt_left,138,bt_left+320,180)]:
-                crop = tuple(map(int, bounds))
-                assert not ImageChops.difference(hidden.crop(crop), visible.crop(crop)).getbbox(), 'Pairing controls moved on reveal'
-            assert field_fill_bounds(hidden,bt_left+8,100) == field_fill_bounds(visible,bt_left+8,100), 'Pairing field moved on reveal'
-            probe(bt_left+292,120,'--click-hold',500).wait()
-            probe(bt_left+100,90,'--keys-only',28).wait()
+            probe(700,700,'--click-hold',900).wait();shot('bluetooth-outside-dismissed')
+            assert Image.open(DEST/'bluetooth-outside-dismissed.png').convert('RGB').getpixel((int(bt_left)+5,80))==(0,0,0), 'Outside click did not dismiss Bluetooth PIN'
+            assert actions.read_text().splitlines().count('paired')==paired_count, 'Outside click accepted pairing'
+            Path(str(bt_log)+'.mode').write_text('none')
+            probe(wifi_x,14,'--hover',700).wait()
+            probe(bluetooth_x,14,'--hover',1400).wait()
+            probe(bt_left+26,216,'--click-hold',1800).wait()
             bluetooth_status('Desk keyboard (AA:BB:CC:DD:EE:FF) — connected')
-            paired_count += 1
-            time.sleep(1.2)
-            probe(bt_left+26,104,'--click-hold',1600).wait()
-            bluetooth_status('Desk keyboard (AA:BB:CC:DD:EE:FF) — discovered')
-        Path(str(bt_log)+'.mode').write_text('pin')
-        probe(wifi_x,14,'--hover',700).wait()
-        probe(bluetooth_x,14,'--hover',1400).wait()
-        probe(bt_left+26,216,'--click-hold',1600).wait()
-        probe(700,700,'--click-hold',900).wait();shot('bluetooth-outside-dismissed')
-        assert Image.open(DEST/'bluetooth-outside-dismissed.png').convert('RGB').getpixel((int(bt_left)+5,80))==(0,0,0), 'Outside click did not dismiss Bluetooth PIN'
-        assert actions.read_text().splitlines().count('paired')==paired_count, 'Outside click accepted pairing'
-        Path(str(bt_log)+'.mode').write_text('none')
-        probe(wifi_x,14,'--hover',700).wait()
-        probe(bluetooth_x,14,'--hover',1400).wait()
-        probe(bt_left+26,216,'--click-hold',1800).wait()
-        bluetooth_status('Desk keyboard (AA:BB:CC:DD:EE:FF) — connected')
-        shot('bluetooth-automatic')
-        assert 'automatic' in actions.read_text().splitlines(), 'No-input pairing did not finish'
-        probe(bt_left+285,51,'--click-hold',1400).wait()
-        shot('bluetooth-off')
-        stopped=bt_log.read_text().splitlines()
-        probe(wifi_x,14,'--hover',700).wait()
-        probe(bluetooth_x,14,'--hover',1400).wait()
-        assert bt_log.read_text().splitlines()==stopped, 'Disabled Bluetooth started discovery'
-        probe(bt_left+285,51,'--click-hold',1400).wait()
-        assert bt_log.read_text().splitlines()[-1]=='start', 'Enabling Bluetooth did not scan'
-        def assert_wireless_no_highlight(left, centers, prefix):
-            for row,center in enumerate(centers):
-                for offset in [-14, 0, 14]:
-                    probe(left+100,center+offset,'--hover',350).wait()
-                    shot(prefix+'-hover')
-                    im=Image.open(DEST/(prefix+'-hover.png')).convert('RGB')
-                    colors=[im.getpixel((int(left)+285,int(y))) for y in centers]
-                    assert len(set(colors))==1, ("Unexpected row highlight",prefix,row,offset,colors)
-            probe(left+100,centers[0]+21,'--hover',350).wait();shot(prefix+'-gap')
-            im=Image.open(DEST/(prefix+'-gap.png')).convert('RGB')
-            assert im.getpixel((int(left)+285,int(centers[0])))==im.getpixel((int(left)+285,int(centers[1]))), 'Highlight stuck in a row gap'
-        assert_wireless_no_highlight(bt_left,[104,145,186],'bluetooth')
-        # Bottom-row tooltips must remain visible below the popup surface.
-        def assert_bottom_tooltip(left, bottom_row, prefix, outside_popup=True):
-            probe(left+100,51,'--hover',350).wait();shot(prefix+'-before-tooltip')
-            before=Image.open(DEST/(prefix+'-before-tooltip.png')).convert('RGB')
-            popup_bottom=max(y for y in range(28,500) if before.getpixel((int(left)+5,y))!=(0,0,0))
-            probe(left+100,bottom_row,'--hover',1600).wait();shot(prefix+'-bottom-tooltip')
-            after=Image.open(DEST/(prefix+'-bottom-tooltip.png')).convert('RGB')
-            top=popup_bottom+1 if outside_popup else int(bottom_row)+20
-            below=(int(left),top,min(1600,int(left)+320),top+85)
-            assert ImageChops.difference(before.crop(below),after.crop(below)).getbbox(), 'Bottom tooltip was clipped'
-        assert_bottom_tooltip(bt_left,186,'bluetooth')
-        # Wi-Fi scans on opening, connects open networks directly, and supports Back.
-        probe(wifi_x,14,'--hover',1600).wait();shot('wifi-networks')
-        wifi_left=max(8,min(wifi_x-160,1600-328))
-        assert_wireless_no_highlight(wifi_left,[104,175,216],'wifi')
-        # The hidden-network action now follows the last network row.
-        assert_bottom_tooltip(wifi_left,216,'wifi',outside_popup=False)
-        probe(wifi_left+100,175,'--click-hold',500).wait()
-        assert json.loads(wifi_state.read_text())['active']=='Home', 'Clicking the name connected Wi-Fi'
-        assert any(a[-2:]==['--rescan','yes'] for a in map(json.loads,wifi_log.read_text().splitlines())), 'Wi-Fi did not scan on opening'
-        probe(wifi_left+26,175,'--click-hold',1200).wait()
-        assert json.loads(wifi_state.read_text())['active']=='Cafe', 'Open Wi-Fi did not connect directly'
-        probe(wifi_left+26,216,'--click-hold',1200).wait();shot('wifi-password')
-        probe(700,700,'--click-hold',900).wait();shot('wifi-outside-dismissed')
-        assert Image.open(DEST/'wifi-outside-dismissed.png').convert('RGB').getpixel((int(wifi_left)+5,80))==(0,0,0), 'Outside click did not dismiss Wi-Fi password'
-        assert json.loads(wifi_state.read_text())['active']=='Cafe', 'Outside click connected Wi-Fi'
-        probe(wifi_x,14,'--hover',1200).wait()
-        probe(wifi_left+26,216,'--click-hold',1200).wait()
-        probe(wifi_left+100,80,'--back',1200).wait();shot('wifi-back')
-        assert json.loads(wifi_state.read_text())['active']=='Cafe', 'Back connected the protected network'
-        probe(wifi_left+26,216,'--click-hold',1200).wait()
-        probe(wifi_left+100,80,'--keys-only',2,3,4,5).wait()
-        shot('wifi-password-hidden')
-        pressed=probe(wifi_left+292,96,'--press-hold',350)
-        time.sleep(.4);shot('wifi-password-pressed');pressed.wait()
-        shot('wifi-password-visible')
-        hidden = Image.open(DEST/'wifi-password-hidden.png').convert('RGB')
-        visible = Image.open(DEST/'wifi-password-visible.png').convert('RGB')
-        text_crop=tuple(map(int,(wifi_left+18,87,wifi_left+85,105)))
-        assert ImageChops.difference(hidden.crop(text_crop),visible.crop(text_crop)).getbbox(), 'Wi-Fi reveal did not show the password'
-        # Compare the controls below the field, excluding its focus outline.
-        crop = tuple(map(int, (wifi_left,116,wifi_left+270,155)))
-        assert not ImageChops.difference(hidden.crop(crop), visible.crop(crop)).getbbox(), 'Wi-Fi controls moved on reveal'
-        probe(wifi_left+100,80,'--keys-only',28).wait()
-        assert json.loads(wifi_state.read_text())['active']=='Guest', 'Wi-Fi password input or Enter failed'
-        shot('wifi-connected')
-        probe(wifi_left+285,51,'--click-hold',1200).wait();shot('wifi-off')
-        assert not json.loads(wifi_state.read_text())['enabled'], 'Wi-Fi switch did not turn off'
-        probe(wifi_left+285,51,'--click-hold',1200).wait()
-        assert json.loads(wifi_state.read_text())['enabled'], 'Wi-Fi switch did not turn on'
+            shot('bluetooth-automatic')
+            assert 'automatic' in actions.read_text().splitlines(), 'No-input pairing did not finish'
+            probe(bt_left+285,51,'--click-hold',1400).wait()
+            shot('bluetooth-off')
+            stopped=bt_log.read_text().splitlines()
+            probe(wifi_x,14,'--hover',700).wait()
+            probe(bluetooth_x,14,'--hover',1400).wait()
+            assert bt_log.read_text().splitlines()==stopped, 'Disabled Bluetooth started discovery'
+            probe(bt_left+285,51,'--click-hold',1400).wait()
+            assert bt_log.read_text().splitlines()[-1]=='start', 'Enabling Bluetooth did not scan'
+            def assert_wireless_no_highlight(left, centers, prefix):
+                for row,center in enumerate(centers):
+                    for offset in [-14, 0, 14]:
+                        probe(left+100,center+offset,'--hover',350).wait()
+                        shot(prefix+'-hover')
+                        im=Image.open(DEST/(prefix+'-hover.png')).convert('RGB')
+                        colors=[im.getpixel((int(left)+285,int(y))) for y in centers]
+                        assert len(set(colors))==1, ("Unexpected row highlight",prefix,row,offset,colors)
+                probe(left+100,centers[0]+21,'--hover',350).wait();shot(prefix+'-gap')
+                im=Image.open(DEST/(prefix+'-gap.png')).convert('RGB')
+                assert im.getpixel((int(left)+285,int(centers[0])))==im.getpixel((int(left)+285,int(centers[1]))), 'Highlight stuck in a row gap'
+            assert_wireless_no_highlight(bt_left,[104,145,186],'bluetooth')
+            # Bottom-row tooltips must remain visible below the popup surface.
+            def assert_bottom_tooltip(left, bottom_row, prefix, outside_popup=True):
+                probe(left+100,51,'--hover',350).wait();shot(prefix+'-before-tooltip')
+                before=Image.open(DEST/(prefix+'-before-tooltip.png')).convert('RGB')
+                popup_bottom=max(y for y in range(28,500) if before.getpixel((int(left)+5,y))!=(0,0,0))
+                probe(left+100,bottom_row,'--hover',1600).wait();shot(prefix+'-bottom-tooltip')
+                after=Image.open(DEST/(prefix+'-bottom-tooltip.png')).convert('RGB')
+                top=popup_bottom+1 if outside_popup else int(bottom_row)+20
+                below=(int(left),top,min(1600,int(left)+320),top+85)
+                assert ImageChops.difference(before.crop(below),after.crop(below)).getbbox(), 'Bottom tooltip was clipped'
+            assert_bottom_tooltip(bt_left,186,'bluetooth')
+            # Wi-Fi scans on opening, connects open networks directly, and supports Back.
+            probe(wifi_x,14,'--hover',1600).wait();shot('wifi-networks')
+            wifi_left=max(8,min(wifi_x-160,1600-328))
+            assert_wireless_no_highlight(wifi_left,[104,175,216],'wifi')
+            # The hidden-network action now follows the last network row.
+            assert_bottom_tooltip(wifi_left,216,'wifi',outside_popup=False)
+            probe(wifi_left+100,175,'--click-hold',500).wait()
+            assert json.loads(wifi_state.read_text())['active']=='Home', 'Clicking the name connected Wi-Fi'
+            assert any(a.get('action')=='scan' for a in map(json.loads,wifi_log.read_text().splitlines())), 'Wi-Fi did not scan on opening'
+            probe(wifi_left+26,175,'--click-hold',1200).wait()
+            assert json.loads(wifi_state.read_text())['active']=='Cafe', 'Open Wi-Fi did not connect directly'
+            probe(wifi_left+26,216,'--click-hold',1200).wait();shot('wifi-password')
+            probe(700,700,'--click-hold',900).wait();shot('wifi-outside-dismissed')
+            assert Image.open(DEST/'wifi-outside-dismissed.png').convert('RGB').getpixel((int(wifi_left)+5,80))==(0,0,0), 'Outside click did not dismiss Wi-Fi password'
+            assert json.loads(wifi_state.read_text())['active']=='Cafe', 'Outside click connected Wi-Fi'
+            probe(wifi_x,14,'--hover',1200).wait()
+            probe(wifi_left+26,216,'--click-hold',1200).wait()
+            probe(wifi_left+100,80,'--back',1200).wait();shot('wifi-back')
+            assert json.loads(wifi_state.read_text())['active']=='Cafe', 'Back connected the protected network'
+            probe(wifi_left+26,216,'--click-hold',1200).wait()
+            probe(wifi_left+100,80,'--keys-only',2,3,4,5).wait()
+            shot('wifi-password-hidden')
+            pressed=probe(wifi_left+292,96,'--press-hold',350)
+            time.sleep(.4);shot('wifi-password-pressed');pressed.wait()
+            shot('wifi-password-visible')
+            hidden = Image.open(DEST/'wifi-password-hidden.png').convert('RGB')
+            visible = Image.open(DEST/'wifi-password-visible.png').convert('RGB')
+            text_crop=tuple(map(int,(wifi_left+18,87,wifi_left+85,105)))
+            assert ImageChops.difference(hidden.crop(text_crop),visible.crop(text_crop)).getbbox(), 'Wi-Fi reveal did not show the password'
+            # Compare the controls below the field, excluding its focus outline.
+            crop = tuple(map(int, (wifi_left,116,wifi_left+270,155)))
+            assert not ImageChops.difference(hidden.crop(crop), visible.crop(crop)).getbbox(), 'Wi-Fi controls moved on reveal'
+            probe(wifi_left+100,80,'--keys-only',28).wait()
+            assert json.loads(wifi_state.read_text())['active']=='Guest', 'Wi-Fi password input or Enter failed'
+            shot('wifi-connected')
+            probe(wifi_left+285,51,'--click-hold',1200).wait();shot('wifi-off')
+            assert not json.loads(wifi_state.read_text())['enabled'], 'Wi-Fi switch did not turn off'
+            probe(wifi_left+285,51,'--click-hold',1200).wait()
+            assert json.loads(wifi_state.read_text())['enabled'], 'Wi-Fi switch did not turn on'
 
-        probe(wifi_left+100,262,'--click-hold',900).wait()
-        shot('wifi-hidden-network')
-        hidden_view = Image.open(DEST/'wifi-hidden-network.png').convert('RGB')
-        baseline = field_fill_bounds(hidden,wifi_left+8,78)
-        assert baseline[3]-baseline[1] == 30, 'Password field has the wrong height'
-        for name in ['wifi-password-hidden','wifi-password-pressed','wifi-password-visible']:
-            bounds = field_fill_bounds(Image.open(DEST/(name+'.png')).convert('RGB'),wifi_left+8,78)
-            assert bounds == baseline, ('Password field expanded during eye interaction',name,bounds)
-        first = field_fill_bounds(hidden_view,wifi_left+8,78)
-        second = field_fill_bounds(hidden_view,wifi_left+8,123)
-        assert first[3]-first[1] == second[3]-second[1] == 30, 'Hidden-network text fields have different heights'
-        probe(wifi_left+100,80,'--keys-only',2,3,4,5).wait()
-        probe(wifi_left+100,130,'--click-hold',400).wait()
-        probe(wifi_left+100,130,'--keys-only',2,3,4,5,28).wait()
-        assert json.loads(wifi_state.read_text())['active']=='1234', 'Hidden Wi-Fi did not connect with SSID and password'
-        hidden_calls = [a for a in map(json.loads,wifi_log.read_text().splitlines()) if a[-2:]==['hidden','yes']]
-        assert len(hidden_calls)==1 and '--ask' in hidden_calls[0], 'Hidden Wi-Fi must request its secret through stdin'
-        shot('wifi-hidden-connected')
+            probe(wifi_left+100,262,'--click-hold',900).wait()
+            shot('wifi-hidden-network')
+            hidden_view = Image.open(DEST/'wifi-hidden-network.png').convert('RGB')
+            baseline = field_fill_bounds(hidden,wifi_left+8,78)
+            assert baseline[3]-baseline[1] == 30, 'Password field has the wrong height'
+            for name in ['wifi-password-hidden','wifi-password-pressed','wifi-password-visible']:
+                bounds = field_fill_bounds(Image.open(DEST/(name+'.png')).convert('RGB'),wifi_left+8,78)
+                assert bounds == baseline, ('Password field expanded during eye interaction',name,bounds)
+            first = field_fill_bounds(hidden_view,wifi_left+8,78)
+            second = field_fill_bounds(hidden_view,wifi_left+8,123)
+            assert first[3]-first[1] == second[3]-second[1] == 30, 'Hidden-network text fields have different heights'
+            probe(wifi_left+100,80,'--keys-only',2,3,4,5).wait()
+            probe(wifi_left+100,130,'--click-hold',400).wait()
+            probe(wifi_left+100,130,'--keys-only',2,3,4,5,28).wait()
+            assert json.loads(wifi_state.read_text())['active']=='1234', 'Hidden Wi-Fi did not connect with SSID and password'
+            hidden_calls = [a for a in map(json.loads,wifi_log.read_text().splitlines()) if a.get('hidden')]
+            assert len(hidden_calls)==1 and hidden_calls[0]['secret_supplied'], 'Hidden Wi-Fi must send its secret through private D-Bus'
+            shot('wifi-hidden-connected')
 
-        # A long scan scrolls only the network list; the footer stays clickable.
-        current=json.loads(wifi_state.read_text());current['many']=True
-        wifi_state.write_text(json.dumps(current))
-        probe(bluetooth_x,14,'--hover',800).wait()
-        probe(wifi_x,14,'--hover',1200).wait();shot('wifi-long-list')
-        before = Image.open(DEST/'wifi-long-list.png').convert('RGB')
-        bottom=max(y for y in range(28,700) if before.getpixel((int(wifi_left)+5,y))!=(0,0,0))
-        assert bottom < 380, 'Wi-Fi network list grew past its height limit'
-        probe(wifi_left+100,180,'--scroll',800).wait();shot('wifi-list-scrolled')
-        after = Image.open(DEST/'wifi-list-scrolled.png').convert('RGB')
-        list_crop=tuple(map(int,(wifi_left+12,70,wifi_left+270,300)))
-        assert ImageChops.difference(before.crop(list_crop),after.crop(list_crop)).getbbox(), 'Long Wi-Fi list did not scroll'
-        footer=tuple(map(int,(wifi_left,bottom-44,wifi_left+320,bottom+1)))
-        assert not ImageChops.difference(before.crop(footer),after.crop(footer)).getbbox(), 'Hidden-network footer moved while scrolling'
-        hovered=probe(wifi_left+100,bottom-24,'--hover',800)
-        time.sleep(.4);shot('wifi-hidden-button-hover');hovered.wait()
-        hover_image=Image.open(DEST/'wifi-hidden-button-hover.png').convert('RGB')
-        assert after.getpixel((int(wifi_left)+260,bottom-24)) != hover_image.getpixel((int(wifi_left)+260,bottom-24)), 'Hidden-network button did not highlight on hover'
-        label_crop=tuple(map(int,(wifi_left+16,bottom-40,wifi_left+220,bottom-12)))
-        def label_pixels(im):
-            crop=im.crop(label_crop)
-            mask=Image.new('1',crop.size)
-            mask.putdata([crop.getpixel((x,y))==(140,140,140)
-                          for y in range(crop.height) for x in range(crop.width)])
-            return mask
-        normal_text=label_pixels(after);hover_text=label_pixels(hover_image)
-        assert normal_text.getbbox() and not ImageChops.difference(normal_text,hover_text).getbbox(), 'Button text shifted on hover'
-        probe(wifi_left+100,bottom-24,'--click-hold',700).wait();shot('wifi-long-list-hidden')
-        probe(wifi_left+100,80,'--keys-only',2,3,4,5).wait()
-        probe(wifi_left+100,130,'--click-hold',400).wait()
-        probe(wifi_left+100,130,'--keys-only',2,3,4,5,28).wait()
-        hidden_calls = [a for a in map(json.loads,wifi_log.read_text().splitlines()) if a[-2:]==['hidden','yes']]
-        assert len(hidden_calls)==2, 'Hidden-network footer was not usable with a long list'
+            # A long scan scrolls only the network list; the footer stays clickable.
+            current=json.loads(wifi_state.read_text());current['many']=True
+            wifi_state.write_text(json.dumps(current))
+            probe(bluetooth_x,14,'--hover',800).wait()
+            probe(wifi_x,14,'--hover',1200).wait();shot('wifi-long-list')
+            before = Image.open(DEST/'wifi-long-list.png').convert('RGB')
+            bottom=max(y for y in range(28,700) if before.getpixel((int(wifi_left)+5,y))!=(0,0,0))
+            assert bottom < 380, 'Wi-Fi network list grew past its height limit'
+            probe(wifi_left+100,180,'--scroll',800).wait();shot('wifi-list-scrolled')
+            after = Image.open(DEST/'wifi-list-scrolled.png').convert('RGB')
+            list_crop=tuple(map(int,(wifi_left+12,70,wifi_left+270,300)))
+            assert ImageChops.difference(before.crop(list_crop),after.crop(list_crop)).getbbox(), 'Long Wi-Fi list did not scroll'
+            footer=tuple(map(int,(wifi_left,bottom-44,wifi_left+320,bottom+1)))
+            assert not ImageChops.difference(before.crop(footer),after.crop(footer)).getbbox(), 'Hidden-network footer moved while scrolling'
+            hovered=probe(wifi_left+100,bottom-24,'--hover',800)
+            time.sleep(.4);shot('wifi-hidden-button-hover');hovered.wait()
+            hover_image=Image.open(DEST/'wifi-hidden-button-hover.png').convert('RGB')
+            assert after.getpixel((int(wifi_left)+260,bottom-24)) != hover_image.getpixel((int(wifi_left)+260,bottom-24)), 'Hidden-network button did not highlight on hover'
+            label_crop=tuple(map(int,(wifi_left+16,bottom-40,wifi_left+220,bottom-12)))
+            def label_pixels(im):
+                crop=im.crop(label_crop)
+                mask=Image.new('1',crop.size)
+                mask.putdata([crop.getpixel((x,y))==(140,140,140)
+                              for y in range(crop.height) for x in range(crop.width)])
+                return mask
+            normal_text=label_pixels(after);hover_text=label_pixels(hover_image)
+            assert normal_text.getbbox() and not ImageChops.difference(normal_text,hover_text).getbbox(), 'Button text shifted on hover'
+            probe(wifi_left+100,bottom-24,'--click-hold',700).wait();shot('wifi-long-list-hidden')
+            probe(wifi_left+100,80,'--keys-only',2,3,4,5).wait()
+            probe(wifi_left+100,130,'--click-hold',400).wait()
+            probe(wifi_left+100,130,'--keys-only',2,3,4,5,28).wait()
+            hidden_calls = [a for a in map(json.loads,wifi_log.read_text().splitlines()) if a.get('hidden')]
+            assert len(hidden_calls)==2, 'Hidden-network footer was not usable with a long list'
 
-        if '--bluetooth-only' in sys.argv[2:] or '--trays-only' in sys.argv[2:]:
-            print('Headless wireless tray screenshots and logs:', DEST)
-            sys.exit(0)
+            if '--bluetooth-only' in sys.argv[2:] or '--trays-only' in sys.argv[2:]:
+                print('Headless wireless tray screenshots and logs:', DEST)
+                sys.exit(0)
 
-        holder=probe(sound_x,14,'--click-hold',6000);time.sleep(.8)
+        holder=probe(sound_x,14,'--click-hold',6000);time.sleep(.8);shot('sound')
         assert Image.open(DEST / 'sound.png').getpixel((1250,80))[:3] != (0,0,0), 'Sound popup missing'
         sound_image=Image.open(DEST / 'sound.png').convert('RGB')
         assert sound_image.crop((1180,180,1530,520)).getbbox(), 'Per-application audio controls missing'
@@ -944,7 +884,7 @@ elif 'disconnect' in a:s['active']='';p.write_text(json.dumps(s))
         leave=probe(600,600,'--hover',1000);leave.wait()
         music=probe(sound_x,14,'--click-hold',6000);time.sleep(1.4)
         shot('playing');audio_before=state.read_text()
-        # Fake parec gives each sink input a distinct tone. Each mini-EQ must
+        # Native audio fixture gives each sink input a distinct tone. Each mini-EQ must
         # show only the frequency band for its own source.
         playing_image=Image.open(DEST / 'playing.png').convert('RGB')
         assert_bar_alignment(playing_image, default_settings)

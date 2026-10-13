@@ -41,7 +41,13 @@ impl Renderer {
                 return Ok(Self { font, dark });
             }
         }
-        anyhow::bail!("No supported font found; pass --font /path/to/font.ttf")
+        if path.is_some() {
+            anyhow::bail!("Could not load the requested font");
+        }
+        let definitions = egui::FontDefinitions::default();
+        let data = &definitions.font_data["Ubuntu-Light"].font;
+        let font = FontArc::try_from_vec(data.to_vec()).context("Bundled UI font")?;
+        Ok(Self { font, dark })
     }
     pub(crate) fn width(&self, text: &str, size: f32) -> f32 {
         let f = self.font.as_scaled(PxScale::from(size));
