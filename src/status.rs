@@ -137,6 +137,37 @@ fn focused_app(v: &Value) -> Option<String> {
         .find_map(focused_app)
 }
 
+fn output_app(tree: &Value, output: &str) -> Option<String> {
+    fn find_output<'a>(node: &'a Value, name: &str) -> Option<&'a Value> {
+        if node["type"] == "output" && node["name"] == name {
+            return Some(node);
+        }
+        node["nodes"]
+            .as_array()?
+            .iter()
+            .find_map(|child| find_output(child, name))
+    }
+    fn local_focus(node: &Value) -> Option<String> {
+        if let Some(app) = node["app_id"]
+            .as_str()
+            .or(node["window_properties"]["class"].as_str())
+        {
+            return Some(app.into());
+        }
+        let children: Vec<_> = ["nodes", "floating_nodes"]
+            .iter()
+            .filter_map(|key| node[*key].as_array())
+            .flatten()
+            .collect();
+        let child = node["focus"]
+            .as_array()?
+            .iter()
+            .find_map(|id| children.iter().find(|child| child["id"] == *id))?;
+        local_focus(child)
+    }
+    local_focus(find_output(tree, output)?)
+}
+
 // Peripheral batteries (mice, headsets, etc.) share this directory with the
 // laptop battery. Never let directory order choose the bar's power indicator.
 fn system_battery(root: &std::path::Path) -> Option<(u8, bool)> {
@@ -208,7 +239,11 @@ impl Status {
         if let Ok(v) = ipc(4, "") {
             crate::media::window_pids(&v, None, &mut s.window_pids);
             crate::media::window_details(&v, None, &mut s.window_details);
-            s.app = focused_app(&v).unwrap_or_else(|| "Desktop".into());
+            s.app = match output {
+                Some(output) => output_app(&v, output),
+                None => focused_app(&v),
+            }
+            .unwrap_or_else(|| "Desktop".into());
         }
         s.battery = system_battery(std::path::Path::new("/sys/class/power_supply"));
         (s.network, s.ethernet) = network_links(std::path::Path::new("/sys/class/net"));
@@ -382,5 +417,25 @@ mod tests {
             focused_app(&serde_json::json!({"focused": true, "type": "workspace"})),
             None
         );
+    }
+    #[test]
+    fn output_app_follows_local_focus_even_on_unfocused_outputs() {
+        let mut tree = serde_json::json!({"nodes": [
+            {"type":"output", "name":"left", "focus":[1], "nodes":[
+                {"id":1,"focus":[3,2],"nodes":[
+                    {"id":2,"app_id":"old"},
+                    {"id":3,"focus":[4],"floating_nodes":[
+                        {"id":4,"window_properties":{"class":"Terminal"}}
+                    ]}
+                ]}
+            ]},
+            {"type":"output", "name":"right", "focus":[5], "nodes":[
+                {"id":5,"focus":[6],"nodes":[{"id":6,"app_id":"Browser","focused":true}]}
+            ]}
+        ]});
+        assert_eq!(output_app(&tree, "left").as_deref(), Some("Terminal"));
+        assert_eq!(output_app(&tree, "right").as_deref(), Some("Browser"));
+        tree["nodes"][0]["nodes"][0]["nodes"] = serde_json::json!([]);
+        assert_eq!(output_app(&tree, "left"), None);
     }
 }

@@ -11,6 +11,7 @@ Add --launcher-only to check the default and external app launchers.
 Add --alignment-only to check bar icons across themes, geometry, states, and scale.
 Add --trays-only to check wireless scanning, pairing, switches, and navigation.
 Add --app-tray-only to check SNI icons, menus, actions, updates, and removal.
+Add --regressions-only to check resizing corners, client audio PIDs, and output-local focus.
 Requires sway, grim, dbus-daemon, and Python 3. Screenshots/logs go to the argument.
 """
 import json
@@ -264,11 +265,63 @@ with tempfile.TemporaryDirectory(prefix='bharta-headless-') as directory:
         battery_left=next((x for x in range(1000,1500)
             if all(min(bar_pixels.getpixel((dx,9)))>100 for dx in range(x,x+16))),None)
         assert battery_left is not None, 'Cannot locate battery/Wi-Fi controls'
-        wifi_x=battery_left-24
-        sound_x=battery_left-118
+        battery_left=next(x for x in range(battery_left-4,battery_left+1)
+                          if min(bar_pixels.getpixel((x,14)))>100)
+        layout=default_settings['layout']
+        slot=layout['icon_slot_width'];gap=layout['group_gap']
+        battery_padding=max(0,(slot-default_settings['appearance']['icon_size'])/2)
+        wifi_x=round(battery_left-battery_padding-gap-slot/2)
+        bluetooth_x=wifi_x-slot-gap
+        sound_x=round(bluetooth_x-slot/2-gap-layout['sound_tray_width']/2)
         popup_left=max(8,min(sound_x-168,1600-344))
-        bluetooth_x=battery_left-64
-        cpu_x=battery_left-192
+        cpu_x=round(sound_x-layout['sound_tray_width']/2-gap-layout['cpu_width']/2)
+        if '--regressions-only' in sys.argv[2:]:
+            def popup_bounds(name):
+                shot(name)
+                pixels=Image.open(DEST/(name+'.png')).convert('RGB')
+                xs=[x for x in range(900,1600) if pixels.getpixel((x,51))!=(0,0,0)]
+                return min(xs),max(xs),pixels
+            for name,center in [('bluetooth',bluetooth_x),('wifi',wifi_x)]:
+                probe(center,14,'--hover',900).wait()
+                left,right,pixels=popup_bounds(name+'-initial')
+                heights=[]
+                for toggle in range(2):
+                    click=probe(right-26,51,'--click-hold',600)
+                    for frame in range(12):
+                        shot(f'{name}-resize-{toggle}-{frame}')
+                        pixels=Image.open(DEST/f'{name}-resize-{toggle}-{frame}.png').convert('RGB')
+                        mid=(left+right)//2
+                        bottom=max(y for y in range(28,850) if pixels.getpixel((mid,y))!=(0,0,0))
+                        heights.append(bottom)
+                        assert pixels.getpixel((left+1,bottom-1))==(0,0,0), f'{name} lost its bottom corner during resize'
+                        assert pixels.getpixel((right-1,bottom-1))==(0,0,0), f'{name} lost its other bottom corner during resize'
+                        time.sleep(.02)
+                    click.wait()
+                assert len(set(heights))>=3, f'{name} resize animation was not sampled'
+                probe(700,700,'--hover',900).wait()
+            fixture=start([str(ROOT/'target/release/examples/headless_window')],'windows.log')
+            time.sleep(2)
+            shot('workspace-audio-client')
+            pixels=Image.open(DEST/'workspace-audio-client.png').convert('RGB')
+            green=sum(1 for y in range(28) for x in range(95,170)
+                      if pixels.getpixel((x,y))[1]>pixels.getpixel((x,y))[0]*1.25)
+            assert green>=4, 'Client-owned PID did not restore workspace audio icon'
+            label=(650,0,950,26)
+            local_label=pixels.crop(label)
+            run(['swaymsg','create_output'])
+            run(['swaymsg','output HEADLESS-2 mode 1600x900 pos 1600 0'])
+            second=start([str(BAR),'--dark','--output','HEADLESS-2'],'second-bar.log')
+            time.sleep(1)
+            run(['swaymsg','focus output HEADLESS-2'])
+            time.sleep(1)
+            shot('workspace-local-focus')
+            run(['grim','-o','HEADLESS-2',str(DEST/'other-local-focus.png')])
+            local=Image.open(DEST/'workspace-local-focus.png').convert('RGB').crop(label)
+            other=Image.open(DEST/'other-local-focus.png').convert('RGB').crop(label)
+            assert ImageChops.difference(local_label,local).getbbox() is None, 'Other output changed local app label'
+            assert ImageChops.difference(local,other).getbbox(), 'Outputs share a global app label'
+            print('Resizing corners, client audio PID, and output-local app labels passed:',DEST)
+            sys.exit(0)
         if '--eq-only' in sys.argv[2:]:
             player=subprocess.Popen([str(ROOT / 'target/release/examples/headless_player')],cwd=ROOT,env=env,stdin=subprocess.PIPE,stdout=open(DEST / 'player.log','w'),stderr=subprocess.STDOUT,start_new_session=True)
             processes.append(player)

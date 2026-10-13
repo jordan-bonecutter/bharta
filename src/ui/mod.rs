@@ -2276,7 +2276,9 @@ impl Ui {
                 {
                     self.wifi_network_row(ui, network);
                 }
-                connection_separator(ui, self.dark);
+                if snapshot.networks.iter().any(|network| !network.active) {
+                    connection_separator(ui, self.dark);
+                }
             }
             let list_height = config::get()
                 .number("layout.wifi_list_max_height")
@@ -2307,7 +2309,13 @@ impl Ui {
             ui.weak("Scanning…");
         }
         if enabled {
-            connection_separator(ui, self.dark);
+            if self
+                .network
+                .as_ref()
+                .is_some_and(|snapshot| !snapshot.networks.is_empty())
+            {
+                connection_separator(ui, self.dark);
+            }
             if action_button(ui, "Join hidden network…").clicked() {
                 self.hidden_ssid = Some(String::new());
                 self.password.clear();
@@ -2744,15 +2752,9 @@ impl Ui {
                     )
                     .on_hover_text(format!("{} · {name}", stream.application));
                     ui.horizontal(|ui| {
-                        let meter_width = ui.available_width().clamp(1., 44.);
                         let row_width = ui.available_width();
-                        let controls_width =
-                            (row_width - meter_width - ui.spacing().item_spacing.x).max(0.);
                         let button_group_width = 3. * 28. + 2. * ui.spacing().item_spacing.x;
-                        ui.add_space(
-                            ((row_width - button_group_width) / 2.)
-                                .clamp(0., (controls_width - button_group_width).max(0.)),
-                        );
+                        ui.add_space(((row_width - button_group_width) / 2.).max(0.));
                         for (icon, control, enabled) in [
                             (
                                 Icon::Previous,
@@ -2784,18 +2786,6 @@ impl Ui {
                                 });
                             }
                         }
-                        let levels = self
-                            .meters
-                            .get(&stream.index)
-                            .map(|meter| meter.displayed)
-                            .unwrap_or([0.; 7]);
-                        let meter_width = ui.available_width().clamp(1., 44.);
-                        ui.add_space((ui.available_width() - meter_width).max(0.));
-                        let (meter, _) = ui.allocate_exact_size(
-                            vec2(ui.available_width().clamp(1., 44.), 20.),
-                            egui::Sense::hover(),
-                        );
-                        paint_equalizer(ui.painter(), meter, &levels);
                     });
                     let mut value = stream.percent as f32;
                     if volume_slider(ui, &mut value, ui.available_width()).changed() {
@@ -2805,12 +2795,22 @@ impl Ui {
                         ));
                     }
                 });
+                let levels = self
+                    .meters
+                    .get(&stream.index)
+                    .map(|meter| meter.displayed)
+                    .unwrap_or([0.; 7]);
+                let right =
+                    Rect::from_min_size(pos2(row.right() - 28., row.top() + 36.), vec2(28., 52.));
                 ui.scope_builder(
-                    egui::UiBuilder::new().max_rect(Rect::from_center_size(
-                        pos2(row.right() - 12., row.center().y),
-                        vec2(24., 24.),
-                    )),
+                    egui::UiBuilder::new()
+                        .max_rect(right)
+                        .layout(egui::Layout::top_down(egui::Align::Center)),
                     |ui| {
+                        ui.spacing_mut().item_spacing.y = 8.;
+                        let (meter, _) =
+                            ui.allocate_exact_size(vec2(28., 20.), egui::Sense::hover());
+                        paint_equalizer(ui.painter(), meter, &levels);
                         if self.icon_button(ui, Icon::Volume(stream.muted), true) {
                             self.control(volume::Control::StreamMute(stream.index));
                         }

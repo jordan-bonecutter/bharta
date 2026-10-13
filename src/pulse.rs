@@ -297,7 +297,34 @@ pub fn with<T>(operation: impl FnOnce(&mut Connection) -> Result<T>) -> Result<T
     })
 }
 pub fn streams_json() -> Result<Value> {
-    with(|c| Ok(Value::Array(c.streams()?.iter().map(stream_json).collect())))
+    with(|c| {
+        let streams = c.streams()?;
+        let mut values: Vec<_> = streams.iter().map(stream_json).collect();
+        // PipeWire ALSA streams can omit process metadata that is present on
+        // their owning client. Keep stream properties authoritative.
+        if streams.iter().zip(&values).any(|(stream, value)| {
+            stream.client_index.is_some() && value["properties"]["application.process.id"].is_null()
+        }) && let Ok(clients) = c.list::<ClientInfo>(&Command::GetClientInfoList)
+        {
+            for (stream, value) in streams.iter().zip(&mut values) {
+                if let Some(client) = clients
+                    .iter()
+                    .find(|client| Some(client.index) == stream.client_index)
+                {
+                    inherit_client_properties(value, &properties(&client.props));
+                }
+            }
+        }
+        Ok(Value::Array(values))
+    })
+}
+fn inherit_client_properties(stream: &mut Value, client: &Value) {
+    if let (Some(stream), Some(client)) = (stream["properties"].as_object_mut(), client.as_object())
+    {
+        for (key, value) in client {
+            stream.entry(key.clone()).or_insert_with(|| value.clone());
+        }
+    }
 }
 pub fn snapshot_json() -> Result<(String, Value, Value)> {
     with(|c| {
@@ -376,6 +403,18 @@ pub fn name(value: &str) -> Result<CString> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn stream_inherits_client_pid_without_replacing_media_metadata() {
+        let mut stream = json!({"properties":{"application.name":"Music","media.name":"Song"}});
+        inherit_client_properties(
+            &mut stream,
+            &json!({"application.process.id":"42","application.name":"Backend"}),
+        );
+        assert_eq!(stream["properties"]["application.process.id"], "42");
+        assert_eq!(stream["properties"]["application.name"], "Music");
+        inherit_client_properties(&mut stream, &json!({"application.process.id":"99"}));
+        assert_eq!(stream["properties"]["application.process.id"], "42");
+    }
     fn connection(socket: UnixStream) -> Connection {
         Connection {
             socket,

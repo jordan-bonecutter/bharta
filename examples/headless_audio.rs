@@ -83,15 +83,10 @@ fn streams() -> Vec<SinkInputInfo> {
         let mut props = Props::new();
         props.set(Prop::ApplicationName, CString::new(name).unwrap());
         props.set(Prop::MediaName, CString::new(media).unwrap());
-        if index == 13 {
-            let Ok(pid) = std::fs::read_to_string(std::env::var("BHARTA_TEST_WINDOW_PID").unwrap())
-            else {
-                continue;
-            };
-            props.set(
-                Prop::ApplicationProcessId,
-                CString::new(pid.trim()).unwrap(),
-            );
+        if index == 13
+            && std::fs::read_to_string(std::env::var("BHARTA_TEST_WINDOW_PID").unwrap()).is_err()
+        {
+            continue;
         }
         let mut cvolume = ChannelVolume::empty();
         cvolume.push(Volume::from_u32_clamped(value));
@@ -108,6 +103,7 @@ fn streams() -> Vec<SinkInputInfo> {
             channel_map: ChannelMap::stereo(),
             cvolume,
             props,
+            client_index: (index == 13).then_some(13),
             has_volume: true,
             volume_writable: true,
             ..Default::default()
@@ -199,6 +195,27 @@ fn serve(mut socket: UnixStream, state: Arc<Mutex<()>>) -> Result<()> {
                 pa::write_reply_message(&mut socket, sequence, &sink, version)?;
             }
             Command::GetSinkInputInfoList => list(&mut socket, sequence, &streams(), version)?,
+            Command::GetClientInfoList => {
+                let mut props = Props::new();
+                if let Ok(pid) =
+                    std::fs::read_to_string(std::env::var("BHARTA_TEST_WINDOW_PID").unwrap())
+                {
+                    props.set(
+                        Prop::ApplicationProcessId,
+                        CString::new(pid.trim()).unwrap(),
+                    );
+                }
+                list(
+                    &mut socket,
+                    sequence,
+                    &[ClientInfo {
+                        index: 13,
+                        props,
+                        ..Default::default()
+                    }],
+                    version,
+                )?;
+            }
             Command::SetSinkVolume(params) => {
                 write(
                     "BHARTA_TEST_AUDIO",

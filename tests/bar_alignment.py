@@ -22,7 +22,9 @@ def assert_bar_alignment(image, settings, scale=1):
     battery = next((x for x in range(image.width // 2, image.width - 16)
                     if all(icon_pixel(dx, battery_y) for dx in range(x, x+16))), None)
     assert battery is not None, 'Cannot locate battery for bar alignment checks'
-    wifi = battery - gap - slot
+    battery = next(x for x in range(battery-4, battery+1) if icon_pixel(x, int(height/2)))
+    battery_padding = max(0, (slot - icon_size) / 2)
+    wifi = battery - battery_padding - gap - slot
     bluetooth = wifi - gap - slot
     sound = bluetooth - gap - layout['sound_tray_width']
     cpu = sound - gap - layout['cpu_width']

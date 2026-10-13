@@ -338,12 +338,10 @@ impl App {
         let height = if capture_outside {
             self.output_height
         } else if self.ui.panel.is_some() {
-            self.ui
-                .panel_rect
-                .max
-                .y
-                .ceil()
-                .max(crate::config::get().number("layout.bar_height")) as u32
+            // Keep the transparent surface stable while the popup animates.
+            // Configure events lag behind its height, clipping the rounded
+            // bottom corners if we resize the buffer on every animation frame.
+            self.output_height
         } else {
             crate::config::get().number("layout.bar_height") as u32
         }
