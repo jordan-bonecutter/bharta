@@ -179,6 +179,7 @@ fn serve(mut socket: UnixStream, state: Arc<Mutex<()>>) -> Result<()> {
                 },
                 version,
             )?,
+            Command::GetCardInfoList => list::<CardInfo>(&mut socket, sequence, &[], version)?,
             Command::GetSinkInfoList => list(&mut socket, sequence, &sinks(), version)?,
             Command::GetSinkInfo(query) => {
                 let routing = read("BHARTA_TEST_ROUTING");

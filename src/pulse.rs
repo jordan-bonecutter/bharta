@@ -297,26 +297,27 @@ pub fn with<T>(operation: impl FnOnce(&mut Connection) -> Result<T>) -> Result<T
     })
 }
 pub fn streams_json() -> Result<Value> {
-    with(|c| {
-        let streams = c.streams()?;
-        let mut values: Vec<_> = streams.iter().map(stream_json).collect();
-        // PipeWire ALSA streams can omit process metadata that is present on
-        // their owning client. Keep stream properties authoritative.
-        if streams.iter().zip(&values).any(|(stream, value)| {
-            stream.client_index.is_some() && value["properties"]["application.process.id"].is_null()
-        }) && let Ok(clients) = c.list::<ClientInfo>(&Command::GetClientInfoList)
-        {
-            for (stream, value) in streams.iter().zip(&mut values) {
-                if let Some(client) = clients
-                    .iter()
-                    .find(|client| Some(client.index) == stream.client_index)
-                {
-                    inherit_client_properties(value, &properties(&client.props));
-                }
+    with(streams_json_connection)
+}
+fn streams_json_connection(c: &mut Connection) -> Result<Value> {
+    let streams = c.streams()?;
+    let mut values: Vec<_> = streams.iter().map(stream_json).collect();
+    // PipeWire ALSA streams can omit process metadata that is present on
+    // their owning client. Keep stream properties authoritative.
+    if streams.iter().zip(&values).any(|(stream, value)| {
+        stream.client_index.is_some() && value["properties"]["application.process.id"].is_null()
+    }) && let Ok(clients) = c.list::<ClientInfo>(&Command::GetClientInfoList)
+    {
+        for (stream, value) in streams.iter().zip(&mut values) {
+            if let Some(client) = clients
+                .iter()
+                .find(|client| Some(client.index) == stream.client_index)
+            {
+                inherit_client_properties(value, &properties(&client.props));
             }
         }
-        Ok(Value::Array(values))
-    })
+    }
+    Ok(Value::Array(values))
 }
 fn inherit_client_properties(stream: &mut Value, client: &Value) {
     if let (Some(stream), Some(client)) = (stream["properties"].as_object_mut(), client.as_object())
@@ -338,16 +339,20 @@ pub fn snapshot_json() -> Result<(String, Value, Value)> {
             .iter()
             .map(sink_json)
             .collect::<Vec<_>>();
-        let streams = c.streams()?.iter().map(stream_json).collect::<Vec<_>>();
+        let streams = streams_json_connection(c)?;
         Ok((
             info.default_sink_name
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default(),
             Value::Array(outputs),
-            Value::Array(streams),
+            streams,
         ))
     })
 }
+pub fn cards() -> Result<Vec<CardInfo>> {
+    with(|c| c.list(&Command::GetCardInfoList))
+}
+
 fn properties(props: &Props) -> Value {
     Value::Object(
         props
@@ -382,7 +387,7 @@ fn volume_json(map: &ChannelMap, volume: &ChannelVolume) -> Value {
     )
 }
 fn sink_json(sink: &SinkInfo) -> Value {
-    json!({"name": sink.name.to_string_lossy(), "description": sink.description.as_ref().map(|s| s.to_string_lossy()), "channel_map": (&sink.channel_map).into_iter().map(channel_name).collect::<Vec<_>>().join(","), "volume": volume_json(&sink.channel_map, &sink.cvolume), "mute": sink.muted,
+    json!({"name": sink.name.to_string_lossy(), "description": sink.description.as_ref().map(|s| s.to_string_lossy()), "channel_map": (&sink.channel_map).into_iter().map(channel_name).collect::<Vec<_>>().join(","), "volume": volume_json(&sink.channel_map, &sink.cvolume), "mute": sink.muted, "card": sink.card_index,
         "ports": sink.ports.iter().map(|p| json!({"name": p.name.to_string_lossy(), "description": p.description.as_ref().map(|d| d.to_string_lossy()), "availability": if p.available == PortAvailable::No { "no" } else { "yes" }})).collect::<Vec<_>>(),
         "active_port": sink.ports.get(sink.active_port).map(|p| p.name.to_string_lossy())})
 }

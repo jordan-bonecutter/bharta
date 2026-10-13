@@ -444,10 +444,11 @@ pub fn source_titles(sources: &[AudioProcess], tracks: &[Track]) -> Vec<AudioPro
         .cloned()
         .map(|mut source| {
             if source.media.as_deref().is_none_or(|m| {
-                matches!(
-                    normalize(m).as_str(),
-                    "" | "audiostream" | "alsaplayback" | "playback"
-                )
+                normalize(m) == normalize(&source.application)
+                    || matches!(
+                        normalize(m).as_str(),
+                        "" | "audiostream" | "alsaplayback" | "playback"
+                    )
             }) {
                 let candidates: Vec<_> = tracks
                     .iter()
@@ -502,8 +503,11 @@ fn resolve_audio_workspaces(
                 })
                 .map(|window| window.workspace.clone())
                 .collect();
-            let matches = if !media_matches.is_empty() {
+            let matches = if media_matches.len() == 1 {
                 media_matches
+            } else if !media_matches.is_empty() {
+                // A shared/generic title cannot identify the playing window.
+                HashSet::new()
             } else {
                 let app_matches: HashSet<_> = windows
                     .iter()
@@ -600,6 +604,20 @@ mod tests {
             application: "Firefox".into(),
             media: Some("AudioStream".into()),
         };
+        let application_label = AudioProcess {
+            pid: 42,
+            application: "Firefox".into(),
+            media: Some("Firefox".into()),
+        };
+        assert!(
+            resolve_audio_workspaces(
+                std::slice::from_ref(&application_label),
+                &map,
+                &details,
+                |_| None
+            )
+            .is_empty()
+        );
         let track = Track {
             player: "org.mpris.MediaPlayer2.firefox.instance123".into(),
             title: "YouTube".into(),
@@ -610,11 +628,26 @@ mod tests {
             can_next: false,
             can_toggle: true,
         };
-        assert_eq!(
-            resolve_audio_workspaces(&source_titles(&[generic], &[track]), &map, &details, |_| {
-                None
-            }),
-            HashSet::from(["3".into()])
+        for source in [generic, application_label] {
+            assert_eq!(
+                resolve_audio_workspaces(
+                    &source_titles(&[source], std::slice::from_ref(&track)),
+                    &map,
+                    &details,
+                    |_| None
+                ),
+                HashSet::from(["3".into()])
+            );
+        }
+        let repeated = AudioProcess {
+            pid: 42,
+            application: "Firefox".into(),
+            media: Some("YouTube".into()),
+        };
+        let mut repeated_details = details.clone();
+        repeated_details.get_mut(&42).unwrap()[0].title = "YouTube — Firefox".into();
+        assert!(
+            resolve_audio_workspaces(&[repeated], &map, &repeated_details, |_| None).is_empty()
         );
     }
 }

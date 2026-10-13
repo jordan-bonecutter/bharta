@@ -60,13 +60,14 @@ with tempfile.TemporaryDirectory(prefix='bharta-headless-') as directory:
     env['BHARTA_TEST_WIFI_LOG'] = str(wifi_log)
     session_actions = runtime / 'session-actions'
     env['BHARTA_TEST_SESSION_ACTIONS'] = str(session_actions)
+    env['XDG_SESSION_ID'] = 'bharta-test'
     env['PULSE_SERVER'] = 'unix:' + str(runtime / 'pulse-native')
     env['BHARTA_TEST_AUDIO'] = str(state)
     env['BHARTA_TEST_ROUTING'] = str(routing)
     env['BHARTA_TEST_MOVES'] = str(moves)
     initial_settings=Path(env['XDG_CONFIG_HOME'])/'bharta'
     initial_settings.mkdir(parents=True)
-    (initial_settings/'config.json').write_text(json.dumps({'intervals':{'volume_ms':10000}}))
+    (initial_settings/'config.json').write_text(json.dumps({'intervals':{'volume_ms':10000}, 'session':{'lock_command':[sys.executable, '-c', "import os; from pathlib import Path; p=Path(os.environ['BHARTA_TEST_SESSION_ACTIONS']); p.write_text((p.read_text() if p.exists() else '') + 'lock\\n')"]}}))
     env['BHARTA_TEST_WINDOW_PID'] = str(runtime / 'fixture.pid')
     env['BHARTA_TEST_ANIMATE'] = str(runtime / 'animate')
     for app, color in [('FIREFOX', (220, 105, 40)), ('SPOTIFY', (40, 180, 90))]:
@@ -93,20 +94,17 @@ with tempfile.TemporaryDirectory(prefix='bharta-headless-') as directory:
             assert bar.poll() is None, f'Bar exited ({bar.returncode}) before {name}; see bar.log'
         run(['grim', '-o', 'HEADLESS-1', str(DEST / (name + '.png'))])
     def check_session_actions():
-        # First click only arms the action; cancelling never calls login1.
-        probe(100,122,'--click-hold',180).wait()
-        time.sleep(.2);shot('session-confirm-reboot')
-        assert not session_actions.exists(), 'Reboot ran without confirmation'
-        probe(100,194,'--click-hold',180).wait()
-        time.sleep(.2);shot('session-cancelled')
-        assert not session_actions.exists(), 'Cancelling invoked a session action'
-        # Confirm shutdown against a private stub, never the host login1.
-        probe(100,158,'--click-hold',180).wait()
-        time.sleep(.2);shot('session-confirm-shutdown')
-        assert not session_actions.exists(), 'Shutdown ran without confirmation'
-        probe(100,158,'--click-hold',180).wait()
+        # Lock runs a configured fixture command; power actions use the private login1 stub.
+        probe(60,52,'--click-hold',180).wait()
+        time.sleep(.4);shot('session-lock-requested')
+        assert session_actions.read_text().splitlines() == ['lock'], 'Lock did not run the configured command'
+        probe(28,14,'--hover',700).wait()
+        probe(60,110,'--click-hold',180).wait()
+        time.sleep(.4);shot('session-reboot-error')
+        assert session_actions.read_text().splitlines() == ['lock', 'reboot'], 'Reboot did not run on the first click'
+        probe(60,139,'--click-hold',180).wait()
         time.sleep(.4);shot('session-action-error')
-        assert session_actions.read_text().splitlines() == ['poweroff'], 'Wrong session command'
+        assert session_actions.read_text().splitlines() == ['lock', 'reboot', 'poweroff'], 'Shutdown did not run on the first click'
     def check_external_launcher(output, size):
         # External launchers require a click and never take over the desktop session.
         marker=runtime/'launcher-started'
@@ -177,7 +175,16 @@ with tempfile.TemporaryDirectory(prefix='bharta-headless-') as directory:
             probe(28,14,'--hover',900).wait()
             shot('session-hover')
             check_session_actions()
-            print('Session buttons, confirmation, cancellation and command errors passed')
+            print('Session buttons execute immediately and report command errors')
+            sys.exit(0)
+        if '--workspace-only' in sys.argv[2:]:
+            fixture=start([str(ROOT/'target/release/examples/headless_window')], 'windows.log')
+            time.sleep(2);shot('workspace-glow')
+            pixels=Image.open(DEST/'workspace-glow.png').convert('RGB')
+            green=sum(1 for y in range(28) for x in range(95,150)
+                      if pixels.getpixel((x,y))[1]>pixels.getpixel((x,y))[0]*1.25)
+            assert green>=4, 'Workspace lacks measured audio glow'
+            print('Workspace audio glow passed')
             sys.exit(0)
         if '--app-tray-only' in sys.argv[2:]:
             actions = DEST/'app-tray-actions.txt'
@@ -305,7 +312,7 @@ with tempfile.TemporaryDirectory(prefix='bharta-headless-') as directory:
             pixels=Image.open(DEST/'workspace-audio-client.png').convert('RGB')
             green=sum(1 for y in range(28) for x in range(95,170)
                       if pixels.getpixel((x,y))[1]>pixels.getpixel((x,y))[0]*1.25)
-            assert green>=4, 'Client-owned PID did not restore workspace audio icon'
+            assert green>=4, 'Client-owned PID did not restore workspace audio glow'
             label=(650,0,950,26)
             local_label=pixels.crop(label)
             run(['swaymsg','create_output'])

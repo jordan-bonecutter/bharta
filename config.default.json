@@ -117,6 +117,9 @@
     "executable": "",
     "args": []
   },
+  "session": {
+    "lock_command": ["swaylock"]
+  },
   "processes": {
     "rows": 12
   },

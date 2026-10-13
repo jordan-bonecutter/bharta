@@ -34,6 +34,8 @@ mod tests {
     #[test]
     fn browser_track_appears_once_and_follows_the_matching_stream() {
         let stream = |index, corked, name: &str| volume::Stream {
+            pid: 0,
+            media: None,
             index,
             corked,
             name: name.into(),

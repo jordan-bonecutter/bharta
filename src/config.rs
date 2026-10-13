@@ -113,6 +113,12 @@ fn merge(default: &mut Value, override_value: &Value, key: &str) -> Result<()> {
                     .all(|value| value.as_str().is_some_and(|s| !s.contains('\0'))),
                 "{key} must contain strings without NUL characters"
             );
+            if key == "session.lock_command" {
+                ensure!(
+                    values.is_empty() || values[0].as_str().is_some_and(|s| !s.trim().is_empty()),
+                    "session.lock_command must start with a program name"
+                );
+            }
             *target = Value::Array(values.clone());
         }
         (target @ Value::Bool(_), Value::Bool(value)) => *target = Value::Bool(*value),
@@ -159,6 +165,13 @@ mod tests {
         );
         assert!(Config::parse(r#"{"launcher":{"args":[1]}}"#).is_err());
         assert!(Config::parse(r#"{"launcher":{"args":["\u0000"]}}"#).is_err());
+    }
+    #[test]
+    fn lock_command_validation() {
+        assert!(Config::parse(r#"{"session":{"lock_command":[]}}"#).is_ok());
+        assert!(Config::parse(r#"{"session":{"lock_command":["swaylock","-f"]}}"#).is_ok());
+        assert!(Config::parse(r#"{"session":{"lock_command":[""]}}"#).is_err());
+        assert!(Config::parse(r#"{"session":{"lock_command":["swaylock","\u0000"]}}"#).is_err());
     }
     #[test]
     fn complete_example_passes_validation() {

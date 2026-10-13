@@ -199,6 +199,14 @@ impl Login {
 }
 #[zbus::interface(name = "org.freedesktop.login1.Manager")]
 impl Login {
+    fn lock_session(&self, session: &str) -> zbus::fdo::Result<()> {
+        if session != "bharta-test" {
+            return Err(zbus::fdo::Error::Failed("Wrong lock session".into()));
+        }
+        // Record and accept the request; no real session is touched.
+        let _ = self.record("lock");
+        Ok(())
+    }
     fn reboot(&self, _interactive: bool) -> zbus::fdo::Result<()> {
         self.record("reboot")
     }

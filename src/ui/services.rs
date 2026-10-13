@@ -11,17 +11,45 @@ pub enum SessionAction {
 impl SessionAction {
     fn run(self) -> Result<(), String> {
         match self {
+            Self::Lock if !crate::config::get().strings("session.lock_command").is_empty() => {
+                let args = crate::config::get().strings("session.lock_command");
+                let status = std::process::Command::new(args[0])
+                    .args(&args[1..])
+                    .status()
+                    .map_err(|e| format!("Could not start lock command {}: {e}", args[0]))?;
+                if status.success() {
+                    Ok(())
+                } else {
+                    Err(format!("Lock command {} failed: {status}", args[0]))
+                }
+            }
             Self::Lock => (|| -> zbus::Result<()> {
-                let connection = zbus::blocking::Connection::session()?;
-                let locker = zbus::blocking::Proxy::new(
+                let connection = zbus::blocking::Connection::system()?;
+                let manager = zbus::blocking::Proxy::new(
                     &connection,
-                    "org.freedesktop.ScreenSaver",
-                    "/org/freedesktop/ScreenSaver",
-                    "org.freedesktop.ScreenSaver",
+                    "org.freedesktop.login1",
+                    "/org/freedesktop/login1",
+                    "org.freedesktop.login1.Manager",
                 )?;
-                locker.call("Lock", &())
+                // An empty ID selects the caller's session. Preserve an explicit
+                // ID for bars launched through the user's service manager.
+                let session = std::env::var("XDG_SESSION_ID").unwrap_or_default();
+                manager.call("LockSession", &(session,))
             })()
-            .map_err(|e| format!("Could not lock session: {e}")),
+            .or_else(|session_error| {
+                (|| -> zbus::Result<()> {
+                    let connection = zbus::blocking::Connection::session()?;
+                    let locker = zbus::blocking::Proxy::new(
+                        &connection,
+                        "org.freedesktop.ScreenSaver",
+                        "/org/freedesktop/ScreenSaver",
+                        "org.freedesktop.ScreenSaver",
+                    )?;
+                    locker.call("Lock", &())
+                })().map_err(|desktop_error| format!(
+                    "Could not request session lock: {session_error}. Desktop lock service: {desktop_error}"
+                ))
+            }),
             Self::Logout => status::ipc(0, "exit")
                 .map(|_| ())
                 .map_err(|e| e.to_string()),

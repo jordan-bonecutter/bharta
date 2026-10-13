@@ -115,6 +115,8 @@ struct Ui {
     preview_pending: Option<workspace_preview::Snapshot>,
     textures: HashMap<String, egui::TextureHandle>,
     meters: HashMap<u32, Meter>,
+    workspace_meters: HashMap<u32, Meter>,
+    workspace_glows: HashMap<String, VecDeque<(Instant, f32)>>,
     tray_meter: Meter,
     tray_output: Option<String>,
     query: String,
@@ -123,7 +125,6 @@ struct Ui {
     hidden_ssid: Option<String>,
     password: String,
     reveal: bool,
-    confirm_session: Option<SessionAction>,
     focus_search: bool,
     error: String,
     busy: bool,
@@ -241,6 +242,8 @@ impl Ui {
             preview_pending: None,
             textures: HashMap::new(),
             meters: HashMap::new(),
+            workspace_meters: HashMap::new(),
+            workspace_glows: HashMap::new(),
             tray_meter: Meter {
                 levels: Arc::new(Mutex::new([0.; 7])),
                 capture: None,
@@ -254,7 +257,6 @@ impl Ui {
             hidden_ssid: None,
             password: String::new(),
             reveal: false,
-            confirm_session: None,
             focus_search: false,
             error: String::new(),
             busy: false,
@@ -377,7 +379,6 @@ impl Ui {
         self.password.clear();
         self.selected_network = None;
         self.hidden_ssid = None;
-        self.confirm_session = None;
         self.focus_search = matches!(kind, Menu::Apps | Menu::Cpu);
         match &kind {
             Menu::Tray(id) => {
@@ -635,7 +636,6 @@ impl Ui {
                 },
                 Event::Session(result) => {
                     self.busy = false;
-                    self.confirm_session = None;
                     match result {
                         Ok(()) => self.close(),
                         Err(e) => self.error = e,
@@ -741,6 +741,34 @@ impl Ui {
         }
         if self.tray_meter.update() {
             self.ctx.request_repaint();
+        }
+        self.workspace_meters.retain(|id, _| {
+            self.audio
+                .streams
+                .iter()
+                .any(|stream| stream.index == *id && !stream.corked && !stream.muted)
+        });
+        for stream in self.audio.streams.iter().filter(|s| !s.corked && !s.muted) {
+            let meter = self
+                .workspace_meters
+                .entry(stream.index)
+                .or_insert_with(|| Meter {
+                    levels: Arc::new(Mutex::new([0.; 7])),
+                    capture: None,
+                    retry: Instant::now(),
+                    displayed: [0.; 7],
+                });
+            if meter.capture.as_mut().is_some_and(|c| !c.is_running()) {
+                meter.capture = None;
+            }
+            if meter.capture.is_none() && Instant::now() >= meter.retry {
+                meter.retry = Instant::now() + config::get().duration("intervals.meter_retry_ms");
+                meter.capture =
+                    audio_meter::Capture::start(meter.levels.clone(), stream.index).ok();
+            }
+            if meter.update() {
+                self.ctx.request_repaint();
+            }
         }
         if self
             .panel
@@ -1111,11 +1139,10 @@ impl Ui {
         let stack_icon_size = 14.;
         let stack_stride = 6.;
         let icon_start = number_offset + 8.;
-        let speaker_size = config::get().number("layout.workspace_audio_size");
-        let speaker_offset =
-            icon_start + stack_icon_size + 2. * stack_stride + 4. + speaker_size / 2.;
-        let workspace_width =
-            speaker_offset + speaker_size / 2. + config::get().number("layout.button_padding_x");
+        let workspace_width = icon_start
+            + stack_icon_size
+            + 2. * stack_stride
+            + config::get().number("layout.button_padding_x");
         let workspace_gap = config::get().number("layout.workspace_gap");
         let center_y = config::get().number("layout.bar_height") / 2.;
         let bg = config::get().color("bar", self.dark);
@@ -1181,6 +1208,12 @@ impl Ui {
             Menu::Apps,
         );
         self.workspace_icon_fades.retain(|name, _| {
+            self.state
+                .workspaces
+                .iter()
+                .any(|workspace| workspace.name == *name)
+        });
+        self.workspace_glows.retain(|name, _| {
             self.state
                 .workspaces
                 .iter()
@@ -1260,30 +1293,70 @@ impl Ui {
                     );
                 }
             }
-            let amount = self.ctx.animate_bool_with_time(
-                egui::Id::new(("audible", &w.name)),
-                w.audible,
-                config::get()
-                    .duration("animation.speaker_fade_ms")
-                    .as_secs_f32(),
-            );
-            if amount > 0. {
-                let r = Rect::from_center_size(
-                    pos2(x + speaker_offset, center_y),
-                    vec2(
-                        config::get().number("layout.workspace_audio_size"),
-                        config::get().number("layout.workspace_audio_size"),
-                    ) * (config::get().number("animation.speaker_min_scale")
-                        + (1. - config::get().number("animation.speaker_min_scale")) * amount),
-                );
-                ui.painter().image(
-                    self.icon(Icon::Volume(false)),
-                    r,
-                    Rect::from_min_max(Pos2::ZERO, pos2(1., 1.)),
-                    config::get()
-                        .color("audio", self.dark)
-                        .gamma_multiply(amount),
-                );
+            let loudness = self
+                .audio
+                .streams
+                .iter()
+                .filter(|stream| {
+                    !stream.muted
+                        && !stream.corked
+                        && crate::media::audible_workspaces(
+                            &crate::media::source_titles(
+                                &[crate::media::AudioProcess {
+                                    pid: stream.pid,
+                                    application: stream.application.clone(),
+                                    media: stream.media.clone(),
+                                }],
+                                &self.state.extras.tracks,
+                            ),
+                            &self.state.window_pids,
+                            &self.state.window_details,
+                        )
+                        .contains(&w.name)
+                })
+                .filter_map(|stream| self.workspace_meters.get(&stream.index))
+                .flat_map(|meter| meter.displayed)
+                .fold(0.0_f64, f64::max) as f32;
+            // Lift quiet signals, then average brightness over exactly 250 ms.
+            let target = if loudness > 0.005 {
+                0.30 + 0.70 * loudness.clamp(0., 1.).sqrt()
+            } else {
+                0.
+            };
+            let now = Instant::now();
+            let window = Duration::from_millis(250);
+            let cutoff = now - window;
+            let samples = self.workspace_glows.entry(w.name.clone()).or_default();
+            if samples.is_empty() {
+                samples.push_back((cutoff, 0.));
+            }
+            samples.push_back((now, target));
+            // Keep the last sample preceding the window to cover its first interval.
+            while samples.get(1).is_some_and(|(time, _)| *time <= cutoff) {
+                samples.pop_front();
+            }
+            let mut integral = 0.;
+            for index in 0..samples.len() - 1 {
+                let (time, value) = samples[index];
+                let end = samples[index + 1].0;
+                integral += value * end.duration_since(time.max(cutoff)).as_secs_f32();
+            }
+            let glow = (integral / window.as_secs_f32()).clamp(0., 1.);
+            if samples.iter().any(|(_, value)| *value != target) {
+                self.ctx
+                    .request_repaint_after(config::get().duration("animation.frame_ms"));
+            }
+            if glow > 0. {
+                let bounds = r.shrink2(vec2(1., 3.));
+                let accent = config::get().color("audio", self.dark);
+                for (spread, opacity) in [(2., 0.20), (1., 0.40), (0., 1.0)] {
+                    ui.painter().rect_stroke(
+                        bounds.expand(spread),
+                        config::get().number("layout.workspace_corner_radius") as u8,
+                        egui::Stroke::new(1_f32, accent.gamma_multiply(glow * opacity)),
+                        egui::StrokeKind::Inside,
+                    );
+                }
             }
             if response.clicked() {
                 let _ = self
@@ -1818,7 +1891,6 @@ impl Ui {
             || self.hidden_ssid.is_some()
             || (kind == Menu::Bluetooth
                 && self.bluetooth.as_ref().is_some_and(|s| s.busy.is_some()))
-            || self.confirm_session.is_some()
             || self.busy
             || ctx.egui_is_using_pointer();
         if !inside && ctx.input(|i| i.pointer.any_pressed()) {
@@ -1995,17 +2067,6 @@ fn paint_battery(ui: &egui::Ui, rect: Rect, percent: u8) {
         1,
         color,
     );
-}
-fn flat(ui: &mut egui::Ui, text: impl Into<egui::WidgetText>) -> egui::Response {
-    ui.add(
-        egui::Button::new("")
-            .left_text(text)
-            .frame(false)
-            .min_size(vec2(
-                ui.available_width(),
-                config::get().number("layout.control_height"),
-            )),
-    )
 }
 
 impl Ui {
@@ -2549,34 +2610,21 @@ impl Ui {
             (SessionAction::Reboot, Icon::Reboot, "Reboot"),
             (SessionAction::Shutdown, Icon::Power, "Shut down"),
         ] {
-            let confirming = self.confirm_session == Some(action);
-            let text = if confirming {
-                format!("Confirm {}", label.to_lowercase())
-            } else {
-                label.into()
-            };
             let clicked = ui
                 .horizontal(|ui| {
                     let clicked = self.icon_button(ui, icon, !self.busy);
                     let label = ui.add_enabled(
                         !self.busy,
-                        egui::Label::new(text).sense(egui::Sense::click()),
+                        egui::Label::new(label).sense(egui::Sense::click()),
                     );
                     clicked || label.clicked()
                 })
                 .inner;
             if clicked {
-                if action == SessionAction::Lock || confirming {
-                    self.busy = true;
-                    self.error.clear();
-                    self.services.session(action);
-                } else {
-                    self.confirm_session = Some(action);
-                }
+                self.busy = true;
+                self.error.clear();
+                self.services.session(action);
             }
-        }
-        if self.confirm_session.is_some() && !self.busy && flat(ui, "Cancel").clicked() {
-            self.confirm_session = None;
         }
     }
     fn sound(&mut self, ui: &mut egui::Ui) {
@@ -2622,6 +2670,11 @@ impl Ui {
                             .unwrap_or("No audio device"),
                     )
                     .show_ui(ui, |ui| {
+                        for target in self.audio.profiles.clone() {
+                            if ui.selectable_label(false, &target.description).clicked() {
+                                self.control(volume::Control::Profile(target));
+                            }
+                        }
                         for output in outputs {
                             let ports: Vec<_> =
                                 output.ports.iter().filter(|port| port.available).collect();
@@ -2668,7 +2721,7 @@ impl Ui {
             ui.add_space(6.);
             let mut value = output.percent() as f32;
             let width = ui.available_width();
-            if volume_slider(ui, &mut value, width).changed() {
+            if volume_slider(ui, &mut value, width, 100.).changed() {
                 self.control(volume::Control::Volume {
                     output: output.name.clone(),
                     channel: None,
@@ -2788,7 +2841,7 @@ impl Ui {
                         }
                     });
                     let mut value = stream.percent as f32;
-                    if volume_slider(ui, &mut value, ui.available_width()).changed() {
+                    if volume_slider(ui, &mut value, ui.available_width(), 150.).changed() {
                         self.control(volume::Control::StreamVolume(
                             stream.index,
                             value.round() as u8,
@@ -3062,7 +3115,7 @@ fn installed_font(monospace: bool) -> Option<std::path::PathBuf> {
             .find_map(|name| find(std::path::Path::new(dir), 4, &[*name]))
     })
 }
-fn volume_slider(ui: &mut egui::Ui, value: &mut f32, width: f32) -> egui::Response {
+fn volume_slider(ui: &mut egui::Ui, value: &mut f32, width: f32, maximum: f32) -> egui::Response {
     ui.scope(|ui| {
         ui.spacing_mut().slider_width = width;
         ui.spacing_mut().interact_size.y = config::get().number("layout.slider_height");
@@ -3079,14 +3132,14 @@ fn volume_slider(ui: &mut egui::Ui, value: &mut f32, width: f32) -> egui::Respon
             widget.bg_stroke = egui::Stroke::NONE;
         }
         let response = ui.add(
-            egui::Slider::new(value, 0.0..=150.)
+            egui::Slider::new(value, 0.0..=maximum)
                 .show_value(false)
                 .trailing_fill(false),
         );
         let radius = response.rect.height() / 2.;
         let range = response.rect.x_range().shrink(response.rect.height() / 2.5);
         let center = pos2(
-            egui::lerp(range, (*value / 150.).clamp(0., 1.)),
+            egui::lerp(range, (*value / maximum).clamp(0., 1.)),
             response.rect.center().y,
         );
         ui.painter().rect_filled(

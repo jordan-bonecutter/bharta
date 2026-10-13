@@ -59,9 +59,14 @@ Bluetooth uses BlueZ over D-Bus; power actions use login1 over D-Bus. Apps suppo
 Desktop Entry commands and D-Bus activation directly. The desktop's running
 services and graphics drivers are still needed for their respective features.
 Launching an app or a terminal entry naturally requires that app to be installed.
-Session locking uses the desktop's `org.freedesktop.ScreenSaver` D-Bus service;
-without a lock service, it reports an error. Explicitly configured external
-launchers and XEmbed bridges remain optional integrations.
+Session locking requests `org.freedesktop.login1.Manager.LockSession` over D-Bus,
+using `XDG_SESSION_ID` or the caller's session. The session's existing lock handler
+is responsible for locking; on Sway, configure swayidle's `lock` event to use your
+chosen locker. Sway has no lock IPC command. If login1 is unavailable or rejects
+this request, bharta tries the desktop's `org.freedesktop.ScreenSaver.Lock` service.
+Bharta does not launch a lock utility. A successful login1 request acknowledges
+notification of the session, not confirmation that a lock screen appeared.
+Explicitly configured external launchers and XEmbed bridges remain optional integrations.
 App tray icons appear immediately to the left of CPU in the right-side group.
 StatusNotifierItem/AppIndicator apps are supported directly over session D-Bus,
 including icon/status updates, activation, scrolling, and D-Bus menus. Hover opens
@@ -95,6 +100,15 @@ Settings are read at startup from `~/.config/bharta/config.json`, or
 Use `--config /path/to/config.json` for a separate configuration. `--dark`,
 `--light`, and `--font` override file settings, including across all outputs.
 Restart bharta after editing.
+
+Lock runs `swaylock` by default. Configure your locker and its arguments with
+`"session": { "lock_command": ["swaylock", "-f"] }`, or use another program
+such as `["hyprlock"]`. Arguments are passed directly without shell expansion.
+An empty list uses the logind/desktop lock services instead, which require a
+locker listening for their lock requests.
+
+The Sound output selector also lists connected HDMI ports on inactive card
+profiles. Selecting one activates its profile and routes playback to it.
 
 To use an external app launcher, set `"launcher": { "executable": "fuzzel" }`.
 Use a program name from `PATH` or an executable path. It runs on clicking the
@@ -199,7 +213,7 @@ clicking again closes it until the pointer leaves that control.
 - Apps: immediately focused search, desktop-entry filtering, arrow-key selection,
   Enter to launch, or clickable rows. egui handles editing and selection; Wayland
   handles clipboard transfer and keyboard layout/repeat.
-- Session: lock through the desktop screen saver D-Bus service;
+- Session: request locking through login1 or the desktop screen saver D-Bus service;
   logout requires two clicks.
 - Battery percentage, charging indicator, and local clock.
 

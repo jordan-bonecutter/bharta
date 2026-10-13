@@ -38,6 +38,8 @@ impl Output {
 }
 #[derive(Clone, Debug)]
 pub struct Stream {
+    pub pid: u32,
+    pub media: Option<String>,
     pub index: u32,
     pub application: String,
     pub icon: String,
@@ -47,10 +49,18 @@ pub struct Stream {
     pub corked: bool,
 }
 #[derive(Clone, Debug, Default)]
+pub struct ProfileOutput {
+    pub card: String,
+    pub profile: String,
+    pub port: String,
+    pub description: String,
+}
+#[derive(Clone, Debug, Default)]
 pub struct Snapshot {
     pub default: String,
     pub outputs: Vec<Output>,
     pub streams: Vec<Stream>,
+    pub profiles: Vec<ProfileOutput>,
 }
 impl Snapshot {
     pub fn active(&self) -> Option<&Output> {
@@ -69,6 +79,7 @@ pub enum Control {
     Port(String, String),
     StreamVolume(u32, u8),
     StreamMute(u32),
+    Profile(ProfileOutput),
 }
 pub enum Request {
     Refresh,
@@ -126,6 +137,7 @@ fn parse(value: &Value, default: String) -> Result<Snapshot> {
         default,
         outputs,
         streams: vec![],
+        profiles: vec![],
     })
 }
 fn parse_streams(value: &Value) -> Vec<Stream> {
@@ -165,6 +177,11 @@ fn parse_streams(value: &Value) -> Vec<Stream> {
                 .div_ceil(65536)
                 .min(150) as u32;
             Some(Stream {
+                pid: properties["application.process.id"]
+                    .as_str()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0),
+                media: media.map(str::to_owned),
                 index,
                 icon: properties["application.icon_name"]
                     .as_str()
@@ -190,7 +207,63 @@ pub fn read() -> Result<Snapshot> {
     let (default, outputs, streams) = crate::pulse::snapshot_json()?;
     let mut snapshot = parse(&outputs, default)?;
     snapshot.streams = parse_streams(&streams);
+    snapshot.profiles = profile_outputs(crate::pulse::cards().unwrap_or_default(), &outputs);
     Ok(snapshot)
+}
+fn profile_outputs(cards: Vec<CardInfo>, outputs: &Value) -> Vec<ProfileOutput> {
+    let mut targets = Vec::new();
+    {
+        for card in cards {
+            for port in &card.ports {
+                let port_name = port.name.to_string_lossy();
+                // PulseAudio's output direction is wire value 1. pulseaudio 0.3.1
+                // names that value Input (a sink input), and names microphones Output.
+                if port.dir != port_info::PortDirection::Input
+                    || port.available == port_info::PortAvailable::No
+                {
+                    continue;
+                }
+                if outputs.as_array().into_iter().flatten().any(|o| {
+                    o["card"].as_u64() == Some(u64::from(card.index))
+                        && o["ports"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .any(|p| p["name"].as_str() == Some(&port_name))
+                }) {
+                    continue;
+                }
+                // Prefer a stereo profile while retaining the card's input when possible.
+                let profile = card
+                    .profiles
+                    .iter()
+                    .filter(|p| {
+                        p.num_sinks > 0 && p.available != 0 && port.profiles.contains(&p.name)
+                    })
+                    .max_by_key(|p| {
+                        (
+                            p.name.to_string_lossy().contains("stereo"),
+                            p.num_sources > 0,
+                            p.priority,
+                        )
+                    });
+                if let Some(profile) = profile {
+                    targets.push(ProfileOutput {
+                        card: card.name.to_string_lossy().into_owned(),
+                        profile: profile.name.to_string_lossy().into_owned(),
+                        port: port_name.into_owned(),
+                        description: port
+                            .description
+                            .as_ref()
+                            .unwrap_or(&port.name)
+                            .to_string_lossy()
+                            .into_owned(),
+                    });
+                }
+            }
+        }
+    }
+    targets
 }
 fn volume_values(output: &Output, channel: Option<&str>, percent: u8) -> Result<Vec<u32>> {
     ensure!(!output.channels.is_empty(), "Output has no volume channels");
@@ -233,6 +306,42 @@ fn apply(control: Control) -> Result<()> {
     let current = read()?;
     crate::pulse::with(|connection| {
         let command = match control {
+            Control::Profile(target) => {
+                let card = connection
+                    .list::<CardInfo>(&Command::GetCardInfoList)?
+                    .into_iter()
+                    .find(|c| c.name.to_string_lossy() == target.card)
+                    .context("Audio card disconnected")?;
+                connection.request(&Command::SetCardProfile(SetCardProfileParams {
+                    card_index: None,
+                    card_name: Some(crate::pulse::name(&target.card)?),
+                    profile_name: crate::pulse::name(&target.profile)?,
+                }))?;
+                let deadline =
+                    Instant::now() + crate::config::get().duration("timeouts.command_ms");
+                loop {
+                    let sinks = connection.list::<SinkInfo>(&Command::GetSinkInfoList)?;
+                    if let Some(sink) = sinks.iter().find(|s| {
+                        s.card_index == Some(card.index)
+                            && s.ports
+                                .iter()
+                                .any(|p| p.name.to_string_lossy() == target.port)
+                    }) {
+                        let name = sink.name.to_string_lossy();
+                        connection.request(&Command::SetSinkPort(SetPortParams {
+                            index: Some(sink.index),
+                            name: None,
+                            port_name: crate::pulse::name(&target.port)?,
+                        }))?;
+                        return activate_output(connection, &name);
+                    }
+                    ensure!(
+                        Instant::now() < deadline,
+                        "Audio output did not appear after activating its profile"
+                    );
+                    std::thread::sleep(crate::config::get().duration("timeouts.command_poll_ms"));
+                }
+            }
             Control::StreamVolume(index, percent) => {
                 ensure!(percent <= 150, "Stream volume must be at most 150 percent");
                 let stream = connection
@@ -378,6 +487,78 @@ pub fn watch(sender: std::sync::mpsc::Sender<Update>) -> mpsc::Sender<Request> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn inactive_hdmi_profiles_and_speaker_return_are_discovered() {
+        let mut card = CardInfo {
+            index: 1,
+            name: c"card".into(),
+            props: Props::new(),
+            owner_module_index: None,
+            driver: None,
+            ports: vec![],
+            profiles: vec![],
+            active_profile: Some(c"analog".into()),
+        };
+        for (name, sources, priority) in [
+            ("hdmi-stereo", 0, 100),
+            ("hdmi-stereo+input", 1, 90),
+            ("analog", 1, 200),
+        ] {
+            card.profiles.push(CardProfileInfo {
+                name: crate::pulse::name(name).unwrap(),
+                description: None,
+                priority,
+                available: 1,
+                num_sinks: 1,
+                num_sources: sources,
+            });
+        }
+        for (name, profiles) in [
+            (
+                "hdmi-output-0",
+                vec![c"hdmi-stereo".into(), c"hdmi-stereo+input".into()],
+            ),
+            ("speaker", vec![c"analog".into()]),
+        ] {
+            card.ports.push(CardPortInfo {
+                name: crate::pulse::name(name).unwrap(),
+                description: None,
+                port_type: Default::default(),
+                props: Props::new(),
+                dir: port_info::PortDirection::Input,
+                priority: 0,
+                available: port_info::PortAvailable::Yes,
+                availability_group: None,
+                profiles,
+                latency_offset: 0,
+            });
+        }
+        // Pin the actual PulseAudio wire direction, independent of the crate's names.
+        assert_eq!(card.ports[0].dir as u8, 1);
+        let mut microphone = card.ports[1].clone();
+        microphone.name = c"analog-input-internal-mic".into();
+        microphone.description = Some(c"Internal Microphone".into());
+        microphone.dir = port_info::PortDirection::Output;
+        assert_eq!(microphone.dir as u8, 2);
+        // A duplex profile has sinks, so profile.num_sinks alone cannot filter a mic.
+        card.ports.push(microphone);
+        let analog = serde_json::json!([{"card":1,"ports":[{"name":"speaker"}]}]);
+        let targets = profile_outputs(vec![card.clone()], &analog);
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].profile, "hdmi-stereo+input");
+        let hdmi = serde_json::json!([{"card":1,"ports":[{"name":"hdmi-output-0"}]}]);
+        assert_eq!(
+            profile_outputs(vec![card.clone()], &hdmi)[0].port,
+            "speaker"
+        );
+        card.ports[0].available = port_info::PortAvailable::No;
+        assert!(profile_outputs(vec![card.clone()], &analog).is_empty());
+        card.ports[0].available = port_info::PortAvailable::Yes;
+        for p in &mut card.profiles {
+            p.available = 0;
+        }
+        assert!(profile_outputs(vec![card], &analog).is_empty());
+    }
     fn fixture() -> Snapshot {
         parse(&serde_json::json!([{
         "name":"speaker", "channel_map":"front-right,front-left", "volume":{
@@ -406,6 +587,7 @@ mod tests {
             {"index":8,"corked":true,"mute":true,"volume":{"left":{"value":65536}},"properties":{"application.name":"Music"}}
         ]));
         assert_eq!(streams[0].name, "Firefox · YouTube");
+        assert_eq!(streams[0].media.as_deref(), Some("YouTube"));
         assert_eq!(streams[0].percent, 50);
         assert!(!streams[0].corked && !streams[0].muted);
         assert_eq!(streams[1].name, "Music");
@@ -418,7 +600,7 @@ mod tests {
             raw.iter()
                 .any(|s| s.name == "fruisic" && s.icon == "fruisic")
         );
-        assert!(raw.iter().any(|s| s.name == "Firefox"));
+        assert!(raw.iter().any(|s| s.name == "Firefox" && s.media.is_none()));
     }
     #[test]
     fn source_order_survives_pause_and_metadata_changes() {
