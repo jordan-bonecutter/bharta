@@ -51,6 +51,11 @@ use wayland_client::{
 };
 use xkeysym::Keysym;
 
+use wayland_protocols::ext::background_effect::v1::client::{
+    ext_background_effect_manager_v1::{self, ExtBackgroundEffectManagerV1},
+    ext_background_effect_surface_v1::{self, ExtBackgroundEffectSurfaceV1},
+};
+
 pub fn run(options: crate::Options) -> Result<()> {
     let conn =
         Connection::connect_to_env().context("Connect to Wayland; run bharta inside Sway")?;
@@ -63,6 +68,11 @@ pub fn run(options: crate::Options) -> Result<()> {
     let (paste_tx, paste_rx) = mpsc::channel();
     let mut app = App {
         registry: RegistryState::new(&globals),
+        blur_manager: globals
+            .bind::<ExtBackgroundEffectManagerV1, _, _>(&qh, 1..=1, ())
+            .ok(),
+        blur: None,
+        blur_supported: false,
         seats: SeatState::new(&globals, &qh),
         outputs: OutputState::new(&globals, &qh),
         shm,
@@ -136,6 +146,10 @@ pub fn run(options: crate::Options) -> Result<()> {
         }
     });
     let surface = app.compositor.create_surface(&qh);
+    app.blur = app
+        .blur_manager
+        .as_ref()
+        .map(|manager| manager.get_background_effect(&surface, &qh, ()));
     let layer = shell.create_layer_surface(&qh, surface, Layer::Top, Some("bharta"), Some(&output));
     layer.set_anchor(Anchor::TOP | Anchor::LEFT | Anchor::RIGHT);
     layer.set_size(0, crate::config::get().number("layout.bar_height") as u32);
@@ -219,6 +233,9 @@ struct App {
     #[cfg(not(target_env = "musl"))]
     gpu: Option<super::gpu::Gpu>,
     registry: RegistryState,
+    blur_manager: Option<ExtBackgroundEffectManagerV1>,
+    blur: Option<ExtBackgroundEffectSurfaceV1>,
+    blur_supported: bool,
     seats: SeatState,
     outputs: OutputState,
     shm: Shm,
@@ -362,6 +379,34 @@ impl App {
         layer
             .wl_surface()
             .set_input_region(Some(region.wl_region()));
+        if let Some(blur) = &self.blur {
+            if self.blur_supported && self.ui.panel.is_some() && self.ui.panel_rect.is_positive() {
+                let bounds = self.ui.panel_rect;
+                let rounded = Region::new(&self.compositor)?;
+                let radius = crate::config::get()
+                    .number("layout.popup_corner_radius")
+                    .min(bounds.width() / 2.)
+                    .min(bounds.height() / 2.);
+                // Keep the blur inside the rounded popup; transparent surface margins remain clear.
+                for y in 0..bounds.height().ceil() as i32 {
+                    let edge = (y as f32 + 0.5).min(bounds.height() - y as f32 - 0.5);
+                    let inset = if edge < radius {
+                        radius - (radius * radius - (radius - edge).powi(2)).max(0.).sqrt()
+                    } else {
+                        0.
+                    };
+                    rounded.add(
+                        (bounds.left() + inset).ceil() as i32,
+                        bounds.top().floor() as i32 + y,
+                        (bounds.width() - 2. * inset).floor().max(1.) as i32,
+                        1,
+                    );
+                }
+                blur.set_blur_region(Some(rounded.wl_region()));
+            } else {
+                blur.set_blur_region(None);
+            }
+        }
         let scale = self.scale as u32;
         let (w, h) = (self.width * scale, self.height * scale);
         let jobs = ctx.tessellate(out.shapes, out.pixels_per_point);
@@ -968,4 +1013,31 @@ impl ProvidesRegistryState for App {
         &mut self.registry
     }
     registry_handlers![OutputState, SeatState];
+}
+
+impl Dispatch<ExtBackgroundEffectManagerV1, ()> for App {
+    fn event(
+        state: &mut Self,
+        _: &ExtBackgroundEffectManagerV1,
+        event: ext_background_effect_manager_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let ext_background_effect_manager_v1::Event::Capabilities { flags } = event {
+            state.blur_supported = matches!(flags, WEnum::Value(flags) if flags.contains(ext_background_effect_manager_v1::Capability::Blur));
+            state.dirty = true;
+        }
+    }
+}
+impl Dispatch<ExtBackgroundEffectSurfaceV1, ()> for App {
+    fn event(
+        _: &mut Self,
+        _: &ExtBackgroundEffectSurfaceV1,
+        _: ext_background_effect_surface_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
 }

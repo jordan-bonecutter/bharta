@@ -38,7 +38,7 @@ or shared-library dependencies and uploads an archive preserving its executable
 permission. A plain
 `cargo build` uses Rust's platform default for development; use `./build.sh`
 for distribution. `--font /path/to/font.ttf` selects a custom UI font with the
-bundled fallbacks. SF Mono is selected automatically when installed;
+bundled fallbacks. A proportional system font is selected automatically when installed;
 `--font` takes precedence.
 
 The distributed executable also embeds a GPU-capable build against glibc 2.28.
@@ -129,8 +129,12 @@ zero to one (exclusive of zero), and colors use `#RRGGBB`. Unknown keys, invalid
 types, unsupported colors, and invalid numeric ranges produce an error naming
 the setting. JSON needs double quotes and does not allow comments or trailing commas.
 
-Appearance includes a font path (empty selects installed SF Mono or the bundled
-fallback), clock format, and font/icon sizes. Layout covers bar and popup dimensions,
+Appearance includes independent `font` and `monospace_font` paths (empty selects
+installed fonts or bundled fallbacks), clock format, and font/icon sizes.
+`popup_opacity_fraction` controls tray translucency; `layout.popup_corner_radius`
+controls rounded corners. `animation.drawer_transition_ms` controls connection-view
+slides and tray resizing. `animation.icon_fade_ms` controls app-icon transitions. Trays request background blur through the optional
+Wayland background-effect protocol; compositors without it retain translucency. Layout covers bar and popup dimensions,
 spacing, source rows, sliders, meters, and process columns. Preview controls its
 display-relative bounds. Animation controls hover/dismiss delays, fades, speaker
 scale, and frame interval. Intervals control sampling/retries; timeouts cover IPC,

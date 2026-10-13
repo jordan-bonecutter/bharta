@@ -411,7 +411,7 @@ mod tests {
         assert_eq!(streams[1].name, "Music");
         assert!(streams[1].corked && streams[1].muted);
         let raw = parse_streams(&serde_json::json!([
-            {"index":9,"properties":{"application.name":"ALSA plug-in [fruisic]", "media.name":"ALSA Playback", "application.icon_name":"fruisic"}},
+            {"index":9,"properties":{"application.name":"PipeWire ALSA [fruisic]", "media.name":"ALSA Playback", "application.icon_name":"fruisic"}},
             {"index":10,"properties":{"application.name":"Firefox", "media.name":"AudioStream"}}
         ]));
         assert!(

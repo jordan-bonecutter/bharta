@@ -7,7 +7,9 @@
     "icon_size": 15,
     "icon_color_dark": "#ebebeb",
     "icon_color_light": "#292929",
-    "clock_format": "%a %b %-d   %-I:%M %p"
+    "clock_format": "%a %b %-d   %-I:%M %p",
+    "monospace_font": "",
+    "popup_opacity_fraction": 0.78
   },
   "layout": {
     "bar_height": 28,
@@ -16,7 +18,7 @@
     "icon_slot_width": 32,
     "cpu_width": 60,
     "sound_tray_width": 60,
-    "workspace_width": 40,
+    "workspace_width": 65,
     "workspace_gap": 8,
     "popup_padding": 12,
     "popup_width": 320,
@@ -27,7 +29,7 @@
     "item_gap_y": 5,
     "button_padding_x": 5,
     "button_padding_y": 3,
-    "slider_height": 18,
+    "slider_height": 20,
     "slider_rail_height": 3,
     "slider_handle_ratio": 2.5,
     "separator_height": 12,
@@ -49,14 +51,14 @@
     "popup_bottom_margin": 30,
     "popup_min_height": 100,
     "control_height": 24,
-    "audio_row_height": 30,
+    "audio_row_height": 96,
     "audio_summary_offset": 36,
     "audio_controls_width": 88,
-    "battery_width": 62,
+    "battery_width": 22,
     "widget_min_width": 24,
     "widget_min_height": 22,
-    "workspace_number_offset": 12,
-    "workspace_audio_offset": 29,
+    "workspace_number_offset": 10,
+    "workspace_audio_offset": 54,
     "workspace_audio_size": 12,
     "battery_icon_width": 21,
     "battery_icon_height": 10,
@@ -67,7 +69,8 @@
     "meter_bar_gap": 7,
     "meter_offset": 80,
     "media_button_width": 24,
-    "media_button_gap": 4
+    "media_button_gap": 4,
+    "popup_corner_radius": 14
   },
   "preview": {
     "width_fraction": 0.25,
@@ -83,7 +86,9 @@
     "preview_fade_ms": 150,
     "speaker_fade_ms": 120,
     "speaker_min_scale": 0.96,
-    "frame_ms": 16
+    "frame_ms": 16,
+    "drawer_transition_ms": 220,
+    "icon_fade_ms": 160
   },
   "intervals": {
     "cpu_ms": 1000,
@@ -118,7 +123,7 @@
   "colors": {
     "dark": {
       "bar": "#1e1e1e",
-      "popup": "#222222",
+      "popup": "#42464d",
       "hover": "#303030",
       "button": "#292929",
       "button_hover": "#383838",
@@ -134,11 +139,12 @@
       "preview_canvas": "#303030",
       "preview_window": "#484848",
       "urgent": "#c84646",
-      "audio": "#41be8c"
+      "audio": "#41be8c",
+      "popup_text": "#e6e6e6"
     },
     "light": {
       "bar": "#f2f2f2",
-      "popup": "#f7f7f7",
+      "popup": "#edf0f5",
       "hover": "#dedede",
       "button": "#e6e6e6",
       "button_hover": "#d4d4d4",
@@ -154,7 +160,8 @@
       "preview_canvas": "#303030",
       "preview_window": "#484848",
       "urgent": "#c84646",
-      "audio": "#41be8c"
+      "audio": "#41be8c",
+      "popup_text": "#292929"
     }
   },
   "tray": {

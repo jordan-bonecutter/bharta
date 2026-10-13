@@ -304,6 +304,35 @@ pub fn launch_executable(executable: &str, args: &[&str]) -> std::io::Result<()>
     });
     Ok(())
 }
+/// Resolve desktop metadata once per application, using the same XDG entries as Apps.
+pub fn icon_name(application: &str) -> Option<String> {
+    entries().into_iter().find_map(|entry| {
+        let text = std::fs::read_to_string(&entry.path).ok()?;
+        let mut section = false;
+        let mut icon = None;
+        let mut matches = entry
+            .path
+            .file_stem()
+            .is_some_and(|id| id.to_string_lossy().eq_ignore_ascii_case(application))
+            || entry.name.eq_ignore_ascii_case(application);
+        for line in text.lines().map(str::trim) {
+            if line.starts_with('[') {
+                section = line == "[Desktop Entry]";
+            }
+            if !section {
+                continue;
+            }
+            if let Some(value) = line.strip_prefix("StartupWMClass=") {
+                matches |= value.eq_ignore_ascii_case(application);
+            }
+            if let Some(value) = line.strip_prefix("Icon=") {
+                icon = Some(value.to_owned());
+            }
+        }
+        matches.then_some(icon).flatten()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

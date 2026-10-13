@@ -493,13 +493,17 @@ fn decode_pixmaps(pixmaps: Vec<(i32, i32, Vec<u8>)>) -> Option<Icon> {
         rgba,
     })
 }
-fn load_icon(name: &str, theme: &str) -> Option<Icon> {
+pub(crate) fn load_icon(name: &str, theme: &str) -> Option<Icon> {
+    load_icon_at_size(name, theme, 32)
+}
+/// App artwork needs enough pixels for large drawer images and HiDPI displays.
+pub(crate) fn load_icon_at_size(name: &str, theme: &str, pixels: u32) -> Option<Icon> {
     if name.is_empty() {
         return None;
     }
     let path = std::path::Path::new(name);
     if path.is_absolute() {
-        return load_file(path);
+        return load_file(path, pixels);
     }
     if name.contains('/') || name.contains("..") {
         return None;
@@ -523,11 +527,20 @@ fn load_icon(name: &str, theme: &str) -> Option<Icon> {
         roots.push(std::path::PathBuf::from(root).join("icons"));
         roots.push(std::path::PathBuf::from(root).join("pixmaps"));
     }
+    let sizes: &[&str] = if pixels > 32 {
+        &[
+            "scalable", "128x128", "96x96", "64x64", "256x256", "48x48", "32x32", "24x24", "16x16",
+            "", "symbolic",
+        ]
+    } else {
+        &[
+            "", "16x16", "22x22", "24x24", "32x32", "48x48", "scalable", "symbolic",
+        ]
+    };
+    let mut fallback: Option<Icon> = None;
     for root in roots {
         for theme in ["", "hicolor", "Adwaita"] {
-            for size in [
-                "", "16x16", "22x22", "24x24", "32x32", "48x48", "scalable", "symbolic",
-            ] {
+            for size in sizes {
                 for category in ["", "status", "apps", "devices", "actions", "panel"] {
                     for extension in ["png", "svg"] {
                         let path = root
@@ -536,18 +549,25 @@ fn load_icon(name: &str, theme: &str) -> Option<Icon> {
                             .join(category)
                             .join(format!("{name}.{extension}"));
                         if path.is_file()
-                            && let Some(icon) = load_file(&path)
+                            && let Some(icon) = load_file(&path, pixels)
                         {
-                            return Some(icon);
+                            if pixels <= 32 || icon.size[0].min(icon.size[1]) >= pixels as usize {
+                                return Some(icon);
+                            }
+                            if fallback.as_ref().is_none_or(|best| {
+                                icon.size[0].min(icon.size[1]) > best.size[0].min(best.size[1])
+                            }) {
+                                fallback = Some(icon);
+                            }
                         }
                     }
                 }
             }
         }
     }
-    None
+    fallback
 }
-fn load_file(path: &std::path::Path) -> Option<Icon> {
+fn load_file(path: &std::path::Path, pixels: u32) -> Option<Icon> {
     let metadata = path.metadata().ok()?;
     if !metadata.is_file() || metadata.len() > 2 * 1024 * 1024 {
         return None;
@@ -555,10 +575,13 @@ fn load_file(path: &std::path::Path) -> Option<Icon> {
     let bytes = std::fs::read(path).ok()?;
     if path.extension().is_some_and(|e| e == "svg") {
         let tree = resvg::usvg::Tree::from_data(&bytes, &resvg::usvg::Options::default()).ok()?;
-        let mut pixmap = tiny_skia::Pixmap::new(32, 32)?;
+        let mut pixmap = tiny_skia::Pixmap::new(pixels, pixels)?;
         resvg::render(
             &tree,
-            tiny_skia::Transform::from_scale(32. / tree.size().width(), 32. / tree.size().height()),
+            tiny_skia::Transform::from_scale(
+                pixels as f32 / tree.size().width(),
+                pixels as f32 / tree.size().height(),
+            ),
             &mut pixmap.as_mut(),
         );
         let rgba = pixmap
@@ -570,7 +593,7 @@ fn load_file(path: &std::path::Path) -> Option<Icon> {
             })
             .collect();
         Some(Icon {
-            size: [32, 32],
+            size: [pixels as usize, pixels as usize],
             rgba,
         })
     } else {
@@ -582,7 +605,7 @@ fn load_file(path: &std::path::Path) -> Option<Icon> {
         limits.max_image_height = Some(512);
         limits.max_alloc = Some(4 * 1024 * 1024);
         reader.limits(limits);
-        let image = reader.decode().ok()?.thumbnail(32, 32).into_rgba8();
+        let image = reader.decode().ok()?.thumbnail(pixels, pixels).into_rgba8();
         Some(Icon {
             size: [image.width() as usize, image.height() as usize],
             rgba: image.into_raw(),

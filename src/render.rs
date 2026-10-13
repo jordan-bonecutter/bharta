@@ -167,20 +167,12 @@ impl Renderer {
             clock
         };
         let shown_battery = if width < 480 { None } else { status.battery };
-        let battery = shown_battery
-            .map(|(n, _)| format!("{n}%"))
-            .unwrap_or_default();
         let right = format!(
-            "{}   {}{}",
+            "{}{}",
             if status.connected {
                 ""
             } else {
                 "Sway offline   "
-            },
-            if battery.is_empty() {
-                String::new()
-            } else {
-                format!("{battery}   ")
             },
             clock
         );

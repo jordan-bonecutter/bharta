@@ -414,7 +414,9 @@ pub fn audible_workspaces(
 }
 pub fn application_name(properties: &Value) -> &str {
     let name = properties["application.name"].as_str().unwrap_or("");
-    if name.to_ascii_lowercase().starts_with("alsa ") {
+    if name.to_ascii_lowercase().starts_with("alsa ")
+        || name.to_ascii_lowercase().starts_with("pipewire alsa ")
+    {
         return properties["application.process.binary"]
             .as_str()
             .or_else(|| name.split_once('[').and_then(|(_, n)| n.strip_suffix(']')))

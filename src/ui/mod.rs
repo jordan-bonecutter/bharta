@@ -1,7 +1,10 @@
+mod application_icons;
+mod audio_sources;
 mod bar_button;
 #[cfg(not(target_env = "musl"))]
 mod gpu;
 mod keyboard;
+mod motion;
 mod services;
 mod wayland;
 use crate::{
@@ -50,7 +53,12 @@ impl Meter {
     }
 }
 fn plot_color(level: f32) -> Color32 {
-    Color32::from(egui::ecolor::Hsva::new((1. - level) / 3., 0.65, 0.85, 1.))
+    Color32::from(egui::ecolor::Hsva::new(
+        (1. - level.clamp(0., 1.)) / 3.,
+        0.95,
+        0.90,
+        1.,
+    ))
 }
 fn paint_equalizer(painter: &egui::Painter, bounds: Rect, levels: &[f64; 7]) {
     let painter = painter.with_clip_rect(bounds);
@@ -71,6 +79,12 @@ fn paint_equalizer(painter: &egui::Painter, bounds: Rect, levels: &[f64; 7]) {
         );
     }
 }
+#[derive(Clone, PartialEq)]
+enum AppLabel {
+    Icon(egui::TextureId),
+    Name(String),
+}
+
 struct Panel {
     kind: Menu,
     x: f32,
@@ -118,6 +132,14 @@ struct Ui {
     claim: u128,
     hover: Option<(Menu, Instant)>,
     blocked_hover: Option<Menu>,
+    pending_menu: Option<(Menu, f32, bool)>,
+    missing_icons: std::collections::HashSet<String>,
+    app_icon_pixels: HashMap<String, crate::tray::Icon>,
+    app_icon_requests: std::sync::mpsc::Sender<String>,
+    app_icon_results: std::sync::mpsc::Receiver<application_icons::Result>,
+    drawer_motion: motion::DrawerMotion,
+    workspace_icon_fades: HashMap<String, motion::Crossfade<Vec<egui::TextureId>>>,
+    app_icon_fade: motion::Crossfade<AppLabel>,
     preview_size: [f32; 2],
     panel_rect: Rect,
     dark: bool,
@@ -159,26 +181,46 @@ impl Ui {
             egui::FontId::proportional(config::get().number("appearance.font_size")),
         );
         ctx.set_global_style(style);
-        let font = options
-            .font
-            .as_ref()
-            .map(std::path::PathBuf::from)
-            .or_else(sf_mono);
-        if let Some(path) = font {
-            let mut fonts = egui::FontDefinitions::default();
-            fonts.font_data.insert(
-                "custom".into(),
-                egui::FontData::from_owned(std::fs::read(&path)?).into(),
-            );
-            for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+        let mut fonts = egui::FontDefinitions::default();
+        for (name, family, path) in [
+            (
+                "normal",
+                egui::FontFamily::Proportional,
+                options
+                    .font
+                    .as_ref()
+                    .map(std::path::PathBuf::from)
+                    .or_else(|| installed_font(false)),
+            ),
+            (
+                "monospace",
+                egui::FontFamily::Monospace,
+                (!config::get().text("appearance.monospace_font").is_empty())
+                    .then(|| {
+                        std::path::PathBuf::from(config::get().text("appearance.monospace_font"))
+                    })
+                    .or_else(|| installed_font(true)),
+            ),
+        ] {
+            if let Some(path) = path {
+                let data = std::fs::read(&path).map_err(|error| {
+                    anyhow::anyhow!("Read {name} font {}: {error}", path.display())
+                })?;
+                ab_glyph::FontRef::try_from_slice(&data).map_err(|error| {
+                    anyhow::anyhow!("Invalid {name} font {}: {error}", path.display())
+                })?;
+                fonts
+                    .font_data
+                    .insert(name.into(), egui::FontData::from_owned(data).into());
                 fonts
                     .families
                     .get_mut(&family)
                     .unwrap()
-                    .insert(0, "custom".into());
+                    .insert(0, name.into());
             }
-            ctx.set_fonts(fonts);
         }
+        ctx.set_fonts(fonts);
+        let (app_icon_requests, app_icon_results) = application_icons::worker();
         Ok(Self {
             ctx,
             services: Services::new(options.output.clone()),
@@ -221,12 +263,21 @@ impl Ui {
             claim: 0,
             hover: None,
             blocked_hover: None,
+            pending_menu: None,
+            missing_icons: Default::default(),
+            app_icon_pixels: Default::default(),
+            app_icon_requests,
+            app_icon_results,
+            drawer_motion: Default::default(),
+            workspace_icon_fades: Default::default(),
+            app_icon_fade: Default::default(),
             preview_size: [312., 220.],
             panel_rect: Rect::NOTHING,
             dark: options.dark,
         })
     }
     fn close(&mut self) {
+        self.pending_menu = None;
         let _ = self
             .services
             .tray
@@ -244,6 +295,7 @@ impl Ui {
         self.close();
         self.panel = None;
         self.panel_rect = Rect::NOTHING;
+        self.drawer_motion = Default::default();
         self.selected_network = None;
         self.hidden_ssid = None;
         self.password.clear();
@@ -251,7 +303,8 @@ impl Ui {
         self.preview = None;
         self.preview_previous = None;
         self.preview_pending = None;
-        self.textures.retain(|k, _| k.starts_with("icon:"));
+        self.textures
+            .retain(|k, _| k.starts_with("icon:") || k.starts_with("app-icon:"));
     }
     fn open(&mut self, kind: Menu, x: f32, clicked: bool) {
         let executable = config::get().text("launcher.executable");
@@ -282,12 +335,15 @@ impl Ui {
             }
             return;
         }
-        let opened = self
-            .panel
-            .as_ref()
-            .filter(|p| p.closing.is_none())
-            .map(|p| p.opened)
-            .unwrap_or_else(Instant::now);
+        if self.panel.as_ref().is_some_and(|panel| panel.kind != kind) {
+            if self.pending_menu.is_none() {
+                self.close();
+            }
+            self.pending_menu = Some((kind, x, clicked));
+            self.ctx.request_repaint();
+            return;
+        }
+        let opened = Instant::now();
         let switching_preview = matches!(kind, Menu::Workspace(_))
             && self
                 .panel
@@ -409,6 +465,12 @@ impl Ui {
         }
     }
     fn poll(&mut self) {
+        while let Ok((name, icon)) = self.app_icon_results.try_recv() {
+            if let Some(icon) = icon {
+                self.app_icon_pixels.insert(name, icon);
+                self.ctx.request_repaint();
+            }
+        }
         while let Ok(update) = self.services.tray_events.try_recv() {
             match update {
                 crate::tray::Update::Items(items) => {
@@ -532,6 +594,11 @@ impl Ui {
                             self.reveal = false;
                             self.ctx
                                 .memory_mut(|m| m.request_focus(egui::Id::new("bluetooth-pin")));
+                        }
+                        if self.bluetooth.is_none()
+                            && let Some(panel) = &mut self.panel
+                        {
+                            panel.opened = Instant::now();
                         }
                         self.bluetooth = Some(s);
                         self.error.clear();
@@ -714,7 +781,7 @@ impl Ui {
         self.icon_at_size(icon, config::get().number("appearance.icon_size"))
     }
     fn icon_at_size(&mut self, icon: Icon, size: f32) -> egui::TextureId {
-        let pixels = (size * self.ctx.pixels_per_point()).round().max(1.) as u32;
+        let pixels = (size * self.ctx.pixels_per_point() * 2.).round().max(1.) as u32;
         let key = format!(
             "icon:{}:{pixels}",
             match icon {
@@ -771,56 +838,113 @@ impl Ui {
             })
             .id()
     }
-    fn app_icon(&mut self, name: &str) -> egui::TextureId {
-        let key = format!("app-icon:{name}");
+    fn application_icon(&mut self, name: &str, size: f32) -> Option<egui::TextureId> {
+        let pixels = (size * self.ctx.pixels_per_point()).round().max(1.) as u32;
+        let key = format!("app-icon:{name}:{pixels}");
         if let Some(texture) = self.textures.get(&key) {
-            return texture.id();
+            return Some(texture.id());
         }
-        if !name.is_empty() && !name.contains('/') {
-            for root in std::env::var("XDG_DATA_DIRS")
-                .unwrap_or_else(|_| "/usr/local/share:/usr/share".into())
-                .split(':')
-            {
-                for size in ["48x48", "32x32", "64x64", "256x256"] {
-                    let path = std::path::Path::new(root)
-                        .join(format!("icons/hicolor/{size}/apps/{name}.png"));
-                    if let Ok(image) = image::open(path) {
-                        let image = image.thumbnail(48, 48).into_rgba8();
-                        let texture = self.ctx.load_texture(
-                            &key,
-                            egui::ColorImage::from_rgba_unmultiplied(
-                                [image.width() as usize, image.height() as usize],
-                                image.as_raw(),
-                            ),
-                            egui::TextureOptions::LINEAR,
-                        );
-                        let id = texture.id();
-                        self.textures.insert(key, texture);
-                        return id;
-                    }
-                }
-            }
+        if let Some(icon) = self.app_icon_pixels.get(name) {
+            let texture = self.ctx.load_texture(
+                &key,
+                application_icons::raster(icon, pixels),
+                egui::TextureOptions::LINEAR,
+            );
+            let id = texture.id();
+            self.textures.insert(key, texture);
+            return Some(id);
         }
-        let id = self.icon(Icon::Music);
-        let texture = self
-            .textures
+        if !name.is_empty() && self.missing_icons.insert(name.into()) {
+            let _ = self.app_icon_requests.send(name.into());
+        }
+        None
+    }
+    fn app_icon(&mut self, name: &str, size: f32) -> egui::TextureId {
+        self.application_icon(name, size)
+            .unwrap_or_else(|| self.icon_at_size(Icon::Music, size))
+    }
+    fn workspace_apps(&self, name: &str) -> Vec<String> {
+        self.state
+            .window_details
             .values()
-            .find(|t| t.id() == id)
-            .unwrap()
-            .clone();
-        self.textures.insert(key, texture);
-        id
+            .flatten()
+            .filter(|window| window.workspace == name && !window.application.is_empty())
+            .map(|window| window.application.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+    fn playback_button(&mut self, ui: &mut egui::Ui, icon: Icon, enabled: bool) -> bool {
+        ui.add_enabled_ui(enabled, |ui| {
+            let (rect, response) = ui.allocate_exact_size(vec2(28., 28.), egui::Sense::click());
+            let highlighted = enabled && (response.hovered() || response.has_focus());
+            let hover = ui
+                .ctx()
+                .animate_bool_with_time(response.id, highlighted, 0.1);
+            ui.painter().rect_filled(
+                rect.shrink(1.),
+                6,
+                config::get()
+                    .color("button_hover", self.dark)
+                    .gamma_multiply(if response.is_pointer_button_down_on() {
+                        1.
+                    } else {
+                        hover * 0.75
+                    }),
+            );
+            ui.painter().image(
+                self.icon_at_size(icon, 16.),
+                Rect::from_center_size(rect.center(), vec2(16., 16.)),
+                Rect::from_min_max(Pos2::ZERO, pos2(1., 1.)),
+                Color32::WHITE,
+            );
+            let label = match icon {
+                Icon::Previous => "Previous",
+                Icon::Next => "Next",
+                Icon::Pause => "Pause",
+                _ => "Play",
+            };
+            response.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label)
+            });
+            response.on_hover_text(label).clicked()
+        })
+        .inner
     }
     fn icon_button(&mut self, ui: &mut egui::Ui, icon: Icon, enabled: bool) -> bool {
-        let image = egui::Image::new((self.icon_at_size(icon, 14.), vec2(14., 14.)));
-        ui.add_enabled(
-            enabled,
-            egui::Button::image(image).frame(false).min_size(vec2(
-                config::get().number("layout.widget_min_width"),
-                config::get().number("layout.widget_min_height"),
-            )),
-        )
-        .clicked()
+        let size = config::get()
+            .number("layout.widget_min_width")
+            .max(config::get().number("layout.widget_min_height"));
+        ui.add_enabled_ui(enabled, |ui| {
+            let (rect, response) = ui.allocate_exact_size(vec2(size, size), egui::Sense::click());
+            let hover = ui.ctx().animate_bool_with_time(
+                response.id,
+                response.hovered() || response.has_focus(),
+                0.12,
+            );
+            let base = config::get().color("button", self.dark);
+            let highlight = config::get().color("button_hover", self.dark);
+            let fill = egui::Color32::from(
+                egui::Rgba::from(base) * (1. - hover) + egui::Rgba::from(highlight) * hover,
+            );
+            ui.painter().circle_filled(
+                rect.center(),
+                size / 2.,
+                if response.is_pointer_button_down_on() {
+                    fill.gamma_multiply(0.9)
+                } else {
+                    fill
+                },
+            );
+            ui.painter().image(
+                self.icon_at_size(icon, 14.),
+                Rect::from_center_size(rect.center(), vec2(14., 14.)),
+                Rect::from_min_max(Pos2::ZERO, pos2(1., 1.)),
+                Color32::WHITE,
+            );
+            response.clicked()
+        })
+        .inner
     }
     fn paint_tray(
         &mut self,
@@ -983,7 +1107,15 @@ impl Ui {
         let sound_width = config::get().number("layout.sound_tray_width");
         let session_width = config::get().number("layout.session_width");
         let apps_width = config::get().number("layout.apps_width");
-        let workspace_width = config::get().number("layout.workspace_width");
+        let number_offset = config::get().number("layout.workspace_number_offset");
+        let stack_icon_size = 14.;
+        let stack_stride = 6.;
+        let icon_start = number_offset + 8.;
+        let speaker_size = config::get().number("layout.workspace_audio_size");
+        let speaker_offset =
+            icon_start + stack_icon_size + 2. * stack_stride + 4. + speaker_size / 2.;
+        let workspace_width =
+            speaker_offset + speaker_size / 2. + config::get().number("layout.button_padding_x");
         let workspace_gap = config::get().number("layout.workspace_gap");
         let center_y = config::get().number("layout.bar_height") / 2.;
         let bg = config::get().color("bar", self.dark);
@@ -1048,6 +1180,12 @@ impl Ui {
             bar_button::Content::Icon,
             Menu::Apps,
         );
+        self.workspace_icon_fades.retain(|name, _| {
+            self.state
+                .workspaces
+                .iter()
+                .any(|workspace| workspace.name == *name)
+        });
         let mut x = margin + session_width + gap + apps_width + gap;
         for w in self.state.workspaces.clone() {
             let r = Rect::from_min_size(
@@ -1080,6 +1218,12 @@ impl Ui {
             } else {
                 ui.visuals().text_color()
             };
+            let apps = self.workspace_apps(&w.name);
+            let icons: Vec<_> = apps
+                .iter()
+                .filter_map(|app| self.application_icon(app, stack_icon_size))
+                .take(3)
+                .collect();
             ui.painter().text(
                 pos2(
                     x + config::get().number("layout.workspace_number_offset"),
@@ -1090,6 +1234,32 @@ impl Ui {
                 egui::FontId::proportional(config::get().number("appearance.font_size")),
                 color,
             );
+            let fade = self.workspace_icon_fades.entry(w.name.clone()).or_default();
+            let layers = fade.update(
+                icons,
+                Instant::now(),
+                config::get().duration("animation.icon_fade_ms"),
+            );
+            if fade.animating() {
+                self.ctx
+                    .request_repaint_after(config::get().duration("animation.frame_ms"));
+            }
+            for (icons, opacity) in layers {
+                for (index, icon) in icons.into_iter().enumerate().rev() {
+                    ui.painter().image(
+                        icon,
+                        Rect::from_center_size(
+                            pos2(
+                                x + icon_start + stack_icon_size / 2. + index as f32 * stack_stride,
+                                center_y,
+                            ),
+                            vec2(stack_icon_size, stack_icon_size),
+                        ),
+                        Rect::from_min_max(Pos2::ZERO, pos2(1., 1.)),
+                        Color32::WHITE.gamma_multiply(opacity),
+                    );
+                }
+            }
             let amount = self.ctx.animate_bool_with_time(
                 egui::Id::new(("audible", &w.name)),
                 w.audible,
@@ -1099,10 +1269,7 @@ impl Ui {
             );
             if amount > 0. {
                 let r = Rect::from_center_size(
-                    pos2(
-                        x + config::get().number("layout.workspace_audio_offset"),
-                        center_y,
-                    ),
+                    pos2(x + speaker_offset, center_y),
                     vec2(
                         config::get().number("layout.workspace_audio_size"),
                         config::get().number("layout.workspace_audio_size"),
@@ -1148,25 +1315,18 @@ impl Ui {
             ui.visuals().text_color(),
         );
         let right = width - margin - clock_width - gap;
-        let battery = self
-            .state
-            .battery
-            .map(|(p, _)| format!("{p}%"))
-            .unwrap_or_default();
-        ui.painter().text(
-            pos2(
-                right - config::get().number("layout.battery_text_offset"),
-                center_y,
-            ),
-            egui::Align2::LEFT_CENTER,
-            battery,
-            egui::FontId::proportional(config::get().number("appearance.font_size")),
-            ui.visuals().text_color(),
-        );
+        let battery_icon_extent = config::get().number("layout.battery_icon_width") + 3.;
+        let icon_padding = ((slot - config::get().number("appearance.icon_size")) / 2.).max(0.);
+        let battery_width = if self.state.battery.is_some() {
+            battery_icon_extent + 2. * icon_padding
+        } else {
+            0.
+        };
+        let battery_left = right - battery_width + icon_padding;
         if let Some((percent, charging)) = self.state.battery {
             let rect = Rect::from_min_size(
                 pos2(
-                    right - config::get().number("layout.battery_width"),
+                    battery_left,
                     center_y - config::get().number("layout.battery_icon_height") / 2.,
                 ),
                 vec2(
@@ -1184,7 +1344,7 @@ impl Ui {
                 );
             }
         }
-        let wifi_x = right - config::get().number("layout.battery_width") - gap - slot;
+        let wifi_x = right - battery_width - gap - slot;
         button(
             &mut targets,
             self,
@@ -1260,10 +1420,28 @@ impl Ui {
                             - (self.cpu_history.len() - 1 - i) as f32 * chart.width() / 31.,
                         chart.bottom() - usage * chart.height(),
                     );
-                    let color = plot_color(usage);
-                    (point, color)
+                    (point, usage)
                 })
                 .collect();
+            // Sample the hue ramp at physical-pixel intervals so GPU RGB
+            // interpolation cannot desaturate a long green-to-red segment.
+            let mut colored_points = Vec::new();
+            for pair in points.windows(2) {
+                let steps = ((pair[1].0.x - pair[0].0.x).abs() * painter.ctx().pixels_per_point())
+                    .ceil()
+                    .max(1.) as usize;
+                for step in 0..steps {
+                    let t = step as f32 / steps as f32;
+                    colored_points.push((
+                        pair[0].0 + (pair[1].0 - pair[0].0) * t,
+                        plot_color(pair[0].1 + (pair[1].1 - pair[0].1) * t),
+                    ));
+                }
+            }
+            if let Some((point, usage)) = points.last() {
+                colored_points.push((*point, plot_color(*usage)));
+            }
+            let points = colored_points;
             if points.len() > 1 {
                 let mut fill = egui::Mesh::default();
                 for (point, color) in &points {
@@ -1317,20 +1495,62 @@ impl Ui {
         );
         if title_bounds.width() > 60. {
             let painter = ui.painter().with_clip_rect(title_bounds);
-            painter.text(
-                pos2(
-                    (width / 2.).clamp(title_bounds.min.x, title_bounds.max.x),
-                    center_y,
-                ),
-                egui::Align2::CENTER_CENTER,
-                &self.state.app,
-                egui::FontId::proportional(config::get().number("appearance.font_size")),
-                ui.visuals().text_color(),
+            let center = pos2(
+                (width / 2.).clamp(title_bounds.min.x, title_bounds.max.x),
+                center_y,
             );
+            let app = self.state.app.clone();
+            let target = self
+                .application_icon(&app, 18.)
+                .map(AppLabel::Icon)
+                .unwrap_or(AppLabel::Name(app));
+            let layers = self.app_icon_fade.update(
+                target,
+                Instant::now(),
+                config::get().duration("animation.icon_fade_ms"),
+            );
+            if self.app_icon_fade.animating() {
+                self.ctx
+                    .request_repaint_after(config::get().duration("animation.frame_ms"));
+            }
+            for (label, opacity) in layers {
+                match label {
+                    AppLabel::Icon(icon) => {
+                        painter.image(
+                            icon,
+                            Rect::from_center_size(center, vec2(18., 18.)),
+                            Rect::from_min_max(Pos2::ZERO, pos2(1., 1.)),
+                            Color32::WHITE.gamma_multiply(opacity),
+                        );
+                    }
+                    AppLabel::Name(name) => {
+                        painter.text(
+                            center,
+                            egui::Align2::CENTER_CENTER,
+                            name,
+                            egui::FontId::proportional(
+                                config::get().number("appearance.font_size"),
+                            ),
+                            ui.visuals().text_color().gamma_multiply(opacity),
+                        );
+                    }
+                }
+            }
         }
         targets
     }
     fn frame(&mut self, ctx: &egui::Context, width: f32, height: f32) {
+        if self.pending_menu.is_some()
+            && self.panel.as_ref().is_none_or(|panel| {
+                panel.closing.is_some_and(|at| {
+                    at.elapsed() >= config::get().duration("animation.popup_fade_ms")
+                })
+            })
+        {
+            let (kind, x, clicked) = self.pending_menu.take().unwrap();
+            self.finish_close();
+            self.open(kind, x, clicked);
+        }
         let bounds = workspace_preview::preview_bounds([width, height]);
         if self.preview_size != bounds {
             self.preview_size = bounds;
@@ -1386,6 +1606,9 @@ impl Ui {
             return;
         };
         let kind = panel.kind.clone();
+        if kind == Menu::Bluetooth && self.bluetooth.is_none() && self.error.is_empty() {
+            return;
+        }
         if matches!(kind, Menu::Workspace(_)) && self.preview.is_none() {
             let panel = self.panel.as_mut().unwrap();
             panel.dismissal.pointer_inside(
@@ -1432,6 +1655,8 @@ impl Ui {
                     })
                 .min(1.)
             });
+        let opacity = opacity.clamp(0., 1.);
+        let opacity = opacity * opacity * (3. - 2. * opacity);
         if opacity <= 0. && panel.closing.is_some() {
             self.finish_close();
             return;
@@ -1525,56 +1750,65 @@ impl Ui {
         } else {
             screen_max_height.max(config::get().number("layout.popup_min_height"))
         };
-        let shown = egui::Area::new(egui::Id::new(("panel", self.serial)))
-            .fixed_pos(pos2(x, config::get().number("layout.bar_height")))
-            .order(egui::Order::Foreground)
-            .show(ctx, |ui| {
-                ui.set_opacity(opacity);
-                ui.set_width(w);
-                egui::Frame::new()
-                    .fill(config::get().color("popup", self.dark))
-                    .inner_margin(config::get().number("layout.popup_padding") as i8)
-                    .show(ui, |ui| {
-                        ui.set_width(w - 2. * config::get().number("layout.popup_padding"));
-                        if matches!(
-                            kind,
-                            Menu::Sound
-                                | Menu::Wifi
-                                | Menu::Bluetooth
-                                | Menu::Session
-                                | Menu::Tray(_)
-                        ) {
-                            // Areas remember their previous size. Allow the drawer to grow
-                            // when streams/devices arrive, rather than scrolling at that size.
-                            ui.set_max_height(max_height);
-                        }
-                        let content_max_height = max_height;
-                        // Wi-Fi scrolls its network list independently so its
-                        // radio switch and hidden-network action remain visible.
-                        if kind == Menu::Wifi {
-                            self.wifi(ui);
-                            return;
-                        }
-                        egui::ScrollArea::vertical()
-                            .min_scrolled_height(min_height.min(content_max_height))
-                            .max_height(content_max_height)
-                            .show(ui, |ui| {
-                                match kind {
-                                    Menu::Sound => self.sound(ui),
-                                    Menu::Apps => self.launcher(ui),
-                                    Menu::Wifi => self.wifi(ui),
-                                    Menu::Bluetooth => self.bluetooth(ui),
-                                    Menu::Session => self.session(ui),
-                                    Menu::Cpu => self.processes(ui),
-                                    Menu::Workspace(_) => self.workspace(ui),
-                                    Menu::Tray(ref id) => self.tray_menu(ui, id),
-                                }
-                                if !self.error.is_empty() {
-                                    ui.add(egui::Label::new(&self.error).wrap());
-                                }
-                            });
-                    });
-            });
+        let shown =
+            egui::Area::new(egui::Id::new(("panel", self.serial)))
+                .fixed_pos(pos2(x, config::get().number("layout.bar_height")))
+                .order(egui::Order::Foreground)
+                .fade_in(false)
+                .show(ctx, |ui| {
+                    ui.set_opacity(opacity);
+                    ui.visuals_mut().override_text_color =
+                        Some(config::get().color("popup_text", self.dark));
+                    ui.visuals_mut().widgets.hovered.bg_stroke = egui::Stroke::NONE;
+                    ui.visuals_mut().widgets.active.bg_stroke = egui::Stroke::NONE;
+                    ui.set_width(w);
+                    egui::Frame::new()
+                        .fill(config::get().color("popup", self.dark).gamma_multiply(
+                            config::get().number("appearance.popup_opacity_fraction"),
+                        ))
+                        .corner_radius(config::get().number("layout.popup_corner_radius") as u8)
+                        .inner_margin(config::get().number("layout.popup_padding") as i8)
+                        .show(ui, |ui| {
+                            ui.set_width(w - 2. * config::get().number("layout.popup_padding"));
+                            if matches!(
+                                kind,
+                                Menu::Sound
+                                    | Menu::Wifi
+                                    | Menu::Bluetooth
+                                    | Menu::Session
+                                    | Menu::Tray(_)
+                            ) {
+                                // Areas remember their previous size. Allow the drawer to grow
+                                // when streams/devices arrive, rather than scrolling at that size.
+                                ui.set_max_height(max_height);
+                            }
+                            let content_max_height = max_height;
+                            // Wi-Fi scrolls its network list independently so its
+                            // radio switch and hidden-network action remain visible.
+                            if matches!(kind, Menu::Wifi | Menu::Bluetooth) {
+                                self.connection_drawer(ui, &kind, max_height, now);
+                                return;
+                            }
+                            egui::ScrollArea::vertical()
+                                .min_scrolled_height(min_height.min(content_max_height))
+                                .max_height(content_max_height)
+                                .show(ui, |ui| {
+                                    match kind {
+                                        Menu::Sound => self.sound(ui),
+                                        Menu::Apps => self.launcher(ui),
+                                        Menu::Wifi => self.wifi(ui),
+                                        Menu::Bluetooth => self.bluetooth(ui),
+                                        Menu::Session => self.session(ui),
+                                        Menu::Cpu => self.processes(ui),
+                                        Menu::Workspace(_) => self.workspace(ui),
+                                        Menu::Tray(ref id) => self.tray_menu(ui, id),
+                                    }
+                                    if !self.error.is_empty() {
+                                        ui.add(egui::Label::new(&self.error).wrap());
+                                    }
+                                });
+                        });
+                });
         self.panel_rect = shown.response.rect;
         let inside = pointer.is_some_and(|p| {
             p.y < config::get().number("layout.bar_height") || self.panel_rect.contains(p)
@@ -1649,7 +1883,7 @@ fn connection_row(ui: &mut egui::Ui, key: impl std::hash::Hash) -> (Rect, egui::
     let response = ui.interact(
         name_rect,
         ui.id().with(("connection-row", key)),
-        egui::Sense::hover(),
+        egui::Sense::click(),
     );
     (rect, response)
 }
@@ -1774,61 +2008,6 @@ fn flat(ui: &mut egui::Ui, text: impl Into<egui::WidgetText>) -> egui::Response 
     )
 }
 
-fn output_row(ui: &mut egui::Ui, selected: bool, name: &str, device: &str) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(
-        vec2(
-            ui.available_width(),
-            config::get().number("layout.control_height"),
-        ),
-        egui::Sense::click(),
-    );
-    if response.hovered() || response.has_focus() {
-        ui.painter().rect_filled(
-            rect,
-            0,
-            config::get().color("hover", ui.visuals().dark_mode),
-        );
-    }
-    // Reserve the selection column even for inactive destinations.
-    let text_left = rect.left() + 20.;
-    if selected {
-        ui.painter().circle_filled(
-            pos2(rect.left() + 8., rect.center().y),
-            2.5,
-            ui.visuals().text_color(),
-        );
-    }
-    let split = text_left + (rect.right() - text_left) * 0.52;
-    for (text, left, right) in [
-        (
-            name,
-            text_left,
-            if device.is_empty() {
-                rect.right()
-            } else {
-                split - 6.
-            },
-        ),
-        (device, split, rect.right()),
-    ] {
-        ui.scope_builder(
-            egui::UiBuilder::new()
-                .max_rect(Rect::from_min_max(
-                    pos2(left, rect.top()),
-                    pos2(right, rect.bottom()),
-                ))
-                .layout(egui::Layout::left_to_right(egui::Align::Center)),
-            |ui| {
-                ui.add(egui::Label::new(text).truncate().selectable(false));
-            },
-        );
-    }
-    response.on_hover_text(if device.is_empty() {
-        name.to_owned()
-    } else {
-        format!("{name} · {device}")
-    })
-}
 impl Ui {
     fn launcher(&mut self, ui: &mut egui::Ui) {
         let search = add_text_field(
@@ -1882,32 +2061,93 @@ impl Ui {
                 }
             });
     }
+    fn connection_view(&self, kind: &Menu) -> motion::View {
+        if *kind == Menu::Wifi {
+            if self.hidden_ssid.is_some() {
+                motion::View::HiddenWifi
+            } else if let Some(network) = &self.selected_network {
+                motion::View::Wifi(network.bssid.clone())
+            } else {
+                motion::View::List
+            }
+        } else if let Some(snapshot) = &self.bluetooth {
+            if let Some(prompt) = &snapshot.prompt {
+                motion::View::Bluetooth(format!("{:?}:{prompt:?}", snapshot.busy))
+            } else {
+                motion::View::List
+            }
+        } else {
+            motion::View::List
+        }
+    }
+    fn connection_drawer(&mut self, ui: &mut egui::Ui, kind: &Menu, max_height: f32, now: Instant) {
+        let view = self.connection_view(kind);
+        let duration = config::get().duration("animation.drawer_transition_ms");
+        let (offset, opacity) = self.drawer_motion.navigate(view.clone(), now, duration);
+        let opening = *kind == Menu::Bluetooth
+            && self.panel.as_ref().is_some_and(|panel| {
+                now.saturating_duration_since(panel.opened)
+                    < config::get().duration("animation.popup_fade_ms")
+            });
+        let current_height = if opening {
+            None
+        } else {
+            self.drawer_motion.height(now, duration)
+        };
+        let origin = ui.cursor().min;
+        let width = ui.available_width();
+        let visible =
+            Rect::from_min_size(origin, vec2(width, current_height.unwrap_or(max_height)));
+        let mut content = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(
+            origin + vec2(offset, 0.),
+            vec2(width, max_height),
+        )));
+        content.spacing_mut().scroll.fade.strength = 0.;
+        content.set_clip_rect(ui.clip_rect().intersect(visible));
+        content.multiply_opacity(opacity);
+        if *kind == Menu::Wifi {
+            self.wifi(&mut content);
+        } else {
+            self.bluetooth(&mut content);
+        }
+        if !self.error.is_empty() {
+            content.add(egui::Label::new(&self.error).wrap());
+        }
+        let measured = content.min_rect().height().min(max_height).max(1.);
+        if self.connection_view(kind) == view {
+            if opening {
+                self.drawer_motion.settle_size(measured);
+            } else {
+                self.drawer_motion.measure(measured, now, duration);
+            }
+        } else {
+            self.ctx.request_repaint();
+        }
+        ui.allocate_exact_size(
+            vec2(width, current_height.unwrap_or(measured)),
+            egui::Sense::hover(),
+        );
+        if self.drawer_motion.animating() {
+            self.ctx
+                .request_repaint_after(config::get().duration("animation.frame_ms"));
+        }
+    }
     fn connection_back(&mut self, ui: &mut egui::Ui, name: &str) -> bool {
         let mut back = false;
         ui.horizontal(|ui| {
-            let image = egui::Image::new((self.icon_at_size(Icon::Back, 16.), vec2(16., 16.)));
-            back = ui
-                .add(egui::Button::image(image).min_size(vec2(28., 28.)))
-                .on_hover_text("Back")
-                .clicked();
+            back = self.icon_button(ui, Icon::Back, true);
             ui.add(egui::Label::new(name).truncate());
         });
         back || ui.input(|i| i.pointer.button_clicked(egui::PointerButton::Extra1))
     }
     fn connection_button(&mut self, ui: &mut egui::Ui, connected: bool, enabled: bool) -> bool {
-        let image = egui::Image::new((
-            self.icon_at_size(if connected { Icon::Unlink } else { Icon::Link }, 16.),
-            vec2(16., 16.),
-        ));
-        ui.add_enabled(enabled, egui::Button::image(image).min_size(vec2(28., 28.)))
-            .on_hover_text(if connected { "Disconnect" } else { "Connect" })
-            .clicked()
+        self.icon_button(
+            ui,
+            if connected { Icon::Unlink } else { Icon::Link },
+            enabled,
+        )
     }
     fn secret_field(&mut self, ui: &mut egui::Ui, pairing: bool) {
-        let image = egui::Image::new((
-            self.icon_at_size(Icon::Eye(!self.reveal), 16.),
-            vec2(16., 16.),
-        ));
         // Reserve both slots before drawing either widget. Masked and visible
         // glyphs must not change the field, eye button, or following rows.
         let (row, _) =
@@ -1938,20 +2178,15 @@ impl Ui {
                 (false, true) => "Hide password",
                 (false, false) => "Show password",
             };
-            let response = ui
-                .put(
-                    Rect::from_min_size(
-                        pos2(row.right() - 32., row.top()),
-                        vec2(32., row.height()),
-                    ),
-                    egui::Button::image(image)
-                        .frame(false)
-                        .min_size(vec2(32., 32.)),
-                )
-                .on_hover_text(label);
-            response
-                .widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
-            if response.clicked() {
+            let button = ui.scope_builder(
+                egui::UiBuilder::new().max_rect(Rect::from_center_size(
+                    pos2(row.right() - 16., row.center().y),
+                    vec2(24., 24.),
+                )),
+                |ui| self.icon_button(ui, Icon::Eye(!self.reveal), true),
+            );
+            button.response.on_hover_text(label);
+            if button.inner {
                 self.reveal = !self.reveal;
                 input.request_focus();
             }
@@ -2030,75 +2265,47 @@ impl Ui {
         if radio_header(ui, &mut enabled, "Wi-Fi").changed() {
             self.services.network(self.serial, Job::Radio(enabled));
         }
-        let list_height = config::get()
-            .number("layout.wifi_list_max_height")
-            .min((ui.available_height() - 64.).max(1.));
-        egui::ScrollArea::vertical()
-            .id_salt("wifi-networks")
-            .max_height(list_height)
-            .show(ui, |ui| {
-                if let Some(s) = &self.network {
-                    if s.networks.is_empty() {
-                        ui.label(if enabled {
+        if let Some(snapshot) = self.network.clone() {
+            if snapshot.networks.iter().any(|network| network.active) {
+                ui.weak("Connected networks");
+                for network in snapshot
+                    .networks
+                    .iter()
+                    .filter(|network| network.active)
+                    .cloned()
+                {
+                    self.wifi_network_row(ui, network);
+                }
+                connection_separator(ui, self.dark);
+            }
+            let list_height = config::get()
+                .number("layout.wifi_list_max_height")
+                .min((ui.available_height() - 48.).max(1.));
+            egui::ScrollArea::vertical()
+                .id_salt("wifi-networks")
+                .max_height(list_height)
+                .show(ui, |ui| {
+                    if snapshot.networks.is_empty() {
+                        ui.weak(if enabled {
                             "No networks found"
                         } else {
                             "Wi-Fi is off"
                         });
                     }
-                    let networks = s.networks.clone();
-                    for (title, connected) in
-                        [("Connected networks", true), ("Available networks", false)]
-                    {
-                        if !networks.iter().any(|n| n.active == connected) {
-                            continue;
-                        }
-                        if !connected && networks.iter().any(|n| n.active) {
-                            connection_separator(ui, self.dark);
-                        }
-                        ui.weak(title);
-                        for n in networks.iter().filter(|n| n.active == connected).cloned() {
-                            let (rect, response) = connection_row(ui, (&n.device, &n.bssid));
-                            paint_row_name(ui, rect, &n.ssid, 24.);
-                            paint_signal(
-                                ui,
-                                Rect::from_center_size(
-                                    pos2(rect.right() - 10., rect.center().y),
-                                    vec2(16., 12.),
-                                ),
-                                n.signal,
-                            );
-                            let mut controls = ui.new_child(egui::UiBuilder::new().max_rect(
-                                Rect::from_center_size(
-                                    pos2(rect.left() + 14., rect.center().y),
-                                    vec2(28., 28.),
-                                ),
-                            ));
-                            let action = self.connection_button(&mut controls, n.active, true);
-                            response.on_hover_text(
-                                n.rssi_dbm
-                                    .map(|r| format!("{}\n{r} dBm", n.ssid))
-                                    .unwrap_or_else(|| n.ssid.clone()),
-                            );
-                            if action {
-                                if n.active {
-                                    self.services
-                                        .network(self.serial, Job::Disconnect(n.device));
-                                } else if n.security.is_empty() || n.security == "--" {
-                                    self.services
-                                        .network(self.serial, Job::Connect(n, String::new()));
-                                } else {
-                                    self.selected_network = Some(n);
-                                    self.password.clear();
-                                    self.reveal = false;
-                                    self.focus_search = true;
-                                }
-                            }
-                        }
+                    if snapshot.networks.iter().any(|network| !network.active) {
+                        ui.weak("Available networks");
                     }
-                } else {
-                    ui.label("Scanning…");
-                }
-            });
+                    for network in snapshot
+                        .networks
+                        .into_iter()
+                        .filter(|network| !network.active)
+                    {
+                        self.wifi_network_row(ui, network);
+                    }
+                });
+        } else {
+            ui.weak("Scanning…");
+        }
         if enabled {
             connection_separator(ui, self.dark);
             if action_button(ui, "Join hidden network…").clicked() {
@@ -2107,6 +2314,40 @@ impl Ui {
                 self.reveal = false;
                 self.focus_search = true;
                 self.error.clear();
+            }
+        }
+    }
+    fn wifi_network_row(&mut self, ui: &mut egui::Ui, n: network::Network) {
+        let (rect, response) = connection_row(ui, (&n.device, &n.bssid));
+        paint_row_name(ui, rect, &n.ssid, 24.);
+        paint_signal(
+            ui,
+            Rect::from_center_size(pos2(rect.right() - 10., rect.center().y), vec2(16., 12.)),
+            n.signal,
+        );
+        let mut controls = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_center_size(
+            pos2(rect.left() + 14., rect.center().y),
+            vec2(28., 28.),
+        )));
+        let action = self.connection_button(&mut controls, n.active, true);
+        let row_clicked = response.clicked();
+        response.on_hover_text(
+            n.rssi_dbm
+                .map(|r| format!("{}\n{r} dBm", n.ssid))
+                .unwrap_or_else(|| n.ssid.clone()),
+        );
+        if action || row_clicked {
+            if n.active {
+                self.services
+                    .network(self.serial, Job::Disconnect(n.device));
+            } else if n.security.is_empty() || n.security == "--" {
+                self.services
+                    .network(self.serial, Job::Connect(n, String::new()));
+            } else {
+                self.selected_network = Some(n);
+                self.password.clear();
+                self.reveal = false;
+                self.focus_search = true;
             }
         }
     }
@@ -2211,81 +2452,86 @@ impl Ui {
         if let Some(error) = &s.action_error {
             ui.label(error);
         }
-        let mut has_section = false;
-        for (title, group) in [
-            ("Connected devices", 0),
-            ("Paired devices", 1),
-            ("Nearby devices", 2),
-        ] {
-            let devices: Vec<_> = s
-                .devices
-                .iter()
-                .filter(|d| if d.connected { 0 } else if d.paired { 1 } else { 2 } == group)
-                .collect();
-            if devices.is_empty() {
-                continue;
+        if s.devices.iter().any(|device| device.connected) {
+            ui.weak("Connected devices");
+            for device in s.devices.iter().filter(|device| device.connected) {
+                self.bluetooth_device_row(ui, device, s.busy.is_none());
             }
-            if has_section {
-                connection_separator(ui, self.dark);
-            }
-            has_section = true;
-            ui.weak(title);
-            for device in devices {
-                let (rect, response) = connection_row(ui, &device.path);
-                response.on_hover_text(format!("{}\n{}", device.name, device.address));
-                paint_row_name(
-                    ui,
-                    rect,
-                    &device.name,
-                    if device.connected && device.battery.is_some() {
-                        50.
-                    } else {
-                        24.
-                    },
-                );
-                if device.connected
-                    && let Some(battery) = device.battery
-                {
-                    let battery_rect = Rect::from_center_size(
-                        pos2(rect.right() - 36., rect.center().y),
-                        vec2(16., 8.),
-                    );
-                    paint_battery(ui, battery_rect, battery);
-                }
-                paint_signal(
-                    ui,
-                    Rect::from_center_size(
-                        pos2(rect.right() - 10., rect.center().y),
-                        vec2(16., 12.),
-                    ),
-                    device
-                        .rssi
-                        .map(|r| ((i32::from(r).clamp(-100, -40) + 100) * 100 / 60) as u8),
-                );
-                let mut controls =
-                    ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_center_size(
-                        pos2(rect.left() + 14., rect.center().y),
-                        vec2(28., 28.),
-                    )));
-                let activate =
-                    self.connection_button(&mut controls, device.connected, s.busy.is_none());
-                let action = if device.connected {
-                    bluetooth::Action::Disconnect
-                } else if device.paired {
-                    bluetooth::Action::Connect
-                } else {
-                    bluetooth::Action::Pair
-                };
-                if activate {
-                    let _ = self
-                        .services
-                        .bluetooth
-                        .send(bluetooth::Request::Action(device.path.clone(), action));
-                }
-            }
+            connection_separator(ui, self.dark);
         }
+        egui::ScrollArea::vertical()
+            .id_salt("bluetooth-devices")
+            .max_height((ui.available_height() - 4.).max(1.))
+            .show(ui, |ui| {
+                for (title, paired) in [("Paired devices", true), ("Nearby devices", false)] {
+                    let devices: Vec<_> = s
+                        .devices
+                        .iter()
+                        .filter(|device| !device.connected && device.paired == paired)
+                        .collect();
+                    if devices.is_empty() {
+                        continue;
+                    }
+                    ui.weak(title);
+                    for device in devices {
+                        self.bluetooth_device_row(ui, device, s.busy.is_none());
+                    }
+                }
+            });
         if s.devices.is_empty() {
             ui.weak("No devices found");
+        }
+    }
+    fn bluetooth_device_row(
+        &mut self,
+        ui: &mut egui::Ui,
+        device: &bluetooth::Device,
+        enabled: bool,
+    ) {
+        let (rect, response) = connection_row(ui, &device.path);
+        let row_clicked = response.clicked();
+        response.on_hover_text(format!("{}\n{}", device.name, device.address));
+        paint_row_name(
+            ui,
+            rect,
+            &device.name,
+            if device.connected && device.battery.is_some() {
+                50.
+            } else {
+                24.
+            },
+        );
+        if device.connected
+            && let Some(battery) = device.battery
+        {
+            let battery_rect =
+                Rect::from_center_size(pos2(rect.right() - 36., rect.center().y), vec2(16., 8.));
+            paint_battery(ui, battery_rect, battery);
+        }
+        paint_signal(
+            ui,
+            Rect::from_center_size(pos2(rect.right() - 10., rect.center().y), vec2(16., 12.)),
+            device
+                .rssi
+                .map(|r| ((i32::from(r).clamp(-100, -40) + 100) * 100 / 60) as u8),
+        );
+        let mut controls = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_center_size(
+            pos2(rect.left() + 14., rect.center().y),
+            vec2(28., 28.),
+        )));
+        let activate = self.connection_button(&mut controls, device.connected, enabled);
+        let action = if device.connected {
+            bluetooth::Action::Disconnect
+        } else if device.paired {
+            bluetooth::Action::Connect
+        } else {
+            bluetooth::Action::Pair
+        };
+        if activate || (enabled && row_clicked) {
+            let _ = self
+                .services
+                .bluetooth
+                .send(bluetooth::Request::Action(device.path.clone(), action));
         }
     }
     fn session(&mut self, ui: &mut egui::Ui) {
@@ -2301,16 +2547,17 @@ impl Ui {
             } else {
                 label.into()
             };
-            let image = egui::Image::new((self.icon_at_size(icon, 16.), vec2(16., 16.)));
-            if ui
-                .add_enabled(
-                    !self.busy,
-                    egui::Button::image_and_text(image, text)
-                        .min_size(vec2(ui.available_width(), 32.))
-                        .corner_radius(4),
-                )
-                .clicked()
-            {
+            let clicked = ui
+                .horizontal(|ui| {
+                    let clicked = self.icon_button(ui, icon, !self.busy);
+                    let label = ui.add_enabled(
+                        !self.busy,
+                        egui::Label::new(text).sense(egui::Sense::click()),
+                    );
+                    clicked || label.clicked()
+                })
+                .inner;
+            if clicked {
                 if action == SessionAction::Lock || confirming {
                     self.busy = true;
                     self.error.clear();
@@ -2325,46 +2572,126 @@ impl Ui {
         }
     }
     fn sound(&mut self, ui: &mut egui::Ui) {
-        ui.label("Sound");
-        if let Some(output) = self.audio.active().cloned() {
+        let outputs = self.audio.outputs.clone();
+        let active = self.audio.active().cloned();
+        ui.scope(|ui| {
+            ui.spacing_mut().interact_size.y = 32.;
+            ui.spacing_mut().button_padding = vec2(8., 6.);
+            let dark = ui.visuals().dark_mode;
+            let widgets = &mut ui.visuals_mut().widgets;
+            for widget in [
+                &mut widgets.inactive,
+                &mut widgets.hovered,
+                &mut widgets.active,
+            ] {
+                widget.corner_radius = egui::CornerRadius::same(10);
+                widget.bg_stroke = egui::Stroke::NONE;
+            }
+            widgets.inactive.weak_bg_fill =
+                config::get().color("button", dark).gamma_multiply(0.55);
+            widgets.hovered.weak_bg_fill = config::get().color("button_hover", dark);
             ui.horizontal(|ui| {
-                ui.add(egui::Label::new(&output.description).truncate());
-                if self.icon_button(ui, Icon::Volume(output.muted), true) {
+                let width = (ui.available_width() - 30.).max(1.);
+                egui::ComboBox::from_id_salt("sound-device")
+                    .popup_style(egui::style::StyleModifier::from(
+                        move |style: &mut egui::Style| {
+                            style.visuals.override_text_color =
+                                Some(config::get().color("popup_text", dark));
+                            style.visuals.window_fill = config::get().color("popup", dark);
+                            style.visuals.window_stroke = egui::Stroke::NONE;
+                            style.visuals.popup_shadow = egui::Shadow::NONE;
+                            style.visuals.menu_corner_radius = egui::CornerRadius::same(10);
+                            style.visuals.selection.bg_fill =
+                                config::get().color("button_hover", dark);
+                            style.spacing.interact_size.y = 30.;
+                        },
+                    ))
+                    .width(width)
+                    .selected_text(
+                        active
+                            .as_ref()
+                            .map(|output| output.description.as_str())
+                            .unwrap_or("No audio device"),
+                    )
+                    .show_ui(ui, |ui| {
+                        for output in outputs {
+                            let ports: Vec<_> =
+                                output.ports.iter().filter(|port| port.available).collect();
+                            if ports.is_empty() {
+                                if ui
+                                    .selectable_label(
+                                        output.name == self.audio.default,
+                                        &output.description,
+                                    )
+                                    .clicked()
+                                {
+                                    self.control(volume::Control::Output(output.name.clone()));
+                                }
+                            } else {
+                                for port in ports {
+                                    if ui
+                                        .selectable_label(
+                                            output.name == self.audio.default
+                                                && port.name == output.active_port,
+                                            format!(
+                                                "{} · {}",
+                                                output.description, port.description
+                                            ),
+                                        )
+                                        .clicked()
+                                    {
+                                        self.control(volume::Control::Port(
+                                            output.name.clone(),
+                                            port.name.clone(),
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    });
+                if let Some(output) = &active
+                    && self.icon_button(ui, Icon::Volume(output.muted), true)
+                {
                     self.control(volume::Control::Mute(output.name.clone()));
                 }
             });
-            let mut v = output.percent() as f32;
+        });
+        if let Some(output) = &active {
+            ui.add_space(6.);
+            let mut value = output.percent() as f32;
             let width = ui.available_width();
-            if volume_slider(ui, &mut v, width).changed() {
+            if volume_slider(ui, &mut value, width).changed() {
                 self.control(volume::Control::Volume {
                     output: output.name.clone(),
                     channel: None,
-                    percent: v.round() as u8,
+                    percent: value.round() as u8,
                 });
             }
-            ui.separator();
         }
+        ui.add_space(6.);
         if self.audio.streams.is_empty() {
-            ui.label("No app audio");
+            ui.weak("No app audio");
         }
+        let players = audio_sources::player_rows(&self.audio.streams, &self.state.extras.tracks)
+            .into_iter()
+            .map(|(index, track)| (index, track.clone()))
+            .collect::<HashMap<_, _>>();
         for stream in self.audio.streams.clone() {
             ui.push_id(stream.index, |ui| {
-                let track = self
-                    .state
-                    .extras
-                    .tracks
-                    .iter()
-                    .find(|t| media::player_matches(&stream.application, &t.player))
-                    .cloned();
-                let (r, _) = ui.allocate_exact_size(
+                let track = players.get(&stream.index).cloned();
+                let (row, _) = ui.allocate_exact_size(
                     vec2(
                         ui.available_width(),
-                        config::get().number("layout.audio_row_height"),
+                        config::get().number("layout.audio_row_height").max(96.),
                     ),
                     egui::Sense::hover(),
                 );
-                if let Some(track) = &track
-                    && let Some(art) =
+                let artwork_size = row.height() - 20.;
+                let artwork =
+                    Rect::from_min_size(row.min + vec2(0., 10.), vec2(artwork_size, artwork_size));
+                let texture = track
+                    .as_ref()
+                    .and_then(|track| {
                         self.state.extras.artworks.get(&track.art_url).or_else(|| {
                             self.state
                                 .extras
@@ -2372,93 +2699,116 @@ impl Ui {
                                 .as_ref()
                                 .filter(|art| art.url == track.art_url)
                         })
-                {
-                    let texture = self
-                        .textures
-                        .entry(track.art_url.clone())
-                        .or_insert_with(|| {
-                            self.ctx.load_texture(
-                                &track.art_url,
-                                egui::ColorImage::from_rgba_premultiplied(
-                                    [art.pixels.width() as usize, art.pixels.height() as usize],
-                                    art.pixels.data(),
-                                ),
-                                egui::TextureOptions::LINEAR,
-                            )
-                        });
-                    ui.painter().image(
-                        texture.id(),
-                        Rect::from_min_size(
-                            r.min,
-                            vec2(
-                                config::get().number("layout.artwork_size"),
-                                config::get().number("layout.artwork_size"),
-                            ),
-                        ),
-                        Rect::from_min_max(Pos2::ZERO, pos2(1., 1.)),
-                        Color32::WHITE,
-                    );
-                } else {
-                    ui.painter().image(
-                        self.app_icon(&stream.icon),
-                        Rect::from_min_size(
-                            r.min,
-                            vec2(
-                                config::get().number("layout.artwork_size"),
-                                config::get().number("layout.artwork_size"),
-                            ),
-                        ),
-                        Rect::from_min_max(Pos2::ZERO, pos2(1., 1.)),
-                        Color32::WHITE,
-                    );
-                }
-                let name = track
-                    .as_ref()
-                    .map(|t| t.title.as_str())
-                    .unwrap_or(&stream.name);
-                let text_rect = Rect::from_min_max(
-                    r.min + vec2(config::get().number("layout.audio_summary_offset"), 0.),
-                    pos2(
-                        r.right() - config::get().number("layout.audio_controls_width"),
-                        r.bottom(),
-                    ),
+                    })
+                    .map(|art| {
+                        let pixels =
+                            (artwork_size * self.ctx.pixels_per_point()).round().max(1.) as u32;
+                        let key = format!("artwork:{}:{pixels}", art.url);
+                        self.textures
+                            .entry(key.clone())
+                            .or_insert_with(|| {
+                                self.ctx.load_texture(
+                                    &key,
+                                    application_icons::raster_premultiplied(
+                                        [art.pixels.width() as usize, art.pixels.height() as usize],
+                                        art.pixels.data(),
+                                        pixels,
+                                    ),
+                                    egui::TextureOptions::LINEAR,
+                                )
+                            })
+                            .id()
+                    })
+                    .unwrap_or_else(|| self.app_icon(&stream.icon, artwork_size));
+                ui.painter().image(
+                    texture,
+                    artwork,
+                    Rect::from_min_max(Pos2::ZERO, pos2(1., 1.)),
+                    Color32::WHITE,
                 );
-                ui.scope_builder(egui::UiBuilder::new().max_rect(text_rect), |ui| {
-                    ui.add(egui::Label::new(name).truncate())
-                        .on_hover_text(format!("{} · {}", stream.application, name));
+                let middle = Rect::from_min_max(
+                    row.min + vec2(artwork_size + 8., 10.),
+                    pos2(row.right() - 32., row.bottom() - 10.),
+                );
+                ui.scope_builder(egui::UiBuilder::new().max_rect(middle), |ui| {
+                    ui.spacing_mut().item_spacing.y = 6.;
+                    let name = track
+                        .as_ref()
+                        .map(|track| track.title.as_str())
+                        .unwrap_or(&stream.name);
+                    ui.add_sized(
+                        vec2(ui.available_width(), 16.),
+                        egui::Label::new(name)
+                            .truncate()
+                            .halign(egui::Align::Center),
+                    )
+                    .on_hover_text(format!("{} · {name}", stream.application));
+                    ui.horizontal(|ui| {
+                        let meter_width = ui.available_width().clamp(1., 44.);
+                        let row_width = ui.available_width();
+                        let controls_width =
+                            (row_width - meter_width - ui.spacing().item_spacing.x).max(0.);
+                        let button_group_width = 3. * 28. + 2. * ui.spacing().item_spacing.x;
+                        ui.add_space(
+                            ((row_width - button_group_width) / 2.)
+                                .clamp(0., (controls_width - button_group_width).max(0.)),
+                        );
+                        for (icon, control, enabled) in [
+                            (
+                                Icon::Previous,
+                                media::Control::Previous,
+                                track.as_ref().is_some_and(|track| track.can_previous),
+                            ),
+                            (
+                                if track.as_ref().is_some_and(|track| track.playing) {
+                                    Icon::Pause
+                                } else {
+                                    Icon::Play
+                                },
+                                media::Control::Toggle,
+                                track.as_ref().is_some_and(|track| track.can_toggle),
+                            ),
+                            (
+                                Icon::Next,
+                                media::Control::Next,
+                                track.as_ref().is_some_and(|track| track.can_next),
+                            ),
+                        ] {
+                            if self.playback_button(ui, icon, enabled)
+                                && let Some(track) = &track
+                            {
+                                let _ = self.services.media.send(media::Request::Control {
+                                    panel_id: self.serial,
+                                    player: track.player.clone(),
+                                    control,
+                                });
+                            }
+                        }
+                        let levels = self
+                            .meters
+                            .get(&stream.index)
+                            .map(|meter| meter.displayed)
+                            .unwrap_or([0.; 7]);
+                        let meter_width = ui.available_width().clamp(1., 44.);
+                        ui.add_space((ui.available_width() - meter_width).max(0.));
+                        let (meter, _) = ui.allocate_exact_size(
+                            vec2(ui.available_width().clamp(1., 44.), 20.),
+                            egui::Sense::hover(),
+                        );
+                        paint_equalizer(ui.painter(), meter, &levels);
+                    });
+                    let mut value = stream.percent as f32;
+                    if volume_slider(ui, &mut value, ui.available_width()).changed() {
+                        self.control(volume::Control::StreamVolume(
+                            stream.index,
+                            value.round() as u8,
+                        ));
+                    }
                 });
-                let levels = self
-                    .meters
-                    .get(&stream.index)
-                    .map(|m| m.displayed)
-                    .unwrap_or([0.; 7]);
-                // Keep changing bars in a separate clipped mesh so the software
-                // renderer can reuse the surrounding row and popup raster cache.
-                let meter_height = config::get()
-                    .number("layout.meter_height")
-                    .max(config::get().number("layout.meter_min_height"));
-                let meter_rect = Rect::from_min_size(
-                    pos2(
-                        r.right() - config::get().number("layout.meter_offset"),
-                        r.center().y + 10. - meter_height,
-                    ),
-                    vec2(
-                        6. * config::get().number("layout.meter_bar_gap")
-                            + config::get().number("layout.meter_bar_width"),
-                        meter_height,
-                    ),
-                );
-                paint_equalizer(ui.painter(), meter_rect, &levels);
                 ui.scope_builder(
-                    egui::UiBuilder::new().max_rect(Rect::from_min_size(
-                        pos2(
-                            r.right() - config::get().number("layout.media_button_width"),
-                            r.top(),
-                        ),
-                        vec2(
-                            config::get().number("layout.media_button_width"),
-                            config::get().number("layout.artwork_size"),
-                        ),
+                    egui::UiBuilder::new().max_rect(Rect::from_center_size(
+                        pos2(row.right() - 12., row.center().y),
+                        vec2(24., 24.),
                     )),
                     |ui| {
                         if self.icon_button(ui, Icon::Volume(stream.muted), true) {
@@ -2466,97 +2816,6 @@ impl Ui {
                         }
                     },
                 );
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 0.;
-                    let mut v = stream.percent as f32;
-                    if volume_slider(
-                        ui,
-                        &mut v,
-                        (ui.available_width()
-                            - config::get().number("layout.audio_controls_width"))
-                        .max(1.),
-                    )
-                    .changed()
-                    {
-                        self.control(volume::Control::StreamVolume(stream.index, v.round() as u8));
-                    }
-                    ui.add_space(config::get().number("layout.media_button_gap"));
-                    for (icon, control, enabled) in [
-                        (
-                            Icon::Previous,
-                            media::Control::Previous,
-                            track.as_ref().is_some_and(|t| t.can_previous),
-                        ),
-                        (
-                            if track.as_ref().is_some_and(|t| t.playing) {
-                                Icon::Pause
-                            } else {
-                                Icon::Play
-                            },
-                            media::Control::Toggle,
-                            track.as_ref().is_some_and(|t| t.can_toggle),
-                        ),
-                        (
-                            Icon::Next,
-                            media::Control::Next,
-                            track.as_ref().is_some_and(|t| t.can_next),
-                        ),
-                    ] {
-                        if self.icon_button(ui, icon, enabled)
-                            && let Some(t) = &track
-                        {
-                            let _ = self.services.media.send(media::Request::Control {
-                                panel_id: self.serial,
-                                player: t.player.clone(),
-                                control,
-                            });
-                        }
-                    }
-                });
-                ui.add_space(5.);
-            });
-        }
-        ui.separator();
-        ui.label("Output");
-        for output in self.audio.outputs.clone() {
-            let active = output.name == self.audio.default;
-            let ports: Vec<_> = output.ports.iter().filter(|p| p.available).collect();
-            if ports.is_empty() {
-                if output_row(ui, active, &output.description, "").clicked() {
-                    self.control(volume::Control::Output(output.name.clone()));
-                }
-            } else {
-                for port in ports {
-                    if output_row(
-                        ui,
-                        active && port.name == output.active_port,
-                        &port.description,
-                        &output.description,
-                    )
-                    .clicked()
-                    {
-                        self.control(volume::Control::Port(
-                            output.name.clone(),
-                            port.name.clone(),
-                        ));
-                    }
-                }
-            }
-        }
-        if let Some(output) = self.audio.active().cloned() {
-            ui.collapsing("Channels", |ui| {
-                for c in &output.channels {
-                    ui.label(&c.name);
-                    let mut v = c.percent() as f32;
-                    let width = ui.available_width();
-                    if volume_slider(ui, &mut v, width).changed() {
-                        self.control(volume::Control::Volume {
-                            output: output.name.clone(),
-                            channel: Some(c.name.clone()),
-                            percent: v.round() as u8,
-                        });
-                    }
-                }
             });
         }
     }
@@ -2637,32 +2896,31 @@ impl Ui {
         }
     }
     fn workspace(&mut self, ui: &mut egui::Ui) {
-        let Some(s) = &self.preview else {
+        let Some(snapshot) = self.preview.clone() else {
             ui.label("Loading…");
             return;
         };
-        let (rect, response) = ui.allocate_exact_size(
-            vec2(
-                self.preview_size[0],
-                self.preview_size[1] + config::get().number("preview.title_height"),
-            ),
+        let name = match self.panel.as_ref().map(|panel| &panel.kind) {
+            Some(Menu::Workspace(name)) => name.clone(),
+            _ => snapshot.name.clone(),
+        };
+        let apps = self.workspace_apps(&name);
+        ui.horizontal_wrapped(|ui| {
+            ui.label(format!("Workspace {name}"));
+            for app in apps {
+                if let Some(icon) = self.application_icon(&app, 20.) {
+                    ui.add(egui::Image::new((icon, vec2(20., 20.))))
+                        .on_hover_text(app);
+                } else {
+                    ui.add(egui::Label::new(app).truncate());
+                }
+            }
+        });
+        let (canvas, response) = ui.allocate_exact_size(
+            vec2(self.preview_size[0], self.preview_size[1]),
             egui::Sense::click(),
         );
-        let name = match self.panel.as_ref().map(|p| &p.kind) {
-            Some(Menu::Workspace(name)) => name,
-            _ => &s.name,
-        };
-        ui.painter().text(
-            rect.min,
-            egui::Align2::LEFT_TOP,
-            format!("Workspace {name}"),
-            egui::FontId::proportional(config::get().number("appearance.font_size")),
-            ui.visuals().text_color(),
-        );
-        let canvas = Rect::from_min_max(
-            rect.min + vec2(0., config::get().number("preview.title_height")),
-            rect.max,
-        );
+        let s = &snapshot;
         let amount = self
             .preview_previous
             .as_ref()
@@ -2699,9 +2957,15 @@ impl Ui {
         opacity: f32,
     ) {
         let mut painter = ui.painter().with_clip_rect(canvas);
-        painter.multiply_opacity(opacity);
+        painter.multiply_opacity(opacity * 0.9);
         let scale = workspace_preview::preview_scale(s.rect, self.preview_size);
-        painter.rect_filled(canvas, 0, config::get().color("preview_canvas", self.dark));
+        painter.rect_filled(
+            canvas,
+            8,
+            config::get()
+                .color("preview_canvas", self.dark)
+                .gamma_multiply(0.18),
+        );
         for (i, w) in s.windows.iter().enumerate() {
             let map = |r: workspace_preview::Geometry| {
                 Rect::from_min_size(
@@ -2745,8 +3009,8 @@ impl Ui {
 }
 
 // Optional installed font; no fontconfig library or bundled proprietary font.
-fn sf_mono() -> Option<std::path::PathBuf> {
-    fn find(dir: &std::path::Path, depth: u8) -> Option<std::path::PathBuf> {
+fn installed_font(monospace: bool) -> Option<std::path::PathBuf> {
+    fn find(dir: &std::path::Path, depth: u8, names: &[&str]) -> Option<std::path::PathBuf> {
         for entry in std::fs::read_dir(dir).ok()?.flatten() {
             let path = entry.path();
             let name = entry
@@ -2754,15 +3018,12 @@ fn sf_mono() -> Option<std::path::PathBuf> {
                 .to_string_lossy()
                 .to_lowercase()
                 .replace('-', "");
-            if matches!(
-                name.as_str(),
-                "sfmono regular.otf" | "sfmonoregular.otf" | "sfmonoregular.ttf"
-            ) {
+            if names.contains(&name.as_str()) {
                 return Some(path);
             }
             if depth > 0
                 && entry.file_type().is_ok_and(|t| t.is_dir())
-                && let Some(path) = find(&path, depth - 1)
+                && let Some(path) = find(&path, depth - 1, names)
             {
                 return Some(path);
             }
@@ -2771,6 +3032,23 @@ fn sf_mono() -> Option<std::path::PathBuf> {
     }
     let home = std::env::var("HOME").unwrap_or_default();
     let data = std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| format!("{home}/.local/share"));
+    let names: &[&str] = if monospace {
+        &[
+            "sfmono regular.otf",
+            "sfmonoregular.otf",
+            "sfmonoregular.ttf",
+            "dejavusansmono.ttf",
+            "liberationmonoregular.ttf",
+        ]
+    } else {
+        &[
+            "sfprotextregular.otf",
+            "interregular.ttf",
+            "adwaitasansregular.ttf",
+            "liberationsansregular.ttf",
+            "dejavusans.ttf",
+        ]
+    };
     [
         format!("{data}/fonts"),
         format!("{home}/.fonts"),
@@ -2778,39 +3056,64 @@ fn sf_mono() -> Option<std::path::PathBuf> {
         "/usr/share/fonts".into(),
     ]
     .iter()
-    .find_map(|dir| find(std::path::Path::new(dir), 4))
+    .find_map(|dir| {
+        names
+            .iter()
+            .find_map(|name| find(std::path::Path::new(dir), 4, &[*name]))
+    })
 }
 fn volume_slider(ui: &mut egui::Ui, value: &mut f32, width: f32) -> egui::Response {
     ui.scope(|ui| {
         ui.spacing_mut().slider_width = width;
-        ui.spacing_mut().slider_rail_height = config::get().number("layout.slider_rail_height");
         ui.spacing_mut().interact_size.y = config::get().number("layout.slider_height");
-        ui.visuals_mut().widgets.inactive.bg_fill =
-            config::get().color("slider_rail", ui.visuals().dark_mode);
+        ui.spacing_mut().slider_rail_height = 0.;
+        let dark = ui.visuals().dark_mode;
+        let widgets = &mut ui.visuals_mut().widgets;
+        for widget in [
+            &mut widgets.inactive,
+            &mut widgets.hovered,
+            &mut widgets.active,
+        ] {
+            widget.bg_fill = Color32::TRANSPARENT;
+            widget.fg_stroke = egui::Stroke::NONE;
+            widget.bg_stroke = egui::Stroke::NONE;
+        }
         let response = ui.add(
             egui::Slider::new(value, 0.0..=150.)
                 .show_value(false)
-                .trailing_fill(true)
-                .handle_shape(egui::style::HandleShape::Circle),
+                .trailing_fill(false),
         );
-        let radius = response.rect.height() / config::get().number("layout.slider_handle_ratio");
-        let range = response.rect.x_range().shrink(radius);
+        let radius = response.rect.height() / 2.;
+        let range = response.rect.x_range().shrink(response.rect.height() / 2.5);
         let center = pos2(
             egui::lerp(range, (*value / 150.).clamp(0., 1.)),
             response.rect.center().y,
         );
-        ui.painter().circle_filled(
-            center,
-            radius,
-            config::get().color("slider_handle", ui.visuals().dark_mode),
+        ui.painter().rect_filled(
+            response.rect,
+            radius as u8,
+            config::get().color("slider_rail", dark),
         );
-        ui.painter().circle_stroke(
-            center,
-            radius,
-            egui::Stroke::new(
-                config::get().number("layout.slider_border_width"),
-                config::get().color("slider_border", ui.visuals().dark_mode),
+        ui.painter().rect_filled(
+            Rect::from_min_max(
+                response.rect.min,
+                pos2(center.x + radius, response.rect.bottom()),
             ),
+            radius as u8,
+            config::get()
+                .color("slider_handle", dark)
+                .gamma_multiply(0.94),
+        );
+        let painter = ui.painter().with_clip_rect(response.rect);
+        painter.circle_filled(
+            center + vec2(0., 0.5),
+            radius,
+            Color32::from_black_alpha(24),
+        );
+        painter.circle_filled(
+            center,
+            radius - 0.5,
+            config::get().color("slider_handle", dark),
         );
         response
     })
@@ -2869,18 +3172,7 @@ fn action_button(ui: &mut egui::Ui, label: &str) -> egui::Response {
     if response.is_pointer_button_down_on() {
         fill = fill.gamma_multiply(0.9);
     }
-    ui.painter().rect_filled(rect, 3, fill);
-    let border = if response.has_focus() {
-        ui.visuals().selection.stroke.color
-    } else {
-        config::get().color("separator", dark)
-    };
-    ui.painter().rect_stroke(
-        rect,
-        3,
-        egui::Stroke::new(1_f32, border),
-        egui::StrokeKind::Inside,
-    );
+    ui.painter().rect_filled(rect, 7, fill);
     ui.painter().with_clip_rect(rect.shrink(2.)).text(
         rect.left_center() + vec2(8., 0.),
         egui::Align2::LEFT_CENTER,
