@@ -1498,8 +1498,14 @@ impl Ui {
                 / config::get().duration("intervals.cpu_ms").as_secs_f32())
             .clamp(0., 1.);
             if phase < 1. && self.cpu_history.len() > 1 {
-                ui.ctx()
-                    .request_repaint_after(config::get().duration("animation.frame_ms"));
+                ui.ctx().request_repaint_after(
+                    cpu_plot::repaint_interval(
+                        chart.width(),
+                        ui.ctx().pixels_per_point(),
+                        config::get().duration("intervals.cpu_ms"),
+                    )
+                    .max(config::get().duration("animation.frame_ms")),
+                );
             }
             let color = ui.visuals().text_color();
             painter.line_segment(

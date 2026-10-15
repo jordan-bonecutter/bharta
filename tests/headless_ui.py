@@ -378,8 +378,13 @@ with tempfile.TemporaryDirectory(prefix='bharta-headless-') as directory:
         if '--trays-only' not in sys.argv[2:]:
             def tray_heights(image):
                 heights=[]
+                _, controls=assert_bar_alignment(image, default_settings)
+                left,width,_=controls['Sound']
+                plot_left=left+slot
+                step=(width-slot-4)/7
                 for i in range(7):
-                    x=int(sound_x+2+i*24/7)
+                    # Sample the painted bar center, avoiding fractional gaps.
+                    x=round(plot_left+i*step+(step-1)/2)
                     ys=[y for y in range(7,21)
                         if max(image.getpixel((x,y)))-min(image.getpixel((x,y)))>70]
                     heights.append(len(ys))

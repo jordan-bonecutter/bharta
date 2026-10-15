@@ -1,4 +1,13 @@
 use egui::{Color32, Mesh, Pos2, pos2};
+use std::time::Duration;
+
+pub fn repaint_interval(width: f32, pixels_per_point: f32, sample: Duration) -> Duration {
+    // History moves one thirty-first of the chart per sample. Updating at
+    // eighth-pixel steps preserves subpixel scrolling without rendering the
+    // entire bar at 60 Hz for a chart moving less than one pixel per second.
+    let seconds = sample.as_secs_f64() * 31. / (width * pixels_per_point) as f64 / 8.;
+    Duration::from_secs_f64(seconds.clamp(0.016, 0.250))
+}
 
 pub fn fill(points: &[(Pos2, Color32)], bottom: f32, pixels_per_point: f32) -> Mesh {
     let mut mesh = Mesh::default();
@@ -27,6 +36,26 @@ mod tests {
     use super::*;
     use egui::{ClippedPrimitive, Rect, epaint::Primitive};
     use egui_software_backend::{BufferMutRef, ColorFieldOrder, EguiSoftwareRender};
+
+    #[test]
+    fn scrolling_cadence_tracks_physical_motion() {
+        let sample = Duration::from_secs(1);
+        for width in [24., 48., 120.] {
+            for scale in [1., 2.] {
+                let interval = repaint_interval(width, scale, sample);
+                let displacement = width * scale / 31. * interval.as_secs_f32();
+                assert!((displacement - 0.125).abs() < 0.0001);
+            }
+        }
+        assert_eq!(
+            repaint_interval(0.1, 1., sample),
+            Duration::from_millis(250)
+        );
+        assert_eq!(
+            repaint_interval(4096., 2., sample),
+            Duration::from_millis(16)
+        );
+    }
 
     #[test]
     fn fill_moves_between_pixels_at_native_and_hidpi_scale() {
