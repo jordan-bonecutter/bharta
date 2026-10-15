@@ -1,6 +1,7 @@
 mod application_icons;
 mod audio_sources;
 mod bar_button;
+mod cpu_plot;
 #[cfg(not(target_env = "musl"))]
 mod gpu;
 mod keyboard;
@@ -60,6 +61,17 @@ fn plot_color(level: f32) -> Color32 {
         1.,
     ))
 }
+fn cpu_plot_color(level: f32) -> Color32 {
+    let level = level.clamp(0., 1.);
+    let warmth = ((level - 0.5) * 2.).max(0.);
+    let red = egui::ecolor::Hsva::from(Color32::from_rgb(255, 91, 96));
+    Color32::from(egui::ecolor::Hsva::new(
+        ((1. - level) / 3. + warmth * (red.h - 1.)).rem_euclid(1.),
+        0.95 + warmth * (red.s - 0.95),
+        0.90 + warmth * (red.v - 0.90),
+        1.,
+    ))
+}
 fn paint_equalizer(painter: &egui::Painter, bounds: Rect, levels: &[f64; 7]) {
     let painter = painter.with_clip_rect(bounds);
     let step = bounds.width() / levels.len() as f32;
@@ -100,6 +112,7 @@ struct Ui {
     audio: volume::Snapshot,
     cpu: crate::cpu::Snapshot,
     cpu_history: VecDeque<f32>,
+    cpu_sample_at: Instant,
     tray_items: Vec<crate::tray::Item>,
     tray_origin: (i32, i32),
     tray_rows: Vec<crate::tray::MenuRow>,
@@ -228,7 +241,8 @@ impl Ui {
             state: status::Status::default(),
             audio: volume::Snapshot::default(),
             cpu: crate::cpu::Snapshot::default(),
-            cpu_history: VecDeque::with_capacity(32),
+            cpu_history: VecDeque::with_capacity(33),
+            cpu_sample_at: Instant::now(),
             tray_items: vec![],
             tray_origin: (0, 0),
             tray_rows: vec![],
@@ -502,10 +516,11 @@ impl Ui {
         }
         while let Ok(s) = self.services.cpu_events.try_recv() {
             if let Some(percent) = s.percent {
-                if self.cpu_history.len() == 32 {
+                if self.cpu_history.len() == 33 {
                     self.cpu_history.pop_front();
                 }
                 self.cpu_history.push_back(percent);
+                self.cpu_sample_at = Instant::now();
             }
             self.cpu = s;
             self.ctx.request_repaint();
@@ -1477,6 +1492,15 @@ impl Ui {
             Menu::Cpu,
         );
         if let Some((painter, chart)) = cpu_layout.plot(ui.painter()) {
+            // Reveal the newest segment over one sampling interval, retaining
+            // an extra point so the left edge stays continuous as history rolls.
+            let phase = (self.cpu_sample_at.elapsed().as_secs_f32()
+                / config::get().duration("intervals.cpu_ms").as_secs_f32())
+            .clamp(0., 1.);
+            if phase < 1. && self.cpu_history.len() > 1 {
+                ui.ctx()
+                    .request_repaint_after(config::get().duration("animation.frame_ms"));
+            }
             let color = ui.visuals().text_color();
             painter.line_segment(
                 [chart.left_bottom(), chart.right_bottom()],
@@ -1490,7 +1514,9 @@ impl Ui {
                     let usage = percent.clamp(0., 100.) / 100.;
                     let point = pos2(
                         chart.right()
-                            - (self.cpu_history.len() - 1 - i) as f32 * chart.width() / 31.,
+                            - ((self.cpu_history.len() - 1 - i) as f32 - 1. + phase)
+                                * chart.width()
+                                / 31.,
                         chart.bottom() - usage * chart.height(),
                     );
                     (point, usage)
@@ -1507,27 +1533,20 @@ impl Ui {
                     let t = step as f32 / steps as f32;
                     colored_points.push((
                         pair[0].0 + (pair[1].0 - pair[0].0) * t,
-                        plot_color(pair[0].1 + (pair[1].1 - pair[0].1) * t),
+                        cpu_plot_color(pair[0].1 + (pair[1].1 - pair[0].1) * t),
                     ));
                 }
             }
             if let Some((point, usage)) = points.last() {
-                colored_points.push((*point, plot_color(*usage)));
+                colored_points.push((*point, cpu_plot_color(*usage)));
             }
             let points = colored_points;
             if points.len() > 1 {
-                let mut fill = egui::Mesh::default();
-                for (point, color) in &points {
-                    let color = color.gamma_multiply(0.55);
-                    fill.colored_vertex(*point, color);
-                    fill.colored_vertex(pos2(point.x, chart.bottom()), color);
-                }
-                for i in 0..points.len() - 1 {
-                    let index = i as u32 * 2;
-                    fill.add_triangle(index, index + 1, index + 2);
-                    fill.add_triangle(index + 1, index + 3, index + 2);
-                }
-                painter.add(egui::Shape::mesh(fill));
+                painter.add(egui::Shape::mesh(cpu_plot::fill(
+                    &points,
+                    chart.bottom(),
+                    painter.ctx().pixels_per_point(),
+                )));
                 for pair in points.windows(2) {
                     painter
                         .line_segment([pair[0].0, pair[1].0], egui::Stroke::new(1_f32, pair[1].1));
