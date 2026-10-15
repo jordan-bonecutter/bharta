@@ -2628,7 +2628,13 @@ impl Ui {
         }
     }
     fn sound(&mut self, ui: &mut egui::Ui) {
-        let outputs = self.audio.outputs.clone();
+        let outputs: Vec<_> = self
+            .audio
+            .outputs
+            .iter()
+            .filter(|output| output.available())
+            .cloned()
+            .collect();
         let active = self.audio.active().cloned();
         ui.scope(|ui| {
             ui.spacing_mut().interact_size.y = 32.;
@@ -2639,6 +2645,7 @@ impl Ui {
                 &mut widgets.inactive,
                 &mut widgets.hovered,
                 &mut widgets.active,
+                &mut widgets.open,
             ] {
                 widget.corner_radius = egui::CornerRadius::same(10);
                 widget.bg_stroke = egui::Stroke::NONE;

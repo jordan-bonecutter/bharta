@@ -28,6 +28,12 @@ pub struct Output {
     pub active_port: String,
 }
 impl Output {
+    pub fn available(&self) -> bool {
+        // Portless sinks (including virtual outputs) have no jack detection.
+        // A sink with only disconnected ports must not become a fallback row.
+        self.ports.is_empty() || self.ports.iter().any(|port| port.available)
+    }
+
     pub fn percent(&self) -> u32 {
         self.channels
             .iter()
@@ -628,6 +634,30 @@ mod tests {
         s.default = "removed".into();
         assert!(s.active().is_none());
         assert!(parse(&Value::Null, String::new()).is_err());
+    }
+    #[test]
+    fn output_choices_exclude_disconnected_ports_but_keep_portless_sinks() {
+        let snapshot = parse(
+            &serde_json::json!([
+                {"name":"unplugged-hdmi", "ports":[{"name":"hdmi", "availability":"no"}]},
+                {"name":"unplugged-headset", "ports":[{"name":"headphones", "availability":"not available"}]},
+                {"name":"speakers", "ports":[{"name":"speaker", "availability":"unknown"}, {"name":"headphones", "availability":"no"}]},
+                {"name":"connected", "ports":[{"name":"hdmi", "availability":"yes"}]},
+                {"name":"virtual", "ports":[]}
+            ]),
+            "unplugged-hdmi".into(),
+        ).unwrap();
+        assert_eq!(
+            snapshot
+                .outputs
+                .iter()
+                .filter(|o| o.available())
+                .map(|o| o.name.as_str())
+                .collect::<Vec<_>>(),
+            ["speakers", "connected", "virtual"]
+        );
+        // Retain the server's active sink for volume controls while it reroutes.
+        assert!(snapshot.active().is_some());
     }
     #[test]
     #[ignore = "requires a running PulseAudio/PipeWire-Pulse server; creates a temporary null sink"]
