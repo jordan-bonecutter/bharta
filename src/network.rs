@@ -154,7 +154,8 @@ pub fn radio(enabled: bool) -> Result<Snapshot> {
         return crate::iwd::radio(enabled);
     }
     manager(&Connection::system()?)?.set_property("WirelessEnabled", enabled)?;
-    scan(enabled)
+    // A radio acknowledgement must not wait for discovery (which can take seconds).
+    scan(false)
 }
 pub fn connect(network: &Network, password: String) -> Result<Snapshot> {
     if network.backend == Backend::Iwd {

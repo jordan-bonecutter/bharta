@@ -1,12 +1,13 @@
 mod application_icons;
 mod audio_sources;
-mod bar_button;
 mod cpu_plot;
 #[cfg(not(target_env = "musl"))]
 mod gpu;
 mod keyboard;
 mod motion;
+mod network_plot;
 mod services;
+mod tray_bar;
 mod wayland;
 use crate::{
     audio_meter, bluetooth, config, icons::Icon, launcher, media, network, popup_motion::Dismissal,
@@ -31,6 +32,13 @@ enum Menu {
     Cpu,
     Workspace(String),
     Tray(String),
+}
+#[derive(Clone)]
+enum BarTray {
+    Menu(Menu),
+    App(crate::tray::Item),
+    Battery,
+    Clock,
 }
 struct Meter {
     levels: Arc<Mutex<[f64; 7]>>,
@@ -58,17 +66,6 @@ fn plot_color(level: f32) -> Color32 {
         (1. - level.clamp(0., 1.)) / 3.,
         0.95,
         0.90,
-        1.,
-    ))
-}
-fn cpu_plot_color(level: f32) -> Color32 {
-    let level = level.clamp(0., 1.);
-    let warmth = ((level - 0.5) * 2.).max(0.);
-    let red = egui::ecolor::Hsva::from(Color32::from_rgb(255, 91, 96));
-    Color32::from(egui::ecolor::Hsva::new(
-        ((1. - level) / 3. + warmth * (red.h - 1.)).rem_euclid(1.),
-        0.95 + warmth * (red.s - 0.95),
-        0.90 + warmth * (red.v - 0.90),
         1.,
     ))
 }
@@ -110,9 +107,13 @@ struct Ui {
     services: Services,
     state: status::Status,
     audio: volume::Snapshot,
+    source_rows: audio_sources::Rows,
+    wifi_radio: Option<(bool, Instant)>,
+    bluetooth_radio: Option<(bool, Instant)>,
     cpu: crate::cpu::Snapshot,
     cpu_history: VecDeque<f32>,
     cpu_sample_at: Instant,
+    traffic: network_plot::Traffic,
     tray_items: Vec<crate::tray::Item>,
     tray_origin: (i32, i32),
     tray_rows: Vec<crate::tray::MenuRow>,
@@ -243,6 +244,10 @@ impl Ui {
             cpu: crate::cpu::Snapshot::default(),
             cpu_history: VecDeque::with_capacity(33),
             cpu_sample_at: Instant::now(),
+            traffic: network_plot::Traffic::default(),
+            source_rows: audio_sources::Rows::default(),
+            wifi_radio: None,
+            bluetooth_radio: None,
             tray_items: vec![],
             tray_origin: (0, 0),
             tray_rows: vec![],
@@ -552,6 +557,9 @@ impl Ui {
                 _ => {}
             }
         }
+        if let Some(wait) = self.source_rows.update(&self.audio.streams, Instant::now()) {
+            self.ctx.request_repaint_after(wait);
+        }
         while let Ok(event) = self.services.media_events.try_recv() {
             self.ctx.request_repaint();
             let extras = &mut self.state.extras;
@@ -581,7 +589,11 @@ impl Ui {
                     extras.wifi_name = s.networks.iter().find(|n| n.active).map(|n| n.ssid.clone());
                     extras.wifi_signal =
                         s.networks.iter().find(|n| n.active).and_then(|n| n.signal);
-                    self.network = Some(s);
+                    // Background discovery can have started before the radio request.
+                    // Its snapshot must not acknowledge or reverse an in-flight toggle.
+                    if self.wifi_radio.is_none() {
+                        self.network = Some(s);
+                    }
                 }
                 media::Update::ControlFinished(id, Err(e)) if id == self.serial => self.error = e,
                 _ => {}
@@ -599,6 +611,7 @@ impl Ui {
             {
                 match result {
                     Ok(s) => {
+                        acknowledge_radio(&mut self.bluetooth_radio, s.enabled());
                         if self.bluetooth.as_ref().and_then(|old| old.prompt.as_ref())
                             != s.prompt.as_ref()
                             && matches!(
@@ -616,10 +629,16 @@ impl Ui {
                         {
                             panel.opened = Instant::now();
                         }
+                        if s.action_error.is_some() {
+                            self.bluetooth_radio = None;
+                        }
                         self.bluetooth = Some(s);
                         self.error.clear();
                     }
-                    Err(e) => self.error = e,
+                    Err(e) => {
+                        self.bluetooth_radio = None;
+                        self.error = e;
+                    }
                 }
                 self.ctx.request_repaint();
             }
@@ -630,6 +649,9 @@ impl Ui {
                 Event::Apps(id, apps) if id == self.serial => self.apps = apps,
                 Event::Network(id, completed_action, result) if id == self.serial => match result {
                     Ok(s) => {
+                        if completed_action {
+                            acknowledge_radio(&mut self.wifi_radio, s.enabled);
+                        }
                         self.state.extras.wifi_enabled = Some(s.enabled);
                         self.state.extras.wifi_name =
                             s.networks.iter().find(|n| n.active).map(|n| n.ssid.clone());
@@ -643,7 +665,10 @@ impl Ui {
                         }
                         self.error.clear();
                     }
-                    Err(e) => self.error = e,
+                    Err(e) => {
+                        self.wifi_radio = None;
+                        self.error = e;
+                    }
                 },
                 Event::Launched(id, result) if id == self.serial => match result {
                     Ok(()) => self.close(),
@@ -989,148 +1014,106 @@ impl Ui {
         })
         .inner
     }
-    fn paint_tray(
+    fn paint_tray_item(
         &mut self,
         ui: &mut egui::Ui,
         targets: &mut Vec<(Rect, Menu)>,
-        right: f32,
-        minimum: f32,
-        slot: f32,
-    ) -> f32 {
-        let gap = config::get().number("layout.group_gap");
-        let stride = slot + gap;
-        let available = ((right - minimum + gap).max(0.) / stride) as usize;
-        let items: Vec<_> = self.tray_items.iter().take(available).cloned().collect();
-        let left = right - items.len() as f32 * stride + if items.is_empty() { 0. } else { gap };
-        for (index, item) in items.iter().enumerate() {
-            let rect = Rect::from_min_size(
-                pos2(left + index as f32 * stride, 0.),
-                vec2(slot, config::get().number("layout.bar_height")),
-            );
-            let response = ui.interact(
-                rect,
-                egui::Id::new(("tray", &item.id)),
-                egui::Sense::click(),
-            );
-            let opened = self
-                .panel
-                .as_ref()
-                .is_some_and(|p| p.kind == Menu::Tray(item.id.clone()) && p.closing.is_none());
-            let fill = config::get().color(
-                if response.hovered() || response.has_focus() || opened {
-                    "button_hover"
-                } else {
-                    "button"
-                },
-                self.dark,
-            );
-            let button = rect.shrink2(vec2(2., 3.));
-            ui.painter().rect_filled(
-                button,
-                3,
-                if response.is_pointer_button_down_on() {
-                    fill.gamma_multiply(0.9)
-                } else {
-                    fill
-                },
-            );
-            ui.painter().rect_stroke(
-                button,
-                3,
-                egui::Stroke::new(1_f32, config::get().color("separator", self.dark)),
-                egui::StrokeKind::Inside,
-            );
-            let separator = rect.right() + gap / 2.;
-            let half_height = config::get().number("layout.separator_height") / 2.;
-            ui.painter().line_segment(
-                [
-                    pos2(separator, rect.center().y - half_height),
-                    pos2(separator, rect.center().y + half_height),
-                ],
-                egui::Stroke::new(1_f32, config::get().color("separator", self.dark)),
-            );
-            let texture = if let Some(icon) = &item.icon {
-                let key = format!("tray-icon:{}", item.id);
-                self.textures
-                    .entry(key.clone())
-                    .or_insert_with(|| {
-                        self.ctx.load_texture(
-                            key,
-                            egui::ColorImage::from_rgba_unmultiplied(icon.size, &icon.rgba),
-                            egui::TextureOptions::LINEAR,
-                        )
-                    })
-                    .id()
+        tray: &tray_bar::Tray<BarTray>,
+        item: &crate::tray::Item,
+    ) {
+        let rect = tray.bounds;
+        let response = ui.interact(
+            rect,
+            egui::Id::new(("tray", &item.id)),
+            egui::Sense::click(),
+        );
+        let opened = self
+            .panel
+            .as_ref()
+            .is_some_and(|p| p.kind == Menu::Tray(item.id.clone()) && p.closing.is_none());
+        let fill = config::get().color(
+            if response.hovered() || response.has_focus() || opened {
+                "button_hover"
             } else {
-                self.icon(Icon::Apps)
-            };
-            let size = config::get().number("appearance.icon_size");
-            ui.painter().image(
-                texture,
-                Rect::from_center_size(rect.center(), vec2(size, size)),
-                Rect::from_min_max(Pos2::ZERO, pos2(1., 1.)),
-                Color32::WHITE,
-            );
+                "button"
+            },
+            self.dark,
+        );
+        tray.paint_background(ui.painter(), fill, response.is_pointer_button_down_on());
+        let texture = if let Some(icon) = &item.icon {
+            let key = format!("tray-icon:{}", item.id);
+            self.textures
+                .entry(key.clone())
+                .or_insert_with(|| {
+                    self.ctx.load_texture(
+                        key,
+                        egui::ColorImage::from_rgba_unmultiplied(icon.size, &icon.rgba),
+                        egui::TextureOptions::LINEAR,
+                    )
+                })
+                .id()
+        } else {
+            self.icon(Icon::Apps)
+        };
+        tray.layout.paint_icon(&tray.painter(ui.painter()), texture);
+        if item.menu.is_some() {
+            targets.push((rect, Menu::Tray(item.id.clone())));
+        }
+        if response.secondary_clicked() || (response.clicked() && item.menu_only) {
             if item.menu.is_some() {
-                targets.push((rect, Menu::Tray(item.id.clone())));
-            }
-            if response.secondary_clicked() || (response.clicked() && item.menu_only) {
-                if item.menu.is_some() {
-                    self.open(Menu::Tray(item.id.clone()), rect.center().x, true);
-                } else {
-                    self.finish_close();
-                    let _ = self.services.tray.send(crate::tray::Request::Activate(
-                        item.id.clone(),
-                        "ContextMenu",
-                        rect.center().x as i32 + self.tray_origin.0,
-                        rect.center().y as i32 + self.tray_origin.1,
-                    ));
-                }
-            } else if response.clicked() || response.middle_clicked() {
+                self.open(Menu::Tray(item.id.clone()), rect.center().x, true);
+            } else {
                 self.finish_close();
-                self.blocked_hover = Some(Menu::Tray(item.id.clone()));
-                let method = if response.middle_clicked() {
-                    "SecondaryActivate"
-                } else {
-                    "Activate"
-                };
                 let _ = self.services.tray.send(crate::tray::Request::Activate(
                     item.id.clone(),
-                    method,
+                    "ContextMenu",
                     rect.center().x as i32 + self.tray_origin.0,
                     rect.center().y as i32 + self.tray_origin.1,
                 ));
             }
-            if response.hovered() {
-                let scroll = ui.input(|input| {
-                    input
-                        .raw
-                        .events
-                        .iter()
-                        .filter_map(|event| {
-                            if let egui::Event::MouseWheel { delta, .. } = event {
-                                Some(*delta)
-                            } else {
-                                None
-                            }
-                        })
-                        .fold(egui::Vec2::ZERO, |total, delta| total + delta)
-                });
-                let (delta, orientation) = if scroll.y != 0. {
-                    (scroll.y, "vertical")
-                } else {
-                    (scroll.x, "horizontal")
-                };
-                if delta != 0. {
-                    let _ = self.services.tray.send(crate::tray::Request::Scroll(
-                        item.id.clone(),
-                        delta as i32,
-                        orientation,
-                    ));
-                }
+        } else if response.clicked() || response.middle_clicked() {
+            self.finish_close();
+            self.blocked_hover = Some(Menu::Tray(item.id.clone()));
+            let method = if response.middle_clicked() {
+                "SecondaryActivate"
+            } else {
+                "Activate"
+            };
+            let _ = self.services.tray.send(crate::tray::Request::Activate(
+                item.id.clone(),
+                method,
+                rect.center().x as i32 + self.tray_origin.0,
+                rect.center().y as i32 + self.tray_origin.1,
+            ));
+        }
+        if response.hovered() {
+            let scroll = ui.input(|input| {
+                input
+                    .raw
+                    .events
+                    .iter()
+                    .filter_map(|event| {
+                        if let egui::Event::MouseWheel { delta, .. } = event {
+                            Some(*delta)
+                        } else {
+                            None
+                        }
+                    })
+                    .fold(egui::Vec2::ZERO, |total, delta| total + delta)
+            });
+            let (delta, orientation) = if scroll.y != 0. {
+                (scroll.y, "vertical")
+            } else {
+                (scroll.x, "horizontal")
+            };
+            if delta != 0. {
+                let _ = self.services.tray.send(crate::tray::Request::Scroll(
+                    item.id.clone(),
+                    delta as i32,
+                    orientation,
+                ));
             }
         }
-        left
     }
     fn tray_menu(&mut self, ui: &mut egui::Ui, id: &str) {
         let rows = self.tray_rows.clone();
@@ -1148,6 +1131,7 @@ impl Ui {
         let slot = config::get().number("layout.icon_slot_width");
         let cpu_width = config::get().number("layout.cpu_width");
         let sound_width = config::get().number("layout.sound_tray_width");
+        let network_width = config::get().number("layout.network_tray_width");
         let session_width = config::get().number("layout.session_width");
         let apps_width = config::get().number("layout.apps_width");
         let number_offset = config::get().number("layout.workspace_number_offset");
@@ -1173,55 +1157,62 @@ impl Ui {
         let button = |targets: &mut Vec<(Rect, Menu)>,
                       this: &mut Self,
                       ui: &mut egui::Ui,
-                      rect: Rect,
-                      icon: Icon,
-                      content: bar_button::Content,
-                      kind: Menu| {
-            let response = ui.interact(rect, egui::Id::new(("bar", &kind)), egui::Sense::click());
+                      tray: &tray_bar::Tray<BarTray>,
+                      icon: Icon| {
+            let BarTray::Menu(kind) = &tray.id else {
+                unreachable!()
+            };
+            let rect = tray.bounds;
+            let response = ui.interact(rect, egui::Id::new(("bar", kind)), egui::Sense::click());
             if response.hovered() {
-                ui.painter().rect_filled(
-                    rect.shrink2(vec2(0., 2.)),
-                    config::get().number("layout.workspace_corner_radius") as u8,
+                tray.paint_background(
+                    ui.painter(),
                     config::get().color("hover", this.dark),
+                    response.is_pointer_button_down_on(),
                 );
             }
-            let layout = bar_button::Layout::new(
-                rect,
-                content,
-                slot,
-                config::get().number("appearance.icon_size"),
-            );
-            layout.paint_icon(ui.painter(), this.icon(icon));
+            tray.layout
+                .paint_icon(&tray.painter(ui.painter()), this.icon(icon));
             if response.clicked() {
                 this.open(kind.clone(), rect.center().x, true);
             }
-            targets.push((rect, kind));
-            layout
+            targets.push((rect, kind.clone()));
         };
-        button(
-            &mut targets,
-            self,
-            ui,
-            Rect::from_min_size(
-                pos2(margin, 0.),
-                vec2(session_width, config::get().number("layout.bar_height")),
-            ),
-            Icon::Logout,
-            bar_button::Content::Icon,
-            Menu::Session,
+        let new_bar = || {
+            tray_bar::Bar::new(
+                gap,
+                config::get().number("layout.bar_height"),
+                slot,
+                config::get().number("appearance.icon_size"),
+            )
+        };
+        let mut leading = new_bar();
+        leading.register(
+            BarTray::Menu(Menu::Session),
+            session_width,
+            tray_bar::Content::Icon,
         );
-        button(
-            &mut targets,
-            self,
-            ui,
-            Rect::from_min_size(
-                pos2(margin + session_width + gap, 0.),
-                vec2(apps_width, config::get().number("layout.bar_height")),
-            ),
-            Icon::Apps,
-            bar_button::Content::Icon,
-            Menu::Apps,
+        leading.register(
+            BarTray::Menu(Menu::Apps),
+            apps_width,
+            tray_bar::Content::Icon,
         );
+        let leading_right = margin + leading.width();
+        let leading = leading.right_aligned(leading_right);
+        tray_bar::separators(
+            ui.painter(),
+            &leading,
+            config::get().number("layout.separator_height"),
+            config::get().color("separator", self.dark),
+        );
+        for tray in &leading {
+            let icon = if matches!(tray.id, BarTray::Menu(Menu::Session)) {
+                Icon::Logout
+            } else {
+                Icon::Apps
+            };
+            button(&mut targets, self, ui, tray, icon);
+        }
         self.workspace_icon_fades.retain(|name, _| {
             self.state
                 .workspaces
@@ -1234,7 +1225,7 @@ impl Ui {
                 .iter()
                 .any(|workspace| workspace.name == *name)
         });
-        let mut x = margin + session_width + gap + apps_width + gap;
+        let mut x = leading_right + gap;
         for w in self.state.workspaces.clone() {
             let r = Rect::from_min_size(
                 pos2(x, 0.),
@@ -1395,198 +1386,125 @@ impl Ui {
             )
             .size()
             .x;
-        ui.painter().text(
-            pos2(width - margin, center_y),
-            egui::Align2::RIGHT_CENTER,
-            clock,
-            egui::FontId::proportional(config::get().number("appearance.font_size")),
-            ui.visuals().text_color(),
-        );
-        let right = width - margin - clock_width - gap;
+        self.traffic.update(&self.ctx);
         let battery_icon_extent = config::get().number("layout.battery_icon_width") + 3.;
-        let icon_padding = ((slot - config::get().number("appearance.icon_size")) / 2.).max(0.);
-        let battery_width = if self.state.battery.is_some() {
-            battery_icon_extent + 2. * icon_padding
-        } else {
-            0.
-        };
-        let battery_left = right - battery_width + icon_padding;
-        if let Some((percent, charging)) = self.state.battery {
-            let rect = Rect::from_min_size(
-                pos2(
-                    battery_left,
-                    center_y - config::get().number("layout.battery_icon_height") / 2.,
-                ),
-                vec2(
-                    config::get().number("layout.battery_icon_width"),
-                    config::get().number("layout.battery_icon_height"),
-                ),
-            );
-            paint_battery(ui, rect, if charging { 0 } else { percent });
-            if charging {
-                ui.painter().image(
-                    self.icon(Icon::Charging),
-                    rect.shrink(1.),
-                    Rect::from_min_max(Pos2::ZERO, pos2(1., 1.)),
-                    Color32::WHITE,
-                );
-            }
+        let mut trailing = new_bar();
+        trailing.register(
+            BarTray::Menu(Menu::Cpu),
+            cpu_width,
+            tray_bar::Content::IconAndPlot,
+        );
+        trailing.register(
+            BarTray::Menu(Menu::Sound),
+            sound_width,
+            tray_bar::Content::IconAndPlot,
+        );
+        trailing.register(
+            BarTray::Menu(Menu::Wifi),
+            network_width,
+            tray_bar::Content::IconAndPlot,
+        );
+        trailing.register(
+            BarTray::Menu(Menu::Bluetooth),
+            slot,
+            tray_bar::Content::Icon,
+        );
+        if self.state.battery.is_some() {
+            trailing.register_intrinsic(BarTray::Battery, battery_icon_extent);
         }
-        let wifi_x = right - battery_width - gap - slot;
-        button(
-            &mut targets,
-            self,
-            ui,
-            Rect::from_min_size(
-                pos2(wifi_x, 0.),
-                vec2(slot, config::get().number("layout.bar_height")),
-            ),
-            if self.state.ethernet {
-                Icon::Ethernet
-            } else {
-                Icon::Wifi(self.state.extras.wifi_signal)
-            },
-            bar_button::Content::Icon,
-            Menu::Wifi,
-        );
-        let bluetooth_x = wifi_x - slot - gap;
-        let sound_x = bluetooth_x - sound_width - gap;
-        let sound_layout = button(
-            &mut targets,
-            self,
-            ui,
-            Rect::from_min_size(
-                pos2(sound_x, 0.),
-                vec2(sound_width, config::get().number("layout.bar_height")),
-            ),
-            Icon::Volume(self.audio.active().is_some_and(|o| o.muted)),
-            bar_button::Content::IconAndPlot,
-            Menu::Sound,
-        );
-        if let Some((painter, spectrum)) = sound_layout.plot(ui.painter()) {
-            paint_equalizer(&painter, spectrum, &self.tray_meter.displayed);
-        }
-        button(
-            &mut targets,
-            self,
-            ui,
-            Rect::from_min_size(
-                pos2(bluetooth_x, 0.),
-                vec2(slot, config::get().number("layout.bar_height")),
-            ),
-            Icon::Bluetooth,
-            bar_button::Content::Icon,
-            Menu::Bluetooth,
-        );
-        let cpu_x = sound_x - cpu_width - gap;
-        let cpu_layout = button(
-            &mut targets,
-            self,
-            ui,
-            Rect::from_min_size(
-                pos2(cpu_x, 0.),
-                vec2(cpu_width, config::get().number("layout.bar_height")),
-            ),
-            Icon::Cpu,
-            bar_button::Content::IconAndPlot,
-            Menu::Cpu,
-        );
-        if let Some((painter, chart)) = cpu_layout.plot(ui.painter()) {
-            // Reveal the newest segment over one sampling interval, retaining
-            // an extra point so the left edge stays continuous as history rolls.
-            let phase = (self.cpu_sample_at.elapsed().as_secs_f32()
-                / config::get().duration("intervals.cpu_ms").as_secs_f32())
-            .clamp(0., 1.);
-            if phase < 1. && self.cpu_history.len() > 1 {
-                ui.ctx().request_repaint_after(
-                    cpu_plot::repaint_interval(
-                        chart.width(),
-                        ui.ctx().pixels_per_point(),
-                        config::get().duration("intervals.cpu_ms"),
-                    )
-                    .max(config::get().duration("animation.frame_ms")),
-                );
-            }
-            let color = ui.visuals().text_color();
-            painter.line_segment(
-                [chart.left_bottom(), chart.right_bottom()],
-                egui::Stroke::new(1_f32, color.gamma_multiply(0.2)),
-            );
-            let points: Vec<_> = self
-                .cpu_history
+        trailing.register_intrinsic(BarTray::Clock, clock_width);
+        let right = width - margin;
+        trailing.prepend_fitting(
+            self.tray_items
                 .iter()
-                .enumerate()
-                .map(|(i, percent)| {
-                    let usage = percent.clamp(0., 100.) / 100.;
-                    let point = pos2(
-                        chart.right()
-                            - ((self.cpu_history.len() - 1 - i) as f32 - 1. + phase)
-                                * chart.width()
-                                / 31.,
-                        chart.bottom() - usage * chart.height(),
+                .cloned()
+                .map(|item| (BarTray::App(item), slot, tray_bar::Content::Icon)),
+            right - (x + 68.),
+        );
+        let trays = trailing.right_aligned(right);
+        let tray_left = trays.first().map_or(right, |tray| tray.bounds.left());
+        tray_bar::separators(
+            ui.painter(),
+            &trays,
+            config::get().number("layout.separator_height"),
+            config::get().color("separator", self.dark),
+        );
+        for tray in &trays {
+            match &tray.id {
+                BarTray::App(item) => self.paint_tray_item(ui, &mut targets, tray, item),
+                BarTray::Clock => {
+                    tray.painter(ui.painter()).text(
+                        tray.content.center(),
+                        egui::Align2::CENTER_CENTER,
+                        &clock,
+                        egui::FontId::proportional(config::get().number("appearance.font_size")),
+                        ui.visuals().text_color(),
                     );
-                    (point, usage)
-                })
-                .collect();
-            // Sample the hue ramp at physical-pixel intervals so GPU RGB
-            // interpolation cannot desaturate a long green-to-red segment.
-            let mut colored_points = Vec::new();
-            for pair in points.windows(2) {
-                let steps = ((pair[1].0.x - pair[0].0.x).abs() * painter.ctx().pixels_per_point())
-                    .ceil()
-                    .max(1.) as usize;
-                for step in 0..steps {
-                    let t = step as f32 / steps as f32;
-                    colored_points.push((
-                        pair[0].0 + (pair[1].0 - pair[0].0) * t,
-                        cpu_plot_color(pair[0].1 + (pair[1].1 - pair[0].1) * t),
-                    ));
+                }
+                BarTray::Battery => {
+                    if let Some((percent, charging)) = self.state.battery {
+                        let rect = Rect::from_min_size(
+                            pos2(
+                                tray.bounds.center().x - battery_icon_extent / 2.,
+                                center_y - config::get().number("layout.battery_icon_height") / 2.,
+                            ),
+                            vec2(
+                                config::get().number("layout.battery_icon_width"),
+                                config::get().number("layout.battery_icon_height"),
+                            ),
+                        );
+                        let mut content =
+                            ui.new_child(egui::UiBuilder::new().max_rect(tray.content));
+                        content.set_clip_rect(tray.content);
+                        paint_battery(&content, rect, if charging { 0 } else { percent });
+                        if charging {
+                            tray.painter(ui.painter()).image(
+                                self.icon(Icon::Charging),
+                                rect.shrink(1.),
+                                Rect::from_min_max(Pos2::ZERO, pos2(1., 1.)),
+                                Color32::WHITE,
+                            );
+                        }
+                    }
+                }
+                BarTray::Menu(kind) => {
+                    let icon = match kind {
+                        Menu::Cpu => Icon::Cpu,
+                        Menu::Sound => Icon::Volume(self.audio.active().is_some_and(|o| o.muted)),
+                        Menu::Wifi if self.state.ethernet => Icon::Ethernet,
+                        Menu::Wifi => Icon::Wifi(self.state.extras.wifi_signal),
+                        Menu::Bluetooth => Icon::Bluetooth,
+                        _ => unreachable!(),
+                    };
+                    button(&mut targets, self, ui, tray, icon);
+                    match kind {
+                        Menu::Sound => {
+                            if let Some((painter, bounds)) = tray.layout.plot(ui.painter()) {
+                                paint_equalizer(&painter, bounds, &self.tray_meter.displayed);
+                            }
+                        }
+                        Menu::Wifi => {
+                            if let Some((painter, bounds)) = tray.layout.plot(ui.painter()) {
+                                self.traffic.paint(&painter, bounds);
+                            }
+                        }
+                        Menu::Cpu => {
+                            if let Some((painter, chart)) = tray.layout.plot(ui.painter()) {
+                                cpu_plot::paint(
+                                    &painter,
+                                    chart,
+                                    &self.cpu_history,
+                                    self.cpu_sample_at,
+                                    config::get().duration("intervals.cpu_ms"),
+                                    config::get().duration("animation.frame_ms"),
+                                );
+                            }
+                        }
+                        _ => {}
+                    }
                 }
             }
-            if let Some((point, usage)) = points.last() {
-                colored_points.push((*point, cpu_plot_color(*usage)));
-            }
-            let points = colored_points;
-            if points.len() > 1 {
-                painter.add(egui::Shape::mesh(cpu_plot::fill(
-                    &points,
-                    chart.bottom(),
-                    painter.ctx().pixels_per_point(),
-                )));
-                for pair in points.windows(2) {
-                    painter
-                        .line_segment([pair[0].0, pair[1].0], egui::Stroke::new(1_f32, pair[1].1));
-                }
-            } else if let Some((point, color)) = points.first() {
-                painter.line_segment(
-                    [*point, pos2(point.x, chart.bottom())],
-                    egui::Stroke::new(1_f32, color.gamma_multiply(0.55)),
-                );
-                painter.circle_filled(*point, 1., *color);
-            }
         }
-        for separator in [
-            cpu_x + cpu_width + gap / 2.,
-            bluetooth_x + slot + gap / 2.,
-            sound_x + sound_width + gap / 2.,
-            wifi_x + slot + gap / 2.,
-            right + gap / 2.,
-        ] {
-            ui.painter().line_segment(
-                [
-                    pos2(
-                        separator,
-                        center_y - config::get().number("layout.separator_height") / 2.,
-                    ),
-                    pos2(
-                        separator,
-                        center_y + config::get().number("layout.separator_height") / 2.,
-                    ),
-                ],
-                egui::Stroke::new(1_f32, config::get().color("separator", self.dark)),
-            );
-        }
-        let tray_left = self.paint_tray(ui, &mut targets, cpu_x - gap, x + 68., slot);
         let title_bounds = Rect::from_min_max(
             pos2(x + 8., 0.),
             pos2(tray_left, config::get().number("layout.bar_height")),
@@ -1887,24 +1805,30 @@ impl Ui {
                                 self.connection_drawer(ui, &kind, max_height, now);
                                 return;
                             }
-                            egui::ScrollArea::vertical()
-                                .min_scrolled_height(min_height.min(content_max_height))
-                                .max_height(content_max_height)
-                                .show(ui, |ui| {
-                                    match kind {
-                                        Menu::Sound => self.sound(ui),
-                                        Menu::Apps => self.launcher(ui),
-                                        Menu::Wifi => self.wifi(ui),
-                                        Menu::Bluetooth => self.bluetooth(ui),
-                                        Menu::Session => self.session(ui),
-                                        Menu::Cpu => self.processes(ui),
-                                        Menu::Workspace(_) => self.workspace(ui),
-                                        Menu::Tray(ref id) => self.tray_menu(ui, id),
-                                    }
-                                    if !self.error.is_empty() {
-                                        ui.add(egui::Label::new(&self.error).wrap());
-                                    }
-                                });
+                            let workspace = matches!(kind, Menu::Workspace(_));
+                            let mut content = |ui: &mut egui::Ui| {
+                                match kind {
+                                    Menu::Sound => self.sound(ui),
+                                    Menu::Apps => self.launcher(ui),
+                                    Menu::Wifi => self.wifi(ui),
+                                    Menu::Bluetooth => self.bluetooth(ui),
+                                    Menu::Session => self.session(ui),
+                                    Menu::Cpu => self.processes(ui),
+                                    Menu::Workspace(_) => self.workspace(ui),
+                                    Menu::Tray(ref id) => self.tray_menu(ui, id),
+                                }
+                                if !self.error.is_empty() {
+                                    ui.add(egui::Label::new(&self.error).wrap());
+                                }
+                            };
+                            if workspace {
+                                content(ui);
+                            } else {
+                                egui::ScrollArea::vertical()
+                                    .min_scrolled_height(min_height.min(content_max_height))
+                                    .max_height(content_max_height)
+                                    .show(ui, content);
+                            }
                         });
                 });
         self.panel_rect = shown.response.rect;
@@ -2001,11 +1925,28 @@ fn paint_row_name(ui: &egui::Ui, rect: Rect, name: &str, reserved: f32) {
         color,
     );
 }
+fn acknowledge_radio(pending: &mut Option<(bool, Instant)>, actual: bool) {
+    if pending.is_some_and(|(desired, _)| desired == actual) {
+        *pending = None;
+    }
+}
+fn radio_value(pending: &mut Option<(bool, Instant)>, actual: bool, ctx: &egui::Context) -> bool {
+    if let Some((desired, since)) = *pending {
+        let remaining = Duration::from_secs(3).saturating_sub(since.elapsed());
+        if remaining.is_zero() {
+            *pending = None;
+        } else {
+            ctx.request_repaint_after(remaining);
+            return desired;
+        }
+    }
+    actual
+}
 fn radio_header(ui: &mut egui::Ui, enabled: &mut bool, label: &str) -> egui::Response {
     ui.horizontal(|ui| {
         ui.label(label);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            toggle(ui, enabled, "")
+            ui.push_id(label, |ui| toggle(ui, enabled, "")).inner
         })
         .inner
     })
@@ -2347,8 +2288,13 @@ impl Ui {
             }
             return;
         }
-        let mut enabled = self.network.as_ref().is_none_or(|s| s.enabled);
+        let mut enabled = radio_value(
+            &mut self.wifi_radio,
+            self.network.as_ref().is_none_or(|s| s.enabled),
+            &self.ctx,
+        );
         if radio_header(ui, &mut enabled, "Wi-Fi").changed() {
+            self.wifi_radio = Some((enabled, Instant::now()));
             self.services.network(self.serial, Job::Radio(enabled));
         }
         if let Some(snapshot) = self.network.clone() {
@@ -2457,14 +2403,15 @@ impl Ui {
             ui.weak("No Bluetooth adapter");
             return;
         }
-        let mut enabled = s.enabled();
+        let mut enabled = radio_value(&mut self.bluetooth_radio, s.enabled(), &self.ctx);
         if s.prompt.is_none() && radio_header(ui, &mut enabled, "Bluetooth").changed() {
+            self.bluetooth_radio = Some((enabled, Instant::now()));
             let _ = self
                 .services
                 .bluetooth
                 .send(bluetooth::Request::Radio(enabled));
         }
-        if !s.enabled() {
+        if !enabled {
             ui.weak("Bluetooth is off");
             return;
         }
@@ -2762,15 +2709,23 @@ impl Ui {
             }
         }
         ui.add_space(6.);
-        if self.audio.streams.is_empty() {
+        if self.source_rows.0.is_empty() {
             ui.weak("No app audio");
         }
-        let players = audio_sources::player_rows(&self.audio.streams, &self.state.extras.tracks)
+        let streams: Vec<_> = self
+            .source_rows
+            .0
+            .iter()
+            .map(|row| row.stream.clone())
+            .collect();
+        let players = audio_sources::player_rows(&streams, &self.state.extras.tracks)
             .into_iter()
             .map(|(index, track)| (index, track.clone()))
             .collect::<HashMap<_, _>>();
-        for stream in self.audio.streams.clone() {
-            ui.push_id(stream.index, |ui| {
+        for source in self.source_rows.0.clone() {
+            let live = source.live();
+            let stream = source.stream;
+            ui.push_id(source.key, |ui| {
                 let track = players.get(&stream.index).cloned();
                 let (row, _) = ui.allocate_exact_size(
                     vec2(
@@ -2873,7 +2828,13 @@ impl Ui {
                         }
                     });
                     let mut value = stream.percent as f32;
-                    if volume_slider(ui, &mut value, ui.available_width(), 150.).changed() {
+                    if ui
+                        .add_enabled_ui(live, |ui| {
+                            volume_slider(ui, &mut value, ui.available_width(), 150.)
+                        })
+                        .inner
+                        .changed()
+                    {
                         self.control(volume::Control::StreamVolume(
                             stream.index,
                             value.round() as u8,
@@ -2896,7 +2857,7 @@ impl Ui {
                         let (meter, _) =
                             ui.allocate_exact_size(vec2(28., 20.), egui::Sense::hover());
                         paint_equalizer(ui.painter(), meter, &levels);
-                        if self.icon_button(ui, Icon::Volume(stream.muted), true) {
+                        if self.icon_button(ui, Icon::Volume(stream.muted), live) {
                             self.control(volume::Control::StreamMute(stream.index));
                         }
                     },
@@ -3311,4 +3272,37 @@ fn tray_menu_rows(ui: &mut egui::Ui, rows: &[crate::tray::MenuRow]) -> Option<i3
         }
     }
     clicked
+}
+
+#[cfg(test)]
+mod radio_tests {
+    use super::*;
+
+    #[test]
+    fn requested_radio_value_survives_stale_snapshots_until_acknowledged() {
+        let ctx = egui::Context::default();
+        for desired in [false, true] {
+            let mut pending = Some((desired, Instant::now()));
+            for _ in 0..8 {
+                assert_eq!(radio_value(&mut pending, !desired, &ctx), desired);
+                assert!(pending.is_some());
+            }
+            // A stale snapshot matching the requested value is not an operation acknowledgement.
+            assert_eq!(radio_value(&mut pending, desired, &ctx), desired);
+            assert!(pending.is_some());
+            acknowledge_radio(&mut pending, !desired);
+            assert!(pending.is_some());
+            acknowledge_radio(&mut pending, desired);
+            assert!(pending.is_none());
+            assert_eq!(radio_value(&mut pending, !desired, &ctx), !desired);
+        }
+    }
+
+    #[test]
+    fn unacknowledged_radio_request_returns_to_actual_state() {
+        let ctx = egui::Context::default();
+        let mut pending = Some((false, Instant::now() - Duration::from_secs(4)));
+        assert!(radio_value(&mut pending, true, &ctx));
+        assert!(pending.is_none());
+    }
 }

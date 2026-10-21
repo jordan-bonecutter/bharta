@@ -179,6 +179,8 @@ clicking again closes it until the pointer leaves that control.
   stops when the preview closes.
 - Sound: beside CPU, a live seven-band output spectrum uses the CPU plot's
   green-to-red colors. `layout.sound_tray_width` sets its width (60px by default).
+  The tray bar owns every tray’s 4px content margin, gaps, separators, and clipping.
+  Network traffic uses an independent `layout.network_tray_width` (60px by default).
   The drawer has individual app streams, per-stream volume/mute, source-specific
   frequency meters, MPRIS playback controls and artwork, output/port selection,
   master volume/mute, and expandable channels. Audio sliders use compact neutral

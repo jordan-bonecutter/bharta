@@ -137,6 +137,7 @@ with tempfile.TemporaryDirectory(prefix='bharta-headless-') as directory:
         env['BHARTA_TEST_BLUETOOTH_LOG'] = str(DEST / 'bluetooth-discovery.txt')
         (DEST / 'bluetooth-discovery.txt').write_text('')
         (DEST / 'bluetooth-discovery.txt.actions').write_text('')
+        (DEST / 'bluetooth-discovery.txt.mode').write_text('')
         audio_fixture = start([str(ROOT / 'target/release/examples/headless_audio')], 'audio.log')
         services_fixture = start([str(ROOT / 'target/release/examples/headless_services')], 'services.log')
         bluetooth_fixture = start([str(ROOT / 'target/release/examples/headless_bluetooth')], 'bluetooth.log')
@@ -276,10 +277,11 @@ with tempfile.TemporaryDirectory(prefix='bharta-headless-') as directory:
                           if min(bar_pixels.getpixel((x,14)))>100)
         layout=default_settings['layout']
         slot=layout['icon_slot_width'];gap=layout['group_gap']
-        battery_padding=max(0,(slot-default_settings['appearance']['icon_size'])/2)
-        wifi_x=round(battery_left-battery_padding-gap-slot/2)
-        bluetooth_x=wifi_x-slot-gap
-        sound_x=round(bluetooth_x-slot/2-gap-layout['sound_tray_width']/2)
+        battery_padding=4
+        bluetooth_x=round(battery_left-battery_padding-gap-slot/2)
+        network_left=bluetooth_x-slot/2-gap-layout['network_tray_width']
+        wifi_x=round(network_left+layout['network_tray_width']/2)
+        sound_x=round(network_left-gap-layout['sound_tray_width']/2)
         popup_left=max(8,min(sound_x-168,1600-344))
         cpu_x=round(sound_x-layout['sound_tray_width']/2-gap-layout['cpu_width']/2)
         if '--regressions-only' in sys.argv[2:]:
@@ -337,11 +339,19 @@ with tempfile.TemporaryDirectory(prefix='bharta-headless-') as directory:
             shot('equalizer')
             pixels=Image.open(DEST/'equalizer.png').convert('RGB')
             layout=default_settings['layout']
-            meter_width=6*layout['meter_bar_gap']+layout['meter_bar_width']
+            meter_width=28
             drawer_left=next(x for x in range(1000,1600) if pixels.getpixel((x,50)) != (0,0,0))
             control_right=drawer_left+layout['sound_width']-layout['popup_padding']
-            meter_left=control_right-layout['meter_offset']
-            for center,band in [(134,3),(198,4)]:
+            meter_left=control_right-meter_width
+            art_bounds=[]
+            for color in [(220,105,40),(40,180,90)]:
+                artwork=[(x,y) for y in range(100,350) for x in range(drawer_left+12,drawer_left+95) if pixels.getpixel((x,y))==color]
+                assert artwork, f'Source artwork missing: {color}'
+                xs,ys=zip(*artwork)
+                art_bounds.append((min(xs),min(ys),max(xs),max(ys)))
+            assert art_bounds[0][0]==art_bounds[1][0] and art_bounds[0][2]==art_bounds[1][2], 'Source images do not align'
+            for art,band in zip(art_bounds,[3,4]):
+                center=round((art[1]+art[3]+1)/2-2)
                 heights=[]
                 for i in range(7):
                     x=int(meter_left+(i+.5)*meter_width/7)
@@ -349,8 +359,6 @@ with tempfile.TemporaryDirectory(prefix='bharta-headless-') as directory:
                         if max(pixels.getpixel((x,y)))-min(pixels.getpixel((x,y)))>70]
                     heights.append(max(ys)-min(ys) if ys else 0)
                 assert heights[band]>=10 and max(heights[:band]+heights[band+1:])<=5, f'Stream spectrum mismatch: {heights}'
-            for color in [(220,105,40),(40,180,90)]:
-                assert any(pixels.getpixel((x,y))==color for y in range(100,230) for x in range(drawer_left+12,drawer_left+45)), f'Source artwork missing: {color}'
             print('Isolated stream spectra and both source artworks passed:', DEST)
             sys.exit(0)
         if '--network-only' in sys.argv[2:]:
@@ -628,11 +636,11 @@ with tempfile.TemporaryDirectory(prefix='bharta-headless-') as directory:
                         probe(left+100,center+offset,'--hover',350).wait()
                         shot(prefix+'-hover')
                         im=Image.open(DEST/(prefix+'-hover.png')).convert('RGB')
-                        colors=[im.getpixel((int(left)+285,int(y))) for y in centers]
+                        colors=[im.getpixel((int(left)+235,int(y))) for y in centers]
                         assert len(set(colors))==1, ("Unexpected row highlight",prefix,row,offset,colors)
                 probe(left+100,centers[0]+21,'--hover',350).wait();shot(prefix+'-gap')
                 im=Image.open(DEST/(prefix+'-gap.png')).convert('RGB')
-                assert im.getpixel((int(left)+285,int(centers[0])))==im.getpixel((int(left)+285,int(centers[1]))), 'Highlight stuck in a row gap'
+                assert im.getpixel((int(left)+235,int(centers[0])))==im.getpixel((int(left)+235,int(centers[1]))), 'Highlight stuck in a row gap'
             assert_wireless_no_highlight(bt_left,[104,145,186],'bluetooth')
             # Bottom-row tooltips must remain visible below the popup surface.
             def assert_bottom_tooltip(left, bottom_row, prefix, outside_popup=True):
@@ -652,9 +660,8 @@ with tempfile.TemporaryDirectory(prefix='bharta-headless-') as directory:
             # The hidden-network action now follows the last network row.
             assert_bottom_tooltip(wifi_left,216,'wifi',outside_popup=False)
             probe(wifi_left+100,175,'--click-hold',500).wait()
-            assert json.loads(wifi_state.read_text())['active']=='Home', 'Clicking the name connected Wi-Fi'
+            assert json.loads(wifi_state.read_text())['active']=='Cafe', 'Clicking the network name did not connect Wi-Fi'
             assert any(a.get('action')=='scan' for a in map(json.loads,wifi_log.read_text().splitlines())), 'Wi-Fi did not scan on opening'
-            probe(wifi_left+26,175,'--click-hold',1200).wait()
             assert json.loads(wifi_state.read_text())['active']=='Cafe', 'Open Wi-Fi did not connect directly'
             probe(wifi_left+26,216,'--click-hold',1200).wait();shot('wifi-password')
             probe(700,700,'--click-hold',900).wait();shot('wifi-outside-dismissed')
@@ -711,7 +718,8 @@ with tempfile.TemporaryDirectory(prefix='bharta-headless-') as directory:
             probe(wifi_x,14,'--hover',1200).wait();shot('wifi-long-list')
             before = Image.open(DEST/'wifi-long-list.png').convert('RGB')
             bottom=max(y for y in range(28,700) if before.getpixel((int(wifi_left)+5,y))!=(0,0,0))
-            assert bottom < 380, 'Wi-Fi network list grew past its height limit'
+            # Radio header, pinned connected row, and footer sit outside the scrolling list.
+            assert bottom < layout['wifi_list_max_height']+200, 'Wi-Fi network list grew past its height limit'
             probe(wifi_left+100,180,'--scroll',800).wait();shot('wifi-list-scrolled')
             after = Image.open(DEST/'wifi-list-scrolled.png').convert('RGB')
             list_crop=tuple(map(int,(wifi_left+12,70,wifi_left+270,300)))
@@ -772,17 +780,9 @@ with tempfile.TemporaryDirectory(prefix='bharta-headless-') as directory:
         assert 0 < final[0] <= during[0] < 32768, 'Final slider position was lost'
         time.sleep(.3)
         assert json.loads(state.read_text())==final, 'Volume changed after commands settled'
-        # All destinations are visible without scrolling, with a reserved
-        # selection column. Clicking a port on another sink also moves playback.
-        marker_x=int(popup_left)+20
-        marker_ys=[y for y in range(280,600)
-                   if min(pixels.getpixel((marker_x,y)))>100
-                   and max(pixels.getpixel((marker_x-5,y)))<100
-                   and max(pixels.getpixel((marker_x+5,y)))<100]
-        assert marker_ys, 'Output table selection marker missing or clipped'
-        speaker_y=min(marker_ys)+2
+        # Keep the drawer open without holding a slider so subscription updates apply.
         reopen=probe(sound_x,14,'--hover',800);reopen.wait()
-        keeper=probe(marker_x+60,speaker_y,'--hover',2500)
+        keeper=probe(int(popup_left)+80,56,'--hover',2500)
         time.sleep(.2);shot('external-volume-before')
         state.write_text('[61440, 61440]')
         time.sleep(.6);shot('external-volume-after')
@@ -791,12 +791,11 @@ with tempfile.TemporaryDirectory(prefix='bharta-headless-') as directory:
         slider_rect=(int(popup_left)+12,slider_y-7,int(popup_left)+324,slider_y+8)
         assert ImageChops.difference(before,after).crop(slider_rect).getbbox(), 'External volume change waited for polling'
         state.write_text(json.dumps(final));keeper.wait()
-        for offset,sink,port in [(29,'test','headphones'),(58,'hdmi','hdmi'),(0,'test','speaker')]:
-            ready=runtime/'output-ready'
-            ready.unlink(missing_ok=True)
-            click=probe(sound_x,14,'--hover-click',marker_x+60,speaker_y+offset,ready)
-            time.sleep(.7);ready.write_text('ready')
-            click.wait()
+        # The current output chooser lists the three fixture ports in a dropdown.
+        for index,sink,port in [(1,'test','headphones'),(2,'hdmi','hdmi'),(0,'test','speaker')]:
+            probe(sound_x,14,'--hover',800).wait()
+            probe(int(popup_left)+100,56,'--click-hold',250).wait();shot('output-choices')
+            probe(int(popup_left)+100,93+35*index,'--click-hold',250).wait()
             deadline=time.monotonic()+2
             while time.monotonic()<deadline:
                 selected=json.loads(routing.read_text())
@@ -805,7 +804,7 @@ with tempfile.TemporaryDirectory(prefix='bharta-headless-') as directory:
             assert selected['default']==sink and selected[sink]==port, f'Destination did not switch: {selected}'
             while time.monotonic()<deadline and ['11',sink] not in json.loads(moves.read_text()):time.sleep(.05)
             assert ['11',sink] in json.loads(moves.read_text()), 'Existing playback did not follow the output'
-        reopen=probe(sound_x,14,'--hover',800);time.sleep(.6);shot('output-table');reopen.wait()
+        reopen=probe(sound_x,14,'--hover',800);time.sleep(.6);shot('output-chooser');reopen.wait()
         hover=probe(1580,14,'--hover',4000)
         time.sleep(3)
         shot('bar-hover')

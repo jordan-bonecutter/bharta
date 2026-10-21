@@ -18,6 +18,7 @@
     "icon_slot_width": 32,
     "cpu_width": 60,
     "sound_tray_width": 60,
+    "network_tray_width": 60,
     "workspace_width": 65,
     "workspace_gap": 8,
     "popup_padding": 12,

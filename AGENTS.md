@@ -38,6 +38,13 @@ changes. Socket-based unit tests need local IPC access.
 
 ## UI direction
 
+Never make unprompted UI changes. Change appearance or interaction only within
+the scope explicitly requested by the user. Bug fixes and refactors must preserve
+the existing colors, dimensions, spacing, typography, animations, plots, and
+behavior except where the requested change requires otherwise. Do not bundle
+visual redesigns or aesthetic improvements into other work. If a UI change would
+be useful but was not requested, propose it without implementing it.
+
 Preserve the original compact, macOS-inspired bar: 28px height, centered app
 name, understated neutral palette, small monochrome icons, and flat menu rows.
 egui supplies widgets and interaction; preserve the existing visual style.
